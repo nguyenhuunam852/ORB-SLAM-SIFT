@@ -479,12 +479,30 @@ vector<KeyFrame*> KeyFrameDatabase::DetectRelocalizationCandidates(Frame *F, Map
             bestAccScore = accScore;
     }
 
+    // Capped at kMaxRelocCandidates (sorted by score, best first) -- unlike
+    // DBoW2's word-sharing prefilter, VLAD's brute-force scoring above has
+    // no built-in bound on how many keyframes can score above
+    // minScoreToRetain, and each candidate returned here triggers an
+    // expensive brute-force ORBmatcher::SearchByBoW() call in
+    // Tracking::Relocalization() (called every frame while tracking is
+    // lost). Confirmed as a real, not just theoretical, cost: an
+    // uncapped run stalled for 20+ minutes with no progress once tracking
+    // got stuck in a relocalization loop against a large keyframe database
+    // -- see DEBUGGING.md's ORB->SIFT swap session. DetectNBestCandidates()
+    // (the loop-closing path) already had an equivalent cap via its
+    // nNumCandidates parameter; this one didn't.
+    constexpr int kMaxRelocCandidates = 20;
+    lAccScoreAndMatch.sort(compFirst);
+
     float minScoreToRetain = 0.75f*bestAccScore;
     set<KeyFrame*> spAlreadyAddedKF;
     vector<KeyFrame*> vpRelocCandidates;
-    vpRelocCandidates.reserve(lAccScoreAndMatch.size());
+    vpRelocCandidates.reserve(std::min<size_t>(lAccScoreAndMatch.size(), kMaxRelocCandidates));
     for(list<pair<float,KeyFrame*> >::iterator it=lAccScoreAndMatch.begin(), itend=lAccScoreAndMatch.end(); it!=itend; it++)
     {
+        if(static_cast<int>(vpRelocCandidates.size()) >= kMaxRelocCandidates)
+            break;
+
         if(it->first>minScoreToRetain)
         {
             KeyFrame* pKFi = it->second;
