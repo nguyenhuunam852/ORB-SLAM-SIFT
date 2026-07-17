@@ -814,6 +814,12 @@ namespace ORB_SLAM3
             int bestIdx2 =-1 ;
             float bestDist2 = std::numeric_limits<float>::max();
 
+            // Vectorized -- see the other SearchByBoW overload's identical
+            // change and its doc comment.
+            cv::Mat distRow;
+            cv::batchDistance(d1, Descriptors2, distRow, CV_32F, cv::noArray(), cv::NORM_L2SQR);
+            const float *distPtr = distRow.ptr<float>();
+
             for(size_t idx2=0, iend2=vpMapPoints2.size(); idx2<iend2; idx2++)
             {
                 if(pKF2 -> NLeft != -1 && idx2 >= pKF2 -> mvKeysUn.size()){
@@ -828,9 +834,7 @@ namespace ORB_SLAM3
                 if(pMP2->isBad())
                     continue;
 
-                const cv::Mat &d2 = Descriptors2.row(idx2);
-
-                float dist = DescriptorDistance(d1,d2);
+                const float dist = distPtr[idx2];
 
                 if(dist<bestDist1)
                 {
@@ -977,6 +981,19 @@ namespace ORB_SLAM3
                     float bestDist = TH_LOW;
                     int bestIdx2 = -1;
 
+                    // Vectorized: one cv::batchDistance call computes all
+                    // pKF2->N squared-L2 distances from this single
+                    // pKF1 descriptor at once, instead of a per-pair
+                    // DescriptorDistance() call inside the loop below --
+                    // same reasoning as SearchByBoW's identical change,
+                    // see its own doc comment (this function runs on
+                    // every keyframe insertion, not just relocalization,
+                    // and was confirmed to also contribute to the same
+                    // class of stall).
+                    cv::Mat distRow;
+                    cv::batchDistance(d1, pKF2->mDescriptors, distRow, CV_32F, cv::noArray(), cv::NORM_L2SQR);
+                    const float *distPtr = distRow.ptr<float>();
+
                     for(size_t idx2=0, iend2=static_cast<size_t>(pKF2->N); idx2<iend2; idx2++)
                     {
                         MapPoint* pMP2 = pKF2->GetMapPoint(idx2);
@@ -991,9 +1008,7 @@ namespace ORB_SLAM3
                             if(!bStereo2)
                                 continue;
 
-                        const cv::Mat &d2 = pKF2->mDescriptors.row(idx2);
-
-                        const float dist = DescriptorDistance(d1,d2);
+                        const float dist = distPtr[idx2];
 
                         if(dist>TH_LOW || dist>bestDist)
                             continue;
