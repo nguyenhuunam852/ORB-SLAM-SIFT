@@ -85,7 +85,7 @@ public:
 protected:
 
     void ComputePyramid(cv::Mat image);
-    void ComputeKeyPointsOctTree(std::vector<std::vector<cv::KeyPoint> >& allKeypoints);
+    void ComputeKeyPointsOctTree(std::vector<std::vector<cv::KeyPoint> >& allKeypoints);    
     std::vector<cv::KeyPoint> DistributeOctTree(const std::vector<cv::KeyPoint>& vToDistributeKeys, const int &minX,
                                            const int &maxX, const int &minY, const int &maxY, const int &nFeatures, const int &level);
 
@@ -94,18 +94,9 @@ protected:
 
     int nfeatures;
     double scaleFactor;
-    int nlevels; // now the FLAT scale-array size (kMaxOctaveSpan * nOctaveLayers), matching every
-                 // consumer's "nlevels = valid mvScaleFactor/mvLevelSigma2 array length" assumption --
-                 // see the SIFT reimplementation's doc comment in ORBextractor.cc
+    int nlevels;
     int iniThFAST;
     int minThFAST;
-
-    // SIFT reimplementation (see ORBextractor.cc's constructor/operator() doc
-    // comments): the constructor's own _nlevels parameter is reinterpreted as
-    // nOctaveLayers (SIFT's own per-octave sub-layer count) instead of a
-    // pyramid level count.
-    int nOctaveLayers;
-    cv::Ptr<cv::SIFT> mSift;
 
     std::vector<int> mnFeaturesPerLevel;
 
