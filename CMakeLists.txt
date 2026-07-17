@@ -255,6 +255,14 @@ add_executable(orbslam3_sift_kitti_ate analyze/orbslam3_kitti_ate.cpp)
 target_include_directories(orbslam3_sift_kitti_ate PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(orbslam3_sift_kitti_ate PRIVATE orbslam3_sift_ext)
 
+# VLAD codebook trainer (see analyze/orbslam3_vlad_train.cpp) -- linked
+# against orbslam3_sift_ext (not orbslam3_ext) so the training-time
+# ORBextractor/VladVocabulary are the exact same compiled code the runtime
+# SIFT-based System uses.
+add_executable(orbslam3_vlad_train analyze/orbslam3_vlad_train.cpp)
+target_include_directories(orbslam3_vlad_train PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(orbslam3_vlad_train PRIVATE orbslam3_sift_ext)
+
 set(SOURCES
     src/main.cpp
     src/MainWindow.cpp
