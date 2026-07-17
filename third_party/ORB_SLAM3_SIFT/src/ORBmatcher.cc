@@ -258,6 +258,23 @@ namespace ORB_SLAM3
             rotHist[i].reserve(500);
         const float factor = 1.0f/HISTO_LENGTH;
 
+        // Vectorized: ONE cv::batchDistance call computes the full
+        // pKF->mDescriptors x F.mDescriptors squared-L2 distance matrix up
+        // front (monocular path only), instead of either a per-pair
+        // scalar loop or -- the mistake in an earlier version of this fix
+        // -- one batchDistance call PER KeyFrame descriptor (up to ~1000-
+        // 1500 small calls per candidate keyframe, each with its own
+        // allocation/dispatch overhead; with up to kMaxRelocCandidates=20
+        // candidates tried on every single frame while tracking is lost,
+        // this was confirmed live to still cause multi-minute stalls
+        // despite each individual small call being "vectorized" -- see
+        // DEBUGGING.md's ORB->SIFT swap session). One matrix-vs-matrix
+        // call amortizes that per-call overhead across the whole
+        // comparison instead of paying it once per row.
+        cv::Mat distMatrix;
+        if(F.Nleft == -1)
+            cv::batchDistance(pKF->mDescriptors, F.mDescriptors, distMatrix, CV_32F, cv::noArray(), cv::NORM_L2SQR);
+
         for(size_t realIdxKF=0; realIdxKF<vpMapPointsKF.size(); realIdxKF++)
         {
             MapPoint* pMP = vpMapPointsKF[realIdxKF];
@@ -279,20 +296,7 @@ namespace ORB_SLAM3
             float bestDist2R = std::numeric_limits<float>::max();
 
             if(F.Nleft == -1){
-                // Vectorized: one cv::batchDistance call computes all F.N
-                // squared-L2 distances from this single KF descriptor at
-                // once (OpenCV's SIMD-optimized internals), instead of
-                // F.N individual scalar DescriptorDistance() calls in a
-                // hand-rolled loop. Confirmed via a live run that the
-                // naive version was the real bottleneck behind a 20+
-                // minute stall once tracking got stuck repeatedly calling
-                // this function during relocalization (see
-                // DEBUGGING.md's ORB->SIFT swap session and
-                // KeyFrameDatabase.cc's kMaxRelocCandidates doc comment,
-                // which alone wasn't enough).
-                cv::Mat distRow;
-                cv::batchDistance(dKF, F.mDescriptors, distRow, CV_32F, cv::noArray(), cv::NORM_L2SQR);
-                const float *distPtr = distRow.ptr<float>();
+                const float *distPtr = distMatrix.ptr<float>(static_cast<int>(realIdxKF));
 
                 for(int realIdxF=0; realIdxF<F.N; realIdxF++)
                 {
@@ -796,6 +800,14 @@ namespace ORB_SLAM3
 
         int nmatches = 0;
 
+        // Vectorized: ONE cv::batchDistance call for the whole
+        // Descriptors1 x Descriptors2 matrix, not one call per idx1 row --
+        // see the other SearchByBoW overload's doc comment for why a
+        // per-row batched call still isn't enough (per-call overhead
+        // multiplied by thousands of rows).
+        cv::Mat distMatrix;
+        cv::batchDistance(Descriptors1, Descriptors2, distMatrix, CV_32F, cv::noArray(), cv::NORM_L2SQR);
+
         for(size_t idx1=0, iend1=vpMapPoints1.size(); idx1<iend1; idx1++)
         {
             if(pKF1 -> NLeft != -1 && idx1 >= pKF1 -> mvKeysUn.size()){
@@ -808,17 +820,11 @@ namespace ORB_SLAM3
             if(pMP1->isBad())
                 continue;
 
-            const cv::Mat &d1 = Descriptors1.row(idx1);
-
             float bestDist1 = std::numeric_limits<float>::max();
             int bestIdx2 =-1 ;
             float bestDist2 = std::numeric_limits<float>::max();
 
-            // Vectorized -- see the other SearchByBoW overload's identical
-            // change and its doc comment.
-            cv::Mat distRow;
-            cv::batchDistance(d1, Descriptors2, distRow, CV_32F, cv::noArray(), cv::NORM_L2SQR);
-            const float *distPtr = distRow.ptr<float>();
+            const float *distPtr = distMatrix.ptr<float>(static_cast<int>(idx1));
 
             for(size_t idx2=0, iend2=vpMapPoints2.size(); idx2<iend2; idx2++)
             {
@@ -952,6 +958,17 @@ namespace ORB_SLAM3
 
         const float factor = 1.0f/HISTO_LENGTH;
 
+        // Vectorized: ONE cv::batchDistance call for the whole
+        // pKF1->mDescriptors x pKF2->mDescriptors matrix, not one call
+        // per idx1 row -- see the SearchByBoW overloads' identical change
+        // and doc comment for why a per-row batched call still wasn't
+        // enough (per-call overhead multiplied by thousands of rows,
+        // confirmed live to still cause multi-minute stalls). This
+        // function runs on every keyframe insertion, not just
+        // relocalization.
+        cv::Mat distMatrix;
+        cv::batchDistance(pKF1->mDescriptors, pKF2->mDescriptors, distMatrix, CV_32F, cv::noArray(), cv::NORM_L2SQR);
+
         for(size_t idx1=0, iend1=static_cast<size_t>(pKF1->N); idx1<iend1; idx1++)
         {
             {
@@ -976,23 +993,10 @@ namespace ORB_SLAM3
                     const bool bRight1 = (pKF1 -> NLeft == -1 || idx1 < pKF1 -> NLeft) ? false
                                                                                        : true;
 
-                    const cv::Mat &d1 = pKF1->mDescriptors.row(idx1);
-
                     float bestDist = TH_LOW;
                     int bestIdx2 = -1;
 
-                    // Vectorized: one cv::batchDistance call computes all
-                    // pKF2->N squared-L2 distances from this single
-                    // pKF1 descriptor at once, instead of a per-pair
-                    // DescriptorDistance() call inside the loop below --
-                    // same reasoning as SearchByBoW's identical change,
-                    // see its own doc comment (this function runs on
-                    // every keyframe insertion, not just relocalization,
-                    // and was confirmed to also contribute to the same
-                    // class of stall).
-                    cv::Mat distRow;
-                    cv::batchDistance(d1, pKF2->mDescriptors, distRow, CV_32F, cv::noArray(), cv::NORM_L2SQR);
-                    const float *distPtr = distRow.ptr<float>();
+                    const float *distPtr = distMatrix.ptr<float>(static_cast<int>(idx1));
 
                     for(size_t idx2=0, iend2=static_cast<size_t>(pKF2->N); idx2<iend2; idx2++)
                     {
