@@ -1,0 +1,2 @@
+cd "/run/media/nam/D1/Master/Computer Vision/Project/build" && cmake .. -DCMAKE_BUILD_TYPE=Release && make sift_vslam_gui -j$(nproc)
+cd "/run/media/nam/D1/Master/Computer Vision/Project/build" && ./sift_vslam_gui

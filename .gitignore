@@ -1,0 +1,9 @@
+build/
+build-*/
+*.user
+
+# Raw KITTI download archives (multi-GB, not project source)
+*.zip
+
+# Debug/analysis trajectory dumps written to the project root by ad hoc runs
+*_trajectory.txt

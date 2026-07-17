@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./eight_point_bench)"
+    ]
+  }
+}
