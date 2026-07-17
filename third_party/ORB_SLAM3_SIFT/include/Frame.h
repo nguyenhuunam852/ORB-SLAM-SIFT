@@ -234,9 +234,13 @@ public:
     std::vector<float> mvuRight;
     std::vector<float> mvDepth;
 
-    // Bag of Words Vector structures.
+    // Bag of Words Vector structures -- mBowVec/mFeatVec unused now, see
+    // KeyFrame.h's identical doc comment. mVladVec is what ComputeBoW()
+    // populates and what KeyFrameDatabase::DetectRelocalizationCandidates()
+    // scores against.
     DBoW2::BowVector mBowVec;
     DBoW2::FeatureVector mFeatVec;
+    cv::Mat mVladVec;
 
     // ORB descriptor, each row associated to a keypoint.
     cv::Mat mDescriptors, mDescriptorsRight;

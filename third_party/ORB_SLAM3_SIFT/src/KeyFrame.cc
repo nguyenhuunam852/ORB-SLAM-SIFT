@@ -95,14 +95,14 @@ KeyFrame::KeyFrame(Frame &F, Map *pMap, KeyFrameDatabase *pKFDB):
     mnOriginMapId = pMap->GetId();
 }
 
+// Computes mVladVec instead of mBowVec/mFeatVec (see KeyFrame.h's doc
+// comment) -- mpORBvocabulary is now a VladVocabulary (see
+// ORBVocabulary.h's repointed typedef).
 void KeyFrame::ComputeBoW()
 {
-    if(mBowVec.empty() || mFeatVec.empty())
+    if(mVladVec.empty())
     {
-        vector<cv::Mat> vCurrentDesc = Converter::toDescriptorVector(mDescriptors);
-        // Feature vector associate features with nodes in the 4th level (from leaves up)
-        // We assume the vocabulary tree has 6 levels, change the 4 otherwise
-        mpORBvocabulary->transform(vCurrentDesc,mBowVec,mFeatVec,4);
+        mVladVec = mpORBvocabulary->computeVlad(mDescriptors);
     }
 }
 

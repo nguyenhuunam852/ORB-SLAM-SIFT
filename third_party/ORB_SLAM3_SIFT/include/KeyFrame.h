@@ -384,9 +384,14 @@ public:
     const std::vector<float> mvDepth; // negative value for monocular points
     const cv::Mat mDescriptors;
 
-    //BoW
+    //BoW -- mBowVec/mFeatVec are unused dead weight now (see ComputeBoW()'s
+    // doc comment); kept declared rather than touched here to keep this
+    // session's edit surface minimal (cleanup deferred, see the plan's
+    // Stage 6). mVladVec is what ComputeBoW() actually populates and what
+    // KeyFrameDatabase's candidate search actually scores against.
     DBoW2::BowVector mBowVec;
     DBoW2::FeatureVector mFeatVec;
+    cv::Mat mVladVec;
 
     // Pose relative to parent (this is computed when bad flag is activated)
     Sophus::SE3f mTcp;

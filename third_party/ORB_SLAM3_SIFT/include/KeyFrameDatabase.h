@@ -44,6 +44,20 @@ class Frame;
 class Map;
 
 
+// Candidate search internals rewritten for VLAD (see VladVocabulary.h and
+// DEBUGGING.md's ORB->SIFT swap session): DBoW2's inverted file
+// (mvInvertedFile, word-id -> KeyFrame list) has no VLAD equivalent -- VLAD
+// has no discrete "word" to bucket by -- so mvDatabase is a flat list of
+// every added KeyFrame, and every DetectXxxCandidates() method scores the
+// query against every entry directly via VladVocabulary::score() (a cheap
+// dot product) instead of a word-sharing prefilter. Confirmed via
+// full-tree grep that only DetectNBestCandidates() (LoopClosing.cc) and
+// DetectRelocalizationCandidates() (Tracking.cc) are ever actually called
+// in this project's monocular path; DetectLoopCandidates() (already marked
+// DEPRECATED upstream), DetectCandidates(), and DetectBestCandidates() are
+// kept working (same brute-force-scoring shape) for API completeness, not
+// because anything here calls them. All public method signatures are
+// otherwise unchanged from the original.
 class KeyFrameDatabase
 {
     friend class boost::serialization::access;
@@ -51,7 +65,12 @@ class KeyFrameDatabase
     template<class Archive>
     void serialize(Archive& ar, const unsigned int version)
     {
-        ar & mvBackupInvertedFileId;
+        // mvBackupInvertedFileId (the DBoW2-era word-id-based save format)
+        // is gone along with mvInvertedFile -- Atlas save/load was already
+        // confirmed dormant in this project's actual usage (neither
+        // existing caller sets the settings keys that trigger it), so this
+        // is intentionally a no-op rather than inventing a new persisted
+        // format for something nothing here exercises.
     }
 
 public:
@@ -87,11 +106,11 @@ protected:
    // Associated vocabulary
    const ORBVocabulary* mpVoc;
 
-   // Inverted file
-   std::vector<list<KeyFrame*> > mvInvertedFile;
-
-   // For save relation without pointer, this is necessary for save/load function
-   std::vector<list<long unsigned int> > mvBackupInvertedFileId;
+   // Flat list of every added KeyFrame -- replaces mvInvertedFile. Brute-
+   // force linear scan is fine at KITTI-per-sequence scale (hundreds of
+   // keyframes, 959 for all of seq00 per DEBUGGING.md); revisit only if
+   // profiling (see the plan's Stage 5) shows a real problem.
+   std::vector<KeyFrame*> mvDatabase;
 
    // Mutex
    std::mutex mMutex;

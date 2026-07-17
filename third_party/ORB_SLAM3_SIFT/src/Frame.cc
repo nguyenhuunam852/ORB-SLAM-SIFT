@@ -735,12 +735,13 @@ bool Frame::PosInGrid(const cv::KeyPoint &kp, int &posX, int &posY)
 }
 
 
+// Computes mVladVec instead of mBowVec/mFeatVec -- see KeyFrame.cc's
+// identical change and Frame.h's doc comment.
 void Frame::ComputeBoW()
 {
-    if(mBowVec.empty())
+    if(mVladVec.empty())
     {
-        vector<cv::Mat> vCurrentDesc = Converter::toDescriptorVector(mDescriptors);
-        mpORBvocabulary->transform(vCurrentDesc,mBowVec,mFeatVec,4);
+        mVladVec = mpORBvocabulary->computeVlad(mDescriptors);
     }
 }
 

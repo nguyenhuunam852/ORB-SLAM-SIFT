@@ -20,14 +20,21 @@
 #ifndef ORBVOCABULARY_H
 #define ORBVOCABULARY_H
 
-#include"Thirdparty/DBoW2/DBoW2/FORB.h"
-#include"Thirdparty/DBoW2/DBoW2/TemplatedVocabulary.h"
+// Repointed for the SIFT-based fork: was a DBoW2::TemplatedVocabulary<FORB::
+// TDescriptor,FORB> (a hierarchical bag-of-words tree over ORB's binary
+// descriptors), now VladVocabulary (see its own doc comment for why --
+// DBoW2 has no SIFT-compatible descriptor class vendored here and no
+// pretrained SIFT vocabulary exists). Kept as this exact typedef name
+// (not renamed) so every existing `ORBVocabulary*`/`ORBVocabulary&`
+// declaration throughout Frame.h/KeyFrame.h/Tracking.cc/System.cc/
+// KeyFrameDatabase.h needs zero signature changes -- only what the type
+// actually IS changes.
+#include "VladVocabulary.h"
 
 namespace ORB_SLAM3
 {
 
-typedef DBoW2::TemplatedVocabulary<DBoW2::FORB::TDescriptor, DBoW2::FORB>
-  ORBVocabulary;
+typedef VladVocabulary ORBVocabulary;
 
 } //namespace ORB_SLAM
 
