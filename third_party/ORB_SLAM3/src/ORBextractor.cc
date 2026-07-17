@@ -406,66 +406,74 @@ namespace ORB_SLAM3
                     -1,-6, 0,-11/*mean (0.127148), correlation (0.547401)*/
             };
 
+    // SIFT reimplementation of ORBextractor (see DEBUGGING.md's ORB->SIFT
+    // swap session and the approved plan it followed). The constructor's
+    // signature is UNCHANGED from the original ORB implementation so every
+    // caller (Tracking.cc's 6 construction sites, Settings.cc's YAML
+    // parsing) needs zero edits -- but the parameters are reinterpreted:
+    // _nlevels is now nOctaveLayers (SIFT's own per-octave sub-layer
+    // count); _scaleFactor/_iniThFAST/_minThFAST are accepted for
+    // signature compatibility but not used -- SIFT's contrast/edge/sigma
+    // thresholds are hardcoded below to match this project's own
+    // src/vision/SiftSettings.h defaults (0.04/10.0/1.6).
+    //
+    // KeyPoint::octave handling: OpenCV's cv::SIFT bit-packs octave+layer
+    // into KeyPoint::octave (octave in the low byte, sign-extended; layer
+    // in the next byte) instead of ORB's plain small pyramid-level index
+    // that every consumer (ORBmatcher, Optimizer, Sim3Solver,
+    // LocalMapping) expects to use directly as an array index into
+    // mvScaleFactors/mvLevelSigma2/etc. operator() below decodes and
+    // remaps every keypoint's .octave into a flat index via kMinOctave/
+    // kMaxOctaveSpan (verified against ~395k real keypoints from KITTI
+    // seq00 frames 0-150: observed octave range [-1,5], well inside the
+    // assumed [-1,8]; observed layer range [1,3] for nOctaveLayers=3 --
+    // OpenCV's SIFT layers are 1-indexed over [1,nOctaveLayers], NOT
+    // 0-indexed as initially assumed -- this off-by-one was caught by that
+    // probe before being trusted live, see kMinOctave's doc comment).
+    namespace {
+        constexpr int kMinOctave = -1;      // matches OpenCV SIFT's hardcoded firstOctave=-1
+        constexpr int kMaxOctaveSpan = 10;  // generous margin over the ~7 octaves KITTI's
+                                             // ~1241x376 images actually produce (verified: [-1,5])
+        constexpr double kContrastThreshold = 0.04;
+        constexpr double kEdgeThreshold = 10.0;
+        constexpr double kSigma = 1.6;
+
+        // Flat scale-array index for a decoded (octave, layer) pair, always
+        // in [0, kMaxOctaveSpan*nOctaveLayers). layer is clamped to
+        // OpenCV's actual observed [1, nOctaveLayers] range (not [0,
+        // nOctaveLayers) -- see the doc comment above) then shifted to 0-based.
+        int flatLevel(int octave, int layer, int nOctaveLayers)
+        {
+            octave = std::min(std::max(octave, kMinOctave), kMinOctave + kMaxOctaveSpan - 1);
+            layer = std::min(std::max(layer, 1), nOctaveLayers) - 1;
+            return (octave - kMinOctave) * nOctaveLayers + layer;
+        }
+    }
+
     ORBextractor::ORBextractor(int _nfeatures, float _scaleFactor, int _nlevels,
                                int _iniThFAST, int _minThFAST):
             nfeatures(_nfeatures), scaleFactor(_scaleFactor), nlevels(_nlevels),
             iniThFAST(_iniThFAST), minThFAST(_minThFAST)
     {
-        mvScaleFactor.resize(nlevels);
-        mvLevelSigma2.resize(nlevels);
-        mvScaleFactor[0]=1.0f;
-        mvLevelSigma2[0]=1.0f;
-        for(int i=1; i<nlevels; i++)
-        {
-            mvScaleFactor[i]=mvScaleFactor[i-1]*scaleFactor;
-            mvLevelSigma2[i]=mvScaleFactor[i]*mvScaleFactor[i];
-        }
+        nOctaveLayers = nlevels;
+        nlevels = kMaxOctaveSpan * nOctaveLayers; // reassigned: flat scale-array size, what
+                                                   // GetLevels() reports and every mvScaleFactors[]
+                                                   // consumer expects as the valid array length
 
+        mSift = cv::SIFT::create(nfeatures, nOctaveLayers, kContrastThreshold, kEdgeThreshold, kSigma);
+
+        mvScaleFactor.resize(nlevels);
         mvInvScaleFactor.resize(nlevels);
+        mvLevelSigma2.resize(nlevels);
         mvInvLevelSigma2.resize(nlevels);
-        for(int i=0; i<nlevels; i++)
-        {
-            mvInvScaleFactor[i]=1.0f/mvScaleFactor[i];
-            mvInvLevelSigma2[i]=1.0f/mvLevelSigma2[i];
+        for (int lvl = 0; lvl < nlevels; ++lvl) {
+            mvScaleFactor[lvl] = std::pow(2.0f, static_cast<float>(lvl) / static_cast<float>(nOctaveLayers));
+            mvInvScaleFactor[lvl] = 1.0f / mvScaleFactor[lvl];
+            mvLevelSigma2[lvl] = mvScaleFactor[lvl] * mvScaleFactor[lvl];
+            mvInvLevelSigma2[lvl] = 1.0f / mvLevelSigma2[lvl];
         }
 
         mvImagePyramid.resize(nlevels);
-
-        mnFeaturesPerLevel.resize(nlevels);
-        float factor = 1.0f / scaleFactor;
-        float nDesiredFeaturesPerScale = nfeatures*(1 - factor)/(1 - (float)pow((double)factor, (double)nlevels));
-
-        int sumFeatures = 0;
-        for( int level = 0; level < nlevels-1; level++ )
-        {
-            mnFeaturesPerLevel[level] = cvRound(nDesiredFeaturesPerScale);
-            sumFeatures += mnFeaturesPerLevel[level];
-            nDesiredFeaturesPerScale *= factor;
-        }
-        mnFeaturesPerLevel[nlevels-1] = std::max(nfeatures - sumFeatures, 0);
-
-        const int npoints = 512;
-        const Point* pattern0 = (const Point*)bit_pattern_31_;
-        std::copy(pattern0, pattern0 + npoints, std::back_inserter(pattern));
-
-        //This is for orientation
-        // pre-compute the end of a row in a circular patch
-        umax.resize(HALF_PATCH_SIZE + 1);
-
-        int v, v0, vmax = cvFloor(HALF_PATCH_SIZE * sqrt(2.f) / 2 + 1);
-        int vmin = cvCeil(HALF_PATCH_SIZE * sqrt(2.f) / 2);
-        const double hp2 = HALF_PATCH_SIZE*HALF_PATCH_SIZE;
-        for (v = 0; v <= vmax; ++v)
-            umax[v] = cvRound(sqrt(hp2 - v * v));
-
-        // Make sure we are symmetric
-        for (v = HALF_PATCH_SIZE, v0 = 0; v >= vmin; --v)
-        {
-            while (umax[v0] == umax[v0 + 1])
-                ++v0;
-            umax[v] = v0;
-            ++v0;
-        }
     }
 
     static void computeOrientation(const Mat& image, vector<KeyPoint>& keypoints, const vector<int>& umax)
@@ -1083,115 +1091,69 @@ namespace ORB_SLAM3
             computeOrbDescriptor(keypoints[i], image, &pattern[0], descriptors.ptr((int)i));
     }
 
-    int ORBextractor::operator()( InputArray _image, InputArray _mask, vector<KeyPoint>& _keypoints,
-                                  OutputArray _descriptors, std::vector<int> &vLappingArea)
+    // vLappingArea (stereo-overlap region) is accepted for signature
+    // compatibility with Frame::ExtractORB()'s call sites but unused --
+    // this project only ever runs ORB_SLAM3 monocular (see the plan's
+    // "explicitly deferred" notes), so every keypoint is a "mono" one;
+    // the original stereo split into mono/stereo index ranges no longer
+    // applies. Returns keypoints.size() (all of them), matching the
+    // original's "return monoIndex" convention when nothing is stereo.
+    int ORBextractor::operator()( InputArray _image, InputArray /*_mask*/, vector<KeyPoint>& _keypoints,
+                                  OutputArray _descriptors, std::vector<int> &/*vLappingArea*/)
     {
-        //cout << "[ORBextractor]: Max Features: " << nfeatures << endl;
         if(_image.empty())
             return -1;
 
         Mat image = _image.getMat();
         assert(image.type() == CV_8UC1 );
 
-        // Pre-compute the scale pyramid
+        // Pre-compute the scale pyramid -- dead for monocular correctness
+        // (only Frame::ComputeStereoMatches(), stereo-only, reads
+        // mvImagePyramid) but built for real anyway at near-zero cost, see
+        // ComputePyramid()'s own doc comment.
         ComputePyramid(image);
 
-        vector < vector<KeyPoint> > allKeypoints;
-        ComputeKeyPointsOctTree(allKeypoints);
-        //ComputeKeyPointsOld(allKeypoints);
-
+        _keypoints.clear();
         Mat descriptors;
+        mSift->detectAndCompute(image, cv::noArray(), _keypoints, descriptors);
 
-        int nkeypoints = 0;
-        for (int level = 0; level < nlevels; ++level)
-            nkeypoints += (int)allKeypoints[level].size();
-        if( nkeypoints == 0 )
+        // Remap every keypoint's packed SIFT octave/layer into the flat
+        // scale-array index every downstream consumer (ORBmatcher,
+        // Optimizer, Sim3Solver, LocalMapping) expects -- see flatLevel()'s
+        // doc comment above the constructor for the packing format and the
+        // real-KITTI-data verification behind kMinOctave/kMaxOctaveSpan.
+        for (auto &kp : _keypoints) {
+            const int rawOctave = kp.octave & 255;
+            const int octave = rawOctave < 128 ? rawOctave : (rawOctave | -128);
+            const int layer = (kp.octave >> 8) & 255;
+            kp.octave = flatLevel(octave, layer, nOctaveLayers);
+        }
+
+        if (_keypoints.empty())
             _descriptors.release();
         else
-        {
-            _descriptors.create(nkeypoints, 32, CV_8U);
-            descriptors = _descriptors.getMat();
-        }
+            descriptors.copyTo(_descriptors);
 
-        //_keypoints.clear();
-        //_keypoints.reserve(nkeypoints);
-        _keypoints = vector<cv::KeyPoint>(nkeypoints);
-
-        int offset = 0;
-        //Modified for speeding up stereo fisheye matching
-        int monoIndex = 0, stereoIndex = nkeypoints-1;
-        for (int level = 0; level < nlevels; ++level)
-        {
-            vector<KeyPoint>& keypoints = allKeypoints[level];
-            int nkeypointsLevel = (int)keypoints.size();
-
-            if(nkeypointsLevel==0)
-                continue;
-
-            // preprocess the resized image
-            Mat workingMat = mvImagePyramid[level].clone();
-            GaussianBlur(workingMat, workingMat, Size(7, 7), 2, 2, BORDER_REFLECT_101);
-
-            // Compute the descriptors
-            //Mat desc = descriptors.rowRange(offset, offset + nkeypointsLevel);
-            Mat desc = cv::Mat(nkeypointsLevel, 32, CV_8U);
-            computeDescriptors(workingMat, keypoints, desc, pattern);
-
-            offset += nkeypointsLevel;
-
-
-            float scale = mvScaleFactor[level]; //getScale(level, firstLevel, scaleFactor);
-            int i = 0;
-            for (vector<KeyPoint>::iterator keypoint = keypoints.begin(),
-                         keypointEnd = keypoints.end(); keypoint != keypointEnd; ++keypoint){
-
-                // Scale keypoint coordinates
-                if (level != 0){
-                    keypoint->pt *= scale;
-                }
-
-                if(keypoint->pt.x >= vLappingArea[0] && keypoint->pt.x <= vLappingArea[1]){
-                    _keypoints.at(stereoIndex) = (*keypoint);
-                    desc.row(i).copyTo(descriptors.row(stereoIndex));
-                    stereoIndex--;
-                }
-                else{
-                    _keypoints.at(monoIndex) = (*keypoint);
-                    desc.row(i).copyTo(descriptors.row(monoIndex));
-                    monoIndex++;
-                }
-                i++;
-            }
-        }
-        //cout << "[ORBextractor]: extracted " << _keypoints.size() << " KeyPoints" << endl;
-        return monoIndex;
+        return static_cast<int>(_keypoints.size());
     }
 
+    // Builds a real per-level image pyramid via repeated cv::resize --
+    // dead for monocular correctness (see operator()'s doc comment) but
+    // built anyway to avoid leaving a latent-UB class (empty mvImagePyramid
+    // entries) if a future session ever revisits stereo. Target sizes are
+    // clamped to at least 1x1: at kMaxOctaveSpan's outer levels (well
+    // beyond any octave SIFT actually reports for this project's KITTI
+    // imagery, see flatLevel()'s doc comment) the geometric scale factor
+    // can shrink the target below 1px, which cv::resize rejects.
     void ORBextractor::ComputePyramid(cv::Mat image)
     {
         for (int level = 0; level < nlevels; ++level)
         {
-            float scale = mvInvScaleFactor[level];
-            Size sz(cvRound((float)image.cols*scale), cvRound((float)image.rows*scale));
-            Size wholeSize(sz.width + EDGE_THRESHOLD*2, sz.height + EDGE_THRESHOLD*2);
-            Mat temp(wholeSize, image.type()), masktemp;
-            mvImagePyramid[level] = temp(Rect(EDGE_THRESHOLD, EDGE_THRESHOLD, sz.width, sz.height));
-
-            // Compute the resized image
-            if( level != 0 )
-            {
-                resize(mvImagePyramid[level-1], mvImagePyramid[level], sz, 0, 0, INTER_LINEAR);
-
-                copyMakeBorder(mvImagePyramid[level], temp, EDGE_THRESHOLD, EDGE_THRESHOLD, EDGE_THRESHOLD, EDGE_THRESHOLD,
-                               BORDER_REFLECT_101+BORDER_ISOLATED);
-            }
-            else
-            {
-                copyMakeBorder(image, temp, EDGE_THRESHOLD, EDGE_THRESHOLD, EDGE_THRESHOLD, EDGE_THRESHOLD,
-                               BORDER_REFLECT_101);
-            }
+            const float scale = mvInvScaleFactor[level];
+            Size sz(std::max(1, cvRound((float)image.cols*scale)),
+                    std::max(1, cvRound((float)image.rows*scale)));
+            resize(level == 0 ? image : mvImagePyramid[level-1], mvImagePyramid[level], sz, 0, 0, INTER_LINEAR);
         }
-
     }
 
 } //namespace ORB_SLAM
