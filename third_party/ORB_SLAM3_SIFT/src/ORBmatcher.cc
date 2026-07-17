@@ -278,15 +278,28 @@ namespace ORB_SLAM3
             int bestIdxFR =-1 ;
             float bestDist2R = std::numeric_limits<float>::max();
 
-            for(int realIdxF=0; realIdxF<F.N; realIdxF++)
-            {
-                if(F.Nleft == -1){
+            if(F.Nleft == -1){
+                // Vectorized: one cv::batchDistance call computes all F.N
+                // squared-L2 distances from this single KF descriptor at
+                // once (OpenCV's SIMD-optimized internals), instead of
+                // F.N individual scalar DescriptorDistance() calls in a
+                // hand-rolled loop. Confirmed via a live run that the
+                // naive version was the real bottleneck behind a 20+
+                // minute stall once tracking got stuck repeatedly calling
+                // this function during relocalization (see
+                // DEBUGGING.md's ORB->SIFT swap session and
+                // KeyFrameDatabase.cc's kMaxRelocCandidates doc comment,
+                // which alone wasn't enough).
+                cv::Mat distRow;
+                cv::batchDistance(dKF, F.mDescriptors, distRow, CV_32F, cv::noArray(), cv::NORM_L2SQR);
+                const float *distPtr = distRow.ptr<float>();
+
+                for(int realIdxF=0; realIdxF<F.N; realIdxF++)
+                {
                     if(vpMapPointMatches[realIdxF])
                         continue;
 
-                    const cv::Mat &dF = F.mDescriptors.row(realIdxF);
-
-                    const float dist =  DescriptorDistance(dKF,dF);
+                    const float dist = distPtr[realIdxF];
 
                     if(dist<bestDist1)
                     {
@@ -299,7 +312,14 @@ namespace ORB_SLAM3
                         bestDist2=dist;
                     }
                 }
-                else{
+            }
+            else{
+                // Stereo/fisheye path -- dead code in this project (see
+                // ORBextractor.cc's operator() doc comment: monocular
+                // only), left as the original naive per-pair loop since
+                // it's never exercised here.
+                for(int realIdxF=0; realIdxF<F.N; realIdxF++)
+                {
                     if(vpMapPointMatches[realIdxF])
                         continue;
 
