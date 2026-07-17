@@ -202,6 +202,59 @@ add_executable(orbslam3_kitti_ate analyze/orbslam3_kitti_ate.cpp)
 target_include_directories(orbslam3_kitti_ate PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(orbslam3_kitti_ate PRIVATE orbslam3_ext)
 
+# SIFT-based fork of the vendored ORB-SLAM3, built from an entirely separate
+# copy (third_party/ORB_SLAM3_SIFT, `cp -r` of third_party/ORB_SLAM3) rather
+# than modifying the original in place -- per explicit request, so the
+# original, already-validated ORB-based algorithm (orbslam3_ext above, 6.4-
+# 10.7m ATE RMSE on KITTI seq00, see DEBUGGING.md) stays completely untouched
+# and independently buildable/runnable. Both copies define the same
+# ORB_SLAM3::* class names, so this target and orbslam3_ext must never both
+# be linked into the same executable (ODR violation) -- kept in a fully
+# separate static lib + its own CLI validation executable for exactly that
+# reason. Mirrors orbslam3_ext's own target definition immediately above;
+# see its doc comments for why each piece (CXX_STANDARD 14 override, the
+# explicit system-lib link paths working around RPATH poisoning, DBoW2
+# recompiled fresh for the Thirdparty/DBoW2 include path) is there -- same
+# reasoning applies unchanged, just against the new source tree.
+file(GLOB ORB_SLAM3_SIFT_SOURCES
+    "third_party/ORB_SLAM3_SIFT/src/*.cc"
+    "third_party/ORB_SLAM3_SIFT/src/CameraModels/*.cc"
+)
+add_library(orbslam3_sift_ext STATIC
+    ${ORB_SLAM3_SIFT_SOURCES}
+    third_party/DBoW2/DBoW2/BowVector.cpp
+    third_party/DBoW2/DBoW2/FORB.cpp
+    third_party/DBoW2/DBoW2/FeatureVector.cpp
+    third_party/DBoW2/DBoW2/ScoringObject.cpp
+    third_party/DBoW2/DUtils/Random.cpp
+    third_party/DBoW2/DUtils/Timestamp.cpp
+)
+set_target_properties(orbslam3_sift_ext PROPERTIES CXX_STANDARD 14 CXX_STANDARD_REQUIRED ON)
+target_include_directories(orbslam3_sift_ext PUBLIC
+    ${OpenCV_INCLUDE_DIRS}
+    third_party/ORB_SLAM3_SIFT
+    third_party/ORB_SLAM3_SIFT/include
+    third_party/ORB_SLAM3_SIFT/include/CameraModels
+    third_party/ORB_SLAM3_SIFT/Thirdparty/Sophus
+)
+target_include_directories(orbslam3_sift_ext SYSTEM PUBLIC
+    "${BOOST_INCLUDE_DIR}"
+)
+target_link_libraries(orbslam3_sift_ext PUBLIC
+    ${OpenCV_LIBS}
+    g2o_ext
+    /usr/lib/x86_64-linux-gnu/libssl.so
+    /usr/lib/x86_64-linux-gnu/libcrypto.so
+    "${CONDA_ENV_ROOT}/lib/libboost_serialization.so"
+    /usr/lib/x86_64-linux-gnu/libcurl.so.4
+    /usr/lib/x86_64-linux-gnu/libxml2.so
+    /usr/lib/x86_64-linux-gnu/libQt6DBus.so
+)
+
+add_executable(orbslam3_sift_kitti_ate analyze/orbslam3_kitti_ate.cpp)
+target_include_directories(orbslam3_sift_kitti_ate PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(orbslam3_sift_kitti_ate PRIVATE orbslam3_sift_ext)
+
 set(SOURCES
     src/main.cpp
     src/MainWindow.cpp
