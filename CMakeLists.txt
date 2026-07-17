@@ -263,6 +263,11 @@ add_executable(orbslam3_vlad_train analyze/orbslam3_vlad_train.cpp)
 target_include_directories(orbslam3_vlad_train PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(orbslam3_vlad_train PRIVATE orbslam3_sift_ext)
 
+# Stage 4 threshold-calibration tool (see analyze/orbslam3_sift_calibrate.cpp).
+add_executable(orbslam3_sift_calibrate analyze/orbslam3_sift_calibrate.cpp)
+target_include_directories(orbslam3_sift_calibrate PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(orbslam3_sift_calibrate PRIVATE orbslam3_sift_ext)
+
 set(SOURCES
     src/main.cpp
     src/MainWindow.cpp

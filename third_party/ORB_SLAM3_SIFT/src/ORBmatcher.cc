@@ -33,20 +33,22 @@ using namespace std;
 namespace ORB_SLAM3
 {
 
-    // PLACEHOLDER values, pending Stage 4's real calibration (RANSAC-
-    // verified true/false-match squared-L2 distance percentiles measured
-    // on this project's own KITTI data -- see DEBUGGING.md). Seeded from a
-    // quick, non-final order-of-magnitude probe (ratio-test-labeled, not
-    // geometrically verified) on two real adjacent KITTI seq00 frames:
-    // true-match squared-L2 p50=10534/p90=39935/p99=61479,
-    // false-match squared-L2 min=4089/p1=20512/p50=87457 -- meaningful
-    // overlap is expected here since ratio-test labeling alone (no RANSAC)
-    // is a rough proxy, not ground truth. These placeholders exist only so
-    // Stage 3's first end-to-end run produces an interpretable (if
-    // inaccurate) result instead of one where literally every/no match
-    // passes.
-    const float ORBmatcher::TH_HIGH = 60000.0f;
-    const float ORBmatcher::TH_LOW = 30000.0f;
+    // Stage 4 calibration (see DEBUGGING.md and
+    // analyze/orbslam3_sift_calibrate.cpp): measured on real KITTI seq00
+    // data (frame pairs at baselines 1/3/5, 600 frames, ratio-test
+    // candidates split into RANSAC-verified true/false matches via
+    // cv::findFundamentalMat) -- 227778 true-match pairs, 43983
+    // false-match pairs. true-match squared-L2: p50=8380 p90=35425
+    // p95=46778 p99=67038 max=113387. false-match squared-L2: min=93
+    // p1=1095 p5=2779 p10=4699 p50=25357. Meaningful separation (true p50
+    // 8380 vs false p50 25357, a ~3x gap) but real overlap too -- expected,
+    // since TH_LOW/TH_HIGH are a coarse sanity cutoff, not the primary
+    // discriminator (the ratio test, mfNNratio, does the fine-grained
+    // work downstream of this). TH_LOW set at true-match's own 95th
+    // percentile (so it doesn't reject 95% of genuine matches); TH_HIGH at
+    // 1.5x true-match's 99th percentile.
+    const float ORBmatcher::TH_HIGH = 100557.0f;
+    const float ORBmatcher::TH_LOW = 46778.0f;
     const int ORBmatcher::HISTO_LENGTH = 30;
 
     ORBmatcher::ORBmatcher(float nnratio, bool checkOri): mfNNratio(nnratio), mbCheckOrientation(checkOri)
