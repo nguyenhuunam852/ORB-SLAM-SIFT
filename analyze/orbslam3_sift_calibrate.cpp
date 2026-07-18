@@ -14,7 +14,7 @@
 // candidate pool are labeled "false matches". Squared-L2 descriptor
 // distance is logged into both distributions and percentiles are reported.
 //
-// Usage: orbslam3_sift_calibrate <settings.yaml> <seq-dir> [nframes]
+// Usage: orbslam3_sift_calibrate <settings.yaml> <seq-dir> [nframes] [start-frame]
 
 #include <ORBextractor.h>
 
@@ -78,6 +78,7 @@ int main(int argc, char **argv)
     const std::string settingsPath = argv[1];
     const std::string seqDir = argv[2];
     const int nframes = argc > 3 ? std::atoi(argv[3]) : 500;
+    const int startFrame = argc > 4 ? std::atoi(argv[4]) : 0;
 
     int nFeatures = 2000, nLevels = 3;
     {
@@ -98,12 +99,12 @@ int main(int argc, char **argv)
         std::fprintf(stderr, "no images found in %s\n", seqDir.c_str());
         return 1;
     }
-    const int limit = std::min(static_cast<int>(imageFiles.size()) - 6, nframes);
+    const int limit = std::min(static_cast<int>(imageFiles.size()) - 6, startFrame + nframes);
 
     std::vector<float> trueDist, falseDist;
     const int baselines[] = {1, 3, 5};
 
-    for (int i = 0; i < limit; i += 5) {
+    for (int i = startFrame; i < limit; i += 5) {
         cv::Mat img1 = cv::imread(imageFiles[i], cv::IMREAD_GRAYSCALE);
         if (img1.empty())
             continue;
@@ -161,7 +162,7 @@ int main(int argc, char **argv)
             }
         }
 
-        if (i % 200 == 0) {
+        if ((i - startFrame) % 200 == 0) {
             std::fprintf(stderr, "[progress] frame %d/%d, true=%zu false=%zu\n", i, limit, trueDist.size(),
                          falseDist.size());
         }

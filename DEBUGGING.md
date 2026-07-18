@@ -1,5 +1,1046 @@
 # Debugging log: homography fallback caused a permanent tracking lockup
 
+## Current status (2026-07-18, part 11 -- end-of-day wrap-up): confirmed the
+## `mnLastRelocFrameId+mMaxFrames` stricter (`>=50` instead of `>=30`)
+## post-relocalization gate from part 10 is a **real, measured, but stock/
+## unmodified ORB-SLAM3 mechanism** (byte-identical in the untouched
+## `third_party/ORB_SLAM3`, confirmed via direct `diff`) -- added a
+## `[track-local-map-gate]` diagnostic and measured **26 of 114 (23%)**
+## `TrackLocalMap()` failures in one sample were frames with 30-49 inlier
+## matches that would have PASSED the normal monocular bar but failed this
+## stricter one, active for 10 frames after any relocalization. Real
+## contributing factor, not touched -- it's intentional stock behavior, and
+## with time pressure to reach a real number today, changing untested
+## stock logic wasn't the responsible move. Left as a documented, viable
+## next lever, not implemented.
+##
+## **Ran the full, no-`[start-frame]` seq00 ATE checkpoint** (all 4541
+## frames) with everything from today's session in the tree: Option 1
+## (dynamic SIFT density boost, part 4, measured neutral), Option 2 (dead-
+## reckoning bridge, no timeout renewal, parts 5-6, measured real-but-
+## insufficient improvement), the octave-only BA-sigma fix + re-widened
+## `SearchForInitialization()` (part 9). **Result: still no scorable ATE.**
+## Final active map had only 2 keyframes when the sequence ended --
+## `SaveKeyFrameTrajectoryTUM()` produced 2 lines, `Alignment failed -- too
+## few matched points (2) or degenerate estimate.` Same failure signature
+## as literally every other run today.
+##
+## **The full-sequence number that matters most**: **115 destructive
+## resets across the whole 4541-frame run** -- markedly worse than:
+## - The true original ORB+DBoW2 baseline: 3 resets, real 6.4-10.7m ATE.
+## - Part 7's checkpoint (Options 1+2 only, no widening/sigma-fix): 3
+##   resets, but the last re-init attempt never completed before the
+##   sequence ended (600 frames stuck trying) -- also no scorable ATE.
+## - Today's version: 115 resets, i.e. the system now initializes far more
+##   often (part 9: match-starvation genuinely fixed, ~98 successful inits
+##   in a comparable window vs 3 before) but also **dies far more often**,
+##   netting out to the same "no scorable trajectory" result as every prior
+##   attempt, just via a much higher-churn path.
+##
+## **Honest net assessment for today's whole session (parts 4-11)**: two
+## real, independently-verified bugs were found and fixed this session --
+## (1) the BA-sigma-weighting bug from days-old Part 1/2 (per-flat-level
+## instead of per-octave scale/sigma, now fixed properly, not band-aided),
+## which safely unlocked re-widening `SearchForInitialization()` and
+## genuinely solved match-starvation (part 9: 0 rejections vs 1840, 98
+## successful inits vs 3, both measured directly); (2) a real, if modest,
+## dead-reckoning tracking-loss bridge (Option 2, part 5) with a measured
+## (not assumed) improvement on a fine-grained metric. **Neither
+## individually nor combined do these add up to a working end-to-end
+## trajectory** -- the dominant, still-unsolved bottleneck is upstream of
+## all of today's work: this fork's monocular maps do not *survive*
+## whatever is happening in the hard/turn-heavy stretch of KITTI seq00,
+## regardless of how easily they can now be created. This is the exact
+## same problem first documented on 2026-07-17 (see the "Current status"
+## blocks below this one) -- today sharpened the diagnosis considerably
+## (mono-init latency measured in the thousands of frames; 90% of
+## successful inits shown to be adjacent-frame/low-baseline; the
+## post-relocalization strict-gate interaction quantified at 23% of
+## failures) but did not resolve the core survival problem.
+##
+## **State of the tree at end of day**: all of parts 4-10's changes are
+## left in place, uncommitted, alongside the pre-existing `clearMap()` fix
+## and `[start-frame]` CLI additions:
+## - `ORBextractor.cc`/`.h`: `SetDynamicDensity()`/`GetOctaveLayers()`
+##   (Option 1, part 4) + the octave-only sigma/scale fix (part 9).
+## - `Tracking.cc`/`.h`: Option 1's high-angular-velocity density-boost hook
+##   (part 4), Option 2's dead-reckoning bridge without timeout renewal
+##   (parts 5-6), and FIVE temporary diagnostic tag families still active:
+##   `[mono-init]` (part 7-8), `[track-ref-kf]`/`[track-local-map]`/
+##   `[track-local-map-detail]`/`[track-local-map-gate]` (parts 9-10).
+## - `ORBmatcher.cc`: re-widened `SearchForInitialization()` (part 9).
+## None of this has been benchmarked as a net win yet -- **do not treat
+## today's changes as a checkpoint to build on without re-validating**;
+## they are informative-but-inconclusive, matching this file's own
+## established practice for prior sessions that ended without a positive
+## result (see part 3's and part 6's "treat as informative-but-negative"
+## framing).
+##
+## **Next session should start with, in priority order**: (1) decide
+## whether to keep chasing the survival problem in this specific hard
+## region (e.g. actually trying the `mnLastRelocFrameId` gate relaxation
+## for monocular non-IMU specifically, now that it's quantified at 23% of
+## failures -- untried, cheap, but touches stock logic so should be
+## measured carefully before/after) or (2) step back per the original
+## part-2 "Next session should start with" note that's been valid since
+## 2026-07-17 and never fully executed: instrumenting exactly why
+## `ReconstructWithTwoViews`'s 1-degree parallax bar and this fork's Local
+## Mapping point-creation throughput don't produce maps that survive this
+## stretch, independent of initialization ease. Remove the five temporary
+## diagnostic tag families once whichever direction is chosen stops
+## needing them -- intentionally left in for immediate reuse, consistent
+## with this session's practice throughout parts 4-10.
+
+## Current status (2026-07-18, part 10): investigated why 94-97 of ~98-99
+## post-widening map initializations die almost immediately (part 9's
+## finding), testing a specific hypothesis raised in this session: that
+## ORB-SLAM3's per-level (`kp.octave`) assumptions -- search-radius sizing
+## or chi-square outlier rejection in `PoseOptimization()` -- treat the
+## widened matcher's now-common non-zero-flat-level MapPoints as
+## statistically "wrong" and wipe the map almost immediately. **Directly
+## measured, and mostly refuted** -- but surfaced a real, still-open,
+## narrower anomaly instead.
+##
+## Added two more temporary diagnostics (both tagged for removal alongside
+## `[mono-init]`): `[track-ref-kf]` (nmatches from `SearchByBoW` in
+## `TrackReferenceKeyFrame()`) and `[track-local-map]`/
+## `[track-local-map-detail]` (`TrackLocalMap()`'s existing `aux1`/`aux2`
+## before/after-`PoseOptimization()` counters, which the code already
+## computed but never printed -- before-count, flagged-outlier count, and
+## after-count, both before and after `PoseOptimization()`'s chi-square
+## rejection).
+##
+## **Evidence against the hypothesis**: the very first post-widening map
+## (born ~frame 700, same cross-layer/non-zero-octave points as every other
+## map) tracked cleanly for 48+ frames, growing from 2 to 10 keyframes.
+## Outlier rejection throughout was mild and unremarkable (0-2 flagged per
+## frame typically, occasionally 10-20% right after a new keyframe
+## insertion -- normal BA behavior, not a wholesale wipeout). Match counts
+## declined steadily (271->166->104->85->65...) purely from the camera
+## moving away from the initial view faster than a still-sparse young local
+## map could keep up -- ordinary monocular-VO bootstrap sparseness, not a
+## per-frame catastrophic rejection. If a scale-level/chi-square bug
+## unconditionally poisoned cross-layer points, this map should have failed
+## immediately too, and it measurably did not.
+##
+## **A real, narrower anomaly found instead, not yet explained**: one frame
+## (map #2, local frame id 84 in a fresh detail-probe run) had 44 surviving
+## inlier matches post-`PoseOptimization()` -- comfortably above the
+## nominal `mnMatchesInliers>=30` bar for monocular -- yet the frame still
+## failed (no corresponding `[track-local-map]` print, meaning
+## `TrackLocalMap()` returned via an earlier gate than the final
+## `<30`-or-not check). Two candidate explanations, neither confirmed:
+## (a) `TrackLocalMap()`'s *other* threshold,
+## `if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && mnMatchesInliers<50) return false;`
+## (`mMaxFrames = fps = 10` for KITTI) -- applies a stricter >=50 bar for 10
+## frames after any `Relocalization()` success, and this system relocalizes
+## often given how frequently maps die; checked the arithmetic for this
+## specific case and the most recent prior relocalization was too far back
+## to explain it, so this specific instance isn't explained by it, though
+## the mechanism itself is real and could explain *other* cases in a longer
+## sample; (b) `mnMatchesInliers` only counts points with
+## `Observations()>0`, which can be lower than the raw post-optimization
+## survivor count if some points had an observation removed (e.g. keyframe
+## culling) -- not checked directly yet.
+##
+## **Net assessment**: the dominant failure mode across the ~94-97 resets
+## is ordinary young-map match-count decline (consistent with part 9's
+## "90% of successful inits are adjacent-frame, low-baseline" finding, and
+## consistent with this file's much older, already-documented "hard
+## region"/turn-region survival problem from 2026-07-17) -- not a
+## SIFT-specific scale-level bug in outlier rejection or search-radius
+## sizing. That hypothesis is reasonable in principle (worth having
+## checked directly rather than dismissed on priors) but the evidence from
+## the one map that DID survive doesn't support it as the dominant or
+## unconditional cause. The `mnLastRelocFrameId`/`mMaxFrames` stricter-bar
+## interaction is a real, distinct, previously-unnoticed mechanism that
+## could be tightening the squeeze on already-fragile young maps
+## specifically because this system relocalizes so often -- a plausible
+## secondary contributor, not yet confirmed as a primary one.
+##
+## **Next session should start with**: either (a) confirm/refute the
+## `mnLastRelocFrameId` theory properly by logging `mnLastRelocFrameId` and
+## `mCurrentFrame.mnId` alongside `mnMatchesInliers` at every
+## `[track-local-map]` call (cheap, mechanical, directly decisive) across a
+## longer sample instead of the single anomalous frame found here, or (b)
+## accept that the dominant problem is the already-documented hard-region
+## survival issue from days ago (not a new bug from today's changes) and
+## shift effort to that instead -- e.g. revisiting Local Mapping's new-point
+## creation throughput during the sparse post-init bootstrap window, since
+## that's what determines whether match count recovers before crossing the
+## 30-match floor. All temporary `[mono-init]`/`[track-ref-kf]`/
+## `[track-local-map]`/`[track-local-map-detail]` diagnostics are still in
+## the tree, not yet cleaned up -- intentional, next session can reuse them
+## immediately for whichever direction is chosen.
+
+## Current status (2026-07-18, part 9): per explicit direction, went back and
+## properly fixed the BA-sigma-weighting bug from Part 1/2 (days earlier in
+## this file) so the previously-reverted `SearchForInitialization()`
+## widening could be re-applied. **The match-starvation problem this
+## targeted is now solved outright -- but re-applying the widening exposed
+## a different, previously-masked problem: near-zero-baseline degenerate
+## initialization.** Net: not yet a net win, but the diagnosis is much
+## sharper than before and points at a concrete next fix.
+##
+## Added the `[mono-init]` diagnostic instrumentation (see part 7/8 --
+## `MonocularInitialization()` in `Tracking.cc`, tags `[mono-init]`) proved
+## invaluable here for measuring both changes precisely; still in the tree.
+##
+## **What was actually wrong with the Part-1/2 attempt, now root-caused
+## instead of just theorized**: `ORBextractor.cc`'s per-flat-level scale/
+## sigma arrays (`mvScaleFactor`/`mvLevelSigma2`/`mvInvLevelSigma2`) were
+## computed via the continuous SIFT scale-space formula
+## `2^(lvl/nOctaveLayers)` (float division) -- giving every one of
+## `nOctaveLayers` layers within the same octave a *different* value, even
+## though only octave changes real image resolution in this SIFT
+## reimplementation (layers differ only in Gaussian-blur sigma at the same
+## resolution). Checked every consumer of these arrays directly before
+## changing anything -- ~30 sites across `Optimizer.cc`, `LocalMapping.cc`,
+## `MLPnPsolver.cc`, `Sim3Solver.cc`, `ORBmatcher.cc`, `MapPoint.cc`, all
+## follow the identical `array[kp.octave]` confidence/search-radius
+## pattern, none need finer-than-octave granularity. Fix: changed the
+## array-population loop (`ORBextractor.cc` constructor) to
+## `octave = lvl / nOctaveLayers` (integer division, recovers the octave
+## index alone from the flat-level packing) then `2^octave` -- collapses
+## all layers within an octave to an identical, correct value, touching
+## zero of the ~30 consumer call sites (only how the array *values* are
+## computed changed, not the indexing scheme). This is a real fix, not the
+## earlier "force matched keypoints to flat-level 0" band-aid (which
+## discarded genuine octave information instead of just ignoring layer).
+## Also confirmed `ComputeKeyPointsOctTree()`/`ComputeKeyPointsOld()` (the
+## only other consumers using per-level values in a way finer-than-octave
+## granularity might have mattered) are dead code, never called from
+## `operator()` in this SIFT reimplementation -- and `ComputePyramid()`'s
+## own consumer is stereo-only, dead for monocular correctness per its
+## existing doc comment -- so this change has no monocular-relevant side
+## effect to weigh against.
+##
+## Re-added `ORBextractor::GetOctaveLayers()` (returns `nOctaveLayers`) and
+## re-widened `ORBmatcher::SearchForInitialization()` exactly as in the
+## original Part-1 attempt: F1 filter changed from `level1>0` (flat-level-0
+## only) to `level1>=nOctaveLayers` (whole finest octave), F2's
+## `GetFeaturesInArea` window changed from `(level1,level1)` to
+## `(0,nOctaveLayers-1)`.
+##
+## **Measured result, via the `[mono-init]`-instrumented probe from frame
+## 700 to end of sequence (same 3841-frame stretch used in part 8)**:
+##
+## | metric                          | before (part 8) | after (this fix) |
+## |----------------------------------|------------------|-------------------|
+## | reject: nmatches<100              | 1840             | **0**             |
+## | reconstruct FAILED                | 71               | 11                |
+## | SUCCESS (successful map inits)     | 3                | **98**            |
+## | destructive resets (full probe)   | not measured this way in part 8 | **94** |
+## | final trajectory                  | empty (0 KFs)    | 3 lines, "Alignment failed -- too few matched points (3)" |
+##
+## Match starvation is solved outright -- zero rejections, matches in the
+## hundreds where they used to top out near 100. But **94 resets and a
+## degenerate final trajectory is the same failure signature as the
+## original (BA-unaware) Part-1 widening attempt** ("Alignment failed --
+## too few matched points (3)", 103 resets) -- so fixing the sigma-weighting
+## bug did not, on its own, prevent the destabilization the earlier attempt
+## hit.
+##
+## **New root cause, measured directly, not theorized**: of the 98
+## successful initializations, **88 (90%) happened between adjacent frames**
+## (reference frame exactly 1 video frame older than the current frame,
+## ~100ms of motion at KITTI's 10Hz). Near-zero baseline is geometrically
+## degenerate for two-view triangulation regardless of match count -- the
+## likely explanation is that the *old* flat-level-0 restriction was
+## accidentally protecting the system from this failure mode all along:
+## match-starvation meant successful inits were rare enough that they
+## usually only happened after enough real motion had accumulated to
+## coincidentally also clear the (unrelated) match-count bar. Now that
+## matching is abundant at any baseline, `MonocularInitialization()`
+## happily initializes from whatever adjacent-frame pair comes along first,
+## producing poorly-conditioned initial maps (translation direction is
+## barely observable at near-zero baseline) that die almost immediately --
+## consistent with 98 inits but 94 resets, i.e. most inits don't survive.
+##
+## **Net assessment**: two genuinely different bugs were conflated under
+## one symptom ("SearchForInitialization widening destabilizes tracking").
+## The sigma-weighting bug was real and is now properly fixed. But it was
+## masking a second, independent bug -- `MonocularInitialization()` has no
+## real parallax/baseline requirement, only a match-count proxy for one --
+## that only becomes visible once match-starvation stops hiding it.
+##
+## **Next session should start with**: add a genuine minimum-baseline/
+## parallax check to `MonocularInitialization()`, independent of match
+## count -- e.g. reject a candidate pair (before or in addition to calling
+## `ReconstructWithTwoViews()`) if the median or mean keypoint disparity
+## between `mInitialFrame` and `mCurrentFrame` is below some threshold, so
+## the reference frame is retained (not discarded) until real motion has
+## accumulated, rather than always collapsing to adjacent-frame pairs. This
+## is a different, third lever from anything tried so far (Options 1/2 in
+## parts 4-6, or the sigma/widening pair here) and directly targets the
+## newly-measured 90%-adjacent-frame pattern. Keep the sigma-weighting fix
+## and the widening in the tree either way -- they're a real, verified
+## improvement on their own axis (match yield), the problem now is a
+## second, independent gate that was never needed before because
+## match-starvation was inadvertently doing its job.
+
+## Current status (2026-07-18, part 7): ran the still-outstanding full seq00
+## ATE checkpoint (no `[start-frame]`, all 4541 frames) with the current
+## tree state (Option 1 density boost + Option 2 bridge without renewal,
+## from parts 4-6). **Still no scorable trajectory -- and the log reveals
+## why in much starker terms than any narrow-window probe so far.**
+##
+## Note on process mechanics: the first attempt at this run was launched via
+## the normal backgrounded-Bash mechanism and was lost mid-run when the
+## harness session was restarted (its tracked output vanished with the
+## scratchpad wipe, confirmed via `ps`/`ls` showing neither the process nor
+## its log survived). Re-ran it via `nohup ... & disown`, detached from the
+## controlling shell, with a separate `while ps -p <pid>; do sleep 20; done`
+## monitor wrapped in a backgrounded Bash call so the harness could still
+## notify on completion -- worth remembering for any future long
+## (multi-minute+) run in this investigation, since the plain backgrounded
+## form isn't resilient to a session restart.
+##
+## **What the log shows**: only 3 total keyframe-map (re)initializations
+## happened across the entire 4541-frame sequence (matching the "true
+## original" baseline's reset *count* noted in part-2's investigation --
+## superficially a good sign), but the gaps between them are the real
+## story. Monocular initialization failure is silent in this codebase --
+## `MonocularInitialization()` prints nothing per failed frame, it just
+## keeps waiting for a two-view pair with enough parallax -- so long
+## stretches with zero console output are not evidence of clean tracking,
+## they're evidence of the system stuck failing to re-initialize, frame
+## after frame, invisibly. Confirmed by cross-referencing `[stats]`
+## progress markers (every 500 frames) against `First KF:N` lines (only
+## printed once initialization actually succeeds):
+##
+## - Map 1: succeeds somewhere around frame ~700, dies almost immediately
+##   (reset at frame 777).
+## - Map 2: **takes 2938 frames** (777 -> 3715) of silent, failed
+##   re-initialization attempts before finally succeeding -- then dies
+##   within ~30 frames (reset at frame 3715, `mnInitialFrameId`=778 is the
+##   *previous* map's start, the new one starts around 3715).
+## - Map 3: succeeds quickly after that (~frame 3715ish -> reset at 3941,
+##   another fast death, 37 failed frames).
+## - **A fourth re-initialization attempt then runs silently from frame
+##   3941 to the end of the sequence at 4541 (600 frames) and never
+##   succeeds** -- the sequence simply ends mid-search. This is why
+##   `SaveKeyFrameTrajectoryTUM()` wrote an empty file: the final active
+##   map genuinely has zero keyframes, not a filtering/indexing bug in the
+##   save path.
+##
+## **This means neither Option 1 nor Option 2 (both still in the tree,
+## unchanged from part 6) fixed, or were even positioned to fix, the actual
+## bottleneck this checkpoint exposes.** Both target *tracking-loss
+## recovery* (staying on the existing map, or bridging a short dropout) --
+## but the dominant cost here is >turns out to be< **monocular
+## initialization latency after a map is already gone**, which is a
+## different mechanism neither option touches: once `ResetActiveMap()`
+## actually fires (which both options can at best delay slightly, not
+## prevent, per parts 4-6's measurements), the system is at the mercy of
+## `MonocularInitialization()`'s two-view search, which this run shows can
+## take **thousands of frames** to succeed again, or may not succeed at all
+## before the sequence ends. This is a materially bigger problem than the
+## turn-region-specific framing this whole investigation started from --
+## it's not just that maps die in hard turns, it's that this fork's
+## from-scratch monocular re-init is, independent of the turn region
+## specifically, extremely slow to recover once triggered.
+##
+## **Next session should start with**: instrumenting
+## `MonocularInitialization()` directly (a temporary frame-count/parallax
+## diagnostic, same pattern as the removed `[reloc-investigate]`/
+## `[merge-investigate]` probes earlier in this file) to find out *why* it
+## takes ~2938 frames in the map-2 case -- is required parallax threshold
+## too strict, is the candidate pair search itself weak, or is the KITTI
+## seq00 camera motion in that stretch just genuinely too close to
+## straight-line (little parallax) for two-view initialization to succeed
+## quickly regardless of thresholds? This is a very different, and
+## seemingly more consequential, root cause than anything targeted so far
+## in parts 1-6, and should probably take priority over further tuning of
+## Options 1/2 until it's understood -- both options are inert once the
+## map is already gone and the system has fallen back to from-scratch
+## initialization.
+
+## Current status (2026-07-18, part 6): tried the exact next step the part-5
+## block below proposed -- renewing `mTimeStampLost` (the `RECENTLY_LOST`
+## timeout clock) every frame the dead-reckoning bridge's
+## `TrackWithMotionModel()` call itself returns true, instead of only once at
+## the first failure -- and **measured a regression, not an improvement**.
+## Reverted.
+##
+## Rebuilt and ran the identical `[start-frame]`-jumped-to-3600, 941-frame
+## probe with the renewal in place. Same 2 resets at the same frame
+## boundaries as every other run in this window, still no scorable
+## trajectory -- but "Frames set to lost" at the second reset went to **53**,
+## *worse* than both the true baseline (51) and the bridge-without-renewal
+## version measured in part 5 (41). Three-way comparison, same probe window,
+## same everything else:
+##
+## | variant                                  | frames set to lost |
+## |-------------------------------------------|---------------------|
+## | true baseline (no Option 1/2)              | 51                  |
+## | Option 1 alone (density boost)              | 54 (noise, ~baseline) |
+## | Option 1 + Option 2 bridge, no renewal      | **41** (real improvement) |
+## | Option 1 + Option 2 bridge, with renewal    | 53 (regression)     |
+##
+## **Why the renewal backfired**: a bare `TrackWithMotionModel()` success
+## doesn't mean the frame is actually recovered -- `TrackLocalMap()` runs
+## immediately afterward (same as the normal `OK` path) and can still fail,
+## in which case the frame still ends up marked lost in `mlbLost` regardless
+## of the renewal. Renewing the clock on that marginal, often-still-failing
+## success just gives the `RECENTLY_LOST` state more total frames to
+## accumulate lost-flags in before something eventually fails for long
+## enough to cross the (now-repeatedly-pushed-back) timeout -- prolonging a
+## still-broken state rather than letting it fail fast and reset. The
+## un-renewed version avoids this because it stays bounded to the original
+## 3-second budget no matter how many marginal bridge attempts happen inside
+## it.
+##
+## Reverted the renewal (kept as a code comment explaining why, at the same
+## spot in `Tracking.cc`, so the next session doesn't re-try it without
+## re-reading this). Tree now has: Option 1 (density boost, part 4, measured
+## neutral) + Option 2 bridge without renewal (part 5, measured real
+## improvement on the lost-frame metric, not yet sufficient to prevent a
+## reset in this specific window) + `clearMap()` fix + `[start-frame]` CLI
+## additions. Rebuilt clean.
+##
+## **Next session should start with**: the lost-frame reduction from Option
+## 2 (51/54 -> 41) is real but this specific probe window still ends the
+## same way (reset, no trajectory) regardless -- the straightforward
+## "extend the timeout" lever is now a *ruled-out*, not just untried, next
+## step. Two remaining untried angles: (a) figure out *why*
+## `TrackWithMotionModel()` succeeds but `TrackLocalMap()` still fails so
+## often during this bridge -- if the projected matches are marginal/noisy,
+## improving match quality (not match presence) might convert more of these
+## partial bridges into full recoveries without needing to touch the
+## timeout at all; (b) stop micro-optimizing this one hard 941-frame window
+## and run the full seq00 ATE checkpoint (still outstanding since Stage 4)
+## with both current options in place, since neither has been checked
+## against the rest of the sequence where the failure mode may look
+## different.
+
+## Current status (2026-07-18, part 5): implemented candidate direction (2)
+## from the part-4 block below -- a dead-reckoning motion-model bridge during
+## `RECENTLY_LOST` -- on top of (still-inert-per-part-4) Option 1, per
+## explicit direction to keep (1) and add (2) rather than choose between
+## them.
+##
+## What was added: in `Tracking::Track()`'s non-IMU `RECENTLY_LOST` branch
+## (`Tracking.cc`, the block that previously called only `Relocalization()`
+## every frame), now tries `TrackWithMotionModel()` first -- gated on
+## `mbVelocity`, which stays true and holds its last real value from before
+## tracking was lost (it's only overwritten on a successful frame) -- and
+## falls back to `Relocalization()` unchanged if that returns false. This is
+## a real constant-velocity dead-reckoning estimate against the still-intact
+## local map, not a new assumption: `TrackWithMotionModel()` already existed
+## and is used identically in the normal `OK`-state path, it just was never
+## attempted during `RECENTLY_LOST` for monocular before this change (only
+## the IMU sensor branches got an analogous `PredictStateIMU()` bridge).
+## Purely additive to the control flow -- doesn't touch the 3-second
+## `RECENTLY_LOST`->`LOST` timeout or the `KeyFramesInMap()<10` reset gate,
+## both unchanged.
+##
+## **Result (measured): a real, partial, non-dispositive improvement.**
+## Rebuilt and re-ran the identical `[start-frame]`-jumped-to-3600,
+## 941-frame turn-region probe used for every measurement in this
+## investigation, with Option 1 (part 4) and this Option 2 change both in
+## the tree. Same top-line outcome as every prior run in this window: 2
+## destructive resets, at the exact same frame boundaries
+## (`mnFirstFrameId`/`mnInitialFrameId` = 115/0 then 341/116 -- identical to
+## both the baseline and Option-1-only runs), still no scorable trajectory.
+## **But** the "Frames set to lost" count at the second reset -- a real,
+## direct measurement of how many frames in the dying map were flagged lost
+## (`Tracking.cc`'s `num_lost` bookkeeping in `ResetActiveMap()`) -- dropped
+## from 51 (true baseline) / 54 (Option 1 alone) to **41** with both options
+## combined: roughly a 20-24% reduction in frames the dead-reckoning bridge
+## evidently rescued that would otherwise have been marked lost.
+##
+## **Why it didn't prevent the reset despite that real improvement**: the
+## `RECENTLY_LOST`->`LOST`->reset transition in this fork is gated purely on
+## wall-clock time since the *first* failure (`mTimeStampLost`, set once,
+## never renewed while still `RECENTLY_LOST`) exceeding a hardcoded 3.0
+## seconds -- not on how many individual frames the bridge manages to
+## rescue in between. So even though more frames got a usable dead-reckoned
+## pose this run, if `TrackLocalMap()` (called immediately after, same as
+## the normal path) still ultimately fails on enough of them, the map still
+## crosses the fixed 3-second mark and still gets reset at the same point.
+## The bridge is doing real work (fewer lost frames, confirmed by direct
+## measurement) but isn't yet sufficient on its own in this specific hard
+## window to outlast the fixed timeout.
+##
+## **Net picture**: both options are now in the tree, both inert-to-neutral
+## on this probe's top-line outcome (resets/trajectory), but Option 2 has
+## a measured, non-placebo effect on a finer-grained metric (frames rescued
+## from "lost") that Option 1 didn't show at all. This is evidence the
+## dead-reckoning direction is more promising than the density-boost
+## direction for this specific failure mode, just not sufficient yet in
+## isolation.
+##
+## **Next session should start with**: the most direct next lever, given
+## what was just measured, is that `mTimeStampLost` is never renewed while
+## `RECENTLY_LOST` persists -- so a frame successfully bridged by
+## `TrackWithMotionModel()` still counts against the same fixed 3-second
+## budget as a frame that failed outright. Renewing `mTimeStampLost` to the
+## current frame's timestamp on every frame the dead-reckoning bridge
+## itself succeeds (treating a successfully-bridged frame as a sign the
+## dropout hasn't become permanent yet, giving the *next* few frames a
+## fresh budget instead of counting down against the original failure) is
+## an untried, natural extension of this exact change -- not yet
+## implemented or measured. Also still outstanding: a full seq00 ATE
+## checkpoint with both options in place, to see whether either helps
+## anywhere else in the sequence even though this specific probe window
+## shows no top-line change.
+
+## Current status (2026-07-17, still yet later the same day, part 4):
+## implemented candidate direction (1) from the part-3 status block below --
+## dynamic SIFT density boost during high-angular-velocity frames -- code
+## written and in the tree, **not yet measured** (build was in progress when
+## this entry was written; results to follow in the next entry).
+##
+## What was added: `ORBextractor::SetDynamicDensity(nfeatures_,
+## contrastThreshold_)` (`ORBextractor.h`/`.cc`) rebuilds the live `cv::SIFT`
+## detector with a new target feature count and contrast threshold,
+## deliberately leaving `nOctaveLayers` (and therefore `nlevels` and every
+## `mvScaleFactor`/`mvLevelSigma2` array) untouched -- those are fixed-size
+## arrays relied on everywhere else, and the part-2 regression above already
+## showed that touching per-level scale/sigma structure mid-sequence is
+## dangerous. This only asks SIFT to look harder within the same octave/layer
+## structure, not to change what a level means.
+##
+## `Tracking::Track()` (`Tracking.cc`, right after the motion-model velocity
+## update) now computes the per-frame rotation angle from `mVelocity`
+## (`mVelocity.so3().log().norm()`, converted to degrees) and calls
+## `SetDynamicDensity()` on `mpORBextractorLeft` **only on a state
+## transition** -- entering high-angular-velocity mode boosts to 2x base
+## `nfeatures` and halves the contrast threshold (0.04 -> 0.02), leaving mode
+## reverts back to base on the frame rotation dropping back below threshold.
+## This avoids rebuilding the `cv::SIFT` object every single frame once
+## already in the boosted state.
+##
+## Threshold chosen (5 deg/frame) is a starting estimate, not calibrated the
+## way `TH_HIGH`/`TH_LOW` were in Stage 4: real KITTI seq00 turns average
+## well under 1 deg/frame with occasional few-degree bumps in normal curves,
+## but hit an 18 deg/frame peak during the sharp maneuver that triggers the
+## documented turn-region tracking-loss cascade -- 5 sits well above ordinary
+## motion and well below that peak. The boost factor (2x) and contrast
+## threshold (0.02, half of `ORBextractor.cc`'s base 0.04 -- kept in sync
+## manually, no shared constant between the two files) are likewise
+## unmeasured starting points, not tuned.
+##
+## `mnBaseNFeatures` (recorded once at construction, in both
+## `newParameterLoader()` and `ParseORBParamFile()`) and `mbHighAngularVelocityMode`
+## (transition-tracking bool) were added to `Tracking.h` to support this.
+##
+## **Not yet done, next immediately**: rebuild `orbslam3_sift_kitti_ate`
+## (Tracking.cc/ORBextractor.cc were edited after the last build -- binary
+## on disk predates this change) and re-run the same `[start-frame]`-jumped-
+## to-3600 fast probe used for the part-2/part-1 investigations above, to
+## see whether destructive resets in the turn region drop. If that looks
+## promising, follow with a full seq00 ATE checkpoint (no start-frame arg)
+## against the 6.4-10.7m ORB+DBoW2 baseline and the still-outstanding "real
+## seq00 ATE checkpoint" item that's been deferred since Stage 4.
+##
+## Candidate direction (2) (dead-reckoning motion-model fallback during
+## tracking loss) from the part-3 block below remains untried -- picked (1)
+## to try first since it's strictly additive (touches only feature
+## extraction density, not the tracking-loss control flow) and cheaper to
+## measure in isolation.
+##
+## **Result (measured, same session): negative -- no meaningful effect.**
+## Rebuilt `orbslam3_sift_kitti_ate` against the dynamic-density change and
+## ran the same `[start-frame]`-jumped-to-3600, 941-frame probe used
+## throughout this investigation. Outcome: 2 destructive resets (identical
+## count to the part-1 baseline probe), at the exact same frame boundaries
+## (`mnFirstFrameId`/`mnInitialFrameId` = 115/0 then 341/116 in both runs),
+## and **no scorable trajectory produced either way** (empty
+## `KeyFrameTrajectory.txt`, `loadTumTrajectory` returns empty).
+##
+## Not satisfied with relying on the part-1 prose numbers from days earlier
+## in this file for the comparison -- re-ran the *exact* same probe this
+## session against the pre-change code too, via `git stash push` on just the
+## four dynamic-density files (`Tracking.cc/.h`, `ORBextractor.cc/.h`,
+## leaving the `clearMap()` fix and `[start-frame]` CLI additions in place),
+## rebuild, run, `git stash pop` to restore. Side-by-side: baseline reports
+## "51 Frames set to lost" after the second reset, dynamic-density reports
+## "54 Frames set to lost" -- a 3-frame difference, i.e. noise, not signal.
+## Every other line of the two logs (reset points, map-point counts,
+## "Fail to track local map!"/"Relocalized!!" cadence) is identical between
+## the two runs.
+##
+## **Why it didn't help, most likely**: the boost only fires once
+## `mVelocity`'s rotation estimate crosses 5 deg/frame, but `mVelocity` is
+## computed from the *previous two tracked frames' relative pose* -- once
+## tracking is already lost (which is what's actually happening in this
+## window: both maps die at only 2 keyframes, same as the earlier
+## `reloc-investigate` finding), there's no fresh `mVelocity` to read the
+## high-angular-velocity signal from in the first place. The boost can only
+## help the frames *leading into* a hard turn while tracking is still alive
+## -- it can't help recovery once tracking has already dropped, which
+## turned out to be the dominant failure mode in this exact probe window
+## (frames land right in the middle of an already-lost stretch, not at the
+## clean onset of the turn). This may still be worth keeping for the actual
+## turn onset elsewhere in the sequence -- this probe specifically isolates
+## the post-loss recovery portion, not the pre-loss prevention portion, so
+## it's not a full refutation of the idea, just evidence it doesn't fix
+## *this* symptom.
+##
+## Tree left with the dynamic-density change in place (stash was popped
+## back) since it's inert once tracking is already lost and does not appear
+## to be actively harmful either (identical reset behavior to baseline) --
+## but this is a judgment call, not a strong result either way.
+## **Next session should start with**: getting explicit direction on
+## whether to (a) revert dynamic-density entirely as a negative result and
+## move to candidate direction (2) (dead-reckoning fallback during tracking
+## loss, which targets the actual observed failure mode here more directly
+## than (1) did), (b) keep (1) in the tree and additionally try (2) on top
+## of it, or (c) run a full seq00 ATE checkpoint with (1) in place first to
+## see whether it helps anywhere else in the sequence before deciding --
+## this probe only covers one 941-frame window, not the whole run.
+
+## Current status (2026-07-17, still yet later the same day, part 3):
+## reverted both Part 2 changes (forced-flat-level-0 `SearchForInitialization`
+## widening, 12->8 merge threshold) back to the known-good baseline per
+## explicit direction, since neither helped (see part 2 below for the full
+## account). Confirmed via `git checkout` + rebuild that
+## `ORBextractor.h`/`ORBmatcher.cc`/`LoopClosing.cc` are back to their exact
+## pre-Part-2 text -- only the `clearMap()` UB fix and the two `[start-frame]`
+## CLI additions (`orbslam3_kitti_ate.cpp`, `orbslam3_sift_calibrate.cpp`)
+## remain uncommitted in the tree, matching the state at the end of the
+## first "Current status" block further down.
+##
+## Two new candidate directions proposed, not yet started: (1) dynamically
+## widen SIFT extraction (lower contrast threshold / raise target feature
+## count) specifically during high-angular-velocity frames, detected via the
+## existing motion-model/IMU signal, to prevent feature starvation during a
+## turn instead of trying to recover after the fact; (2) a dead-reckoning
+## motion-model fallback during tracking loss (propagate pose via constant-
+## velocity or IMU integration for a short window) instead of immediately
+## falling into re-initialization, as a bridge across the few frames where a
+## sharp turn sweeps features out of view. Both are meaningfully different
+## in kind from this session's Part 1/2 attempts -- they target the turn
+## itself (prevention) rather than recovery after tracking is already lost.
+## **Next session should start with**: picking one of these two to implement
+## and measure, or getting explicit direction on which to try first --
+## neither has been scoped or estimated yet.
+
+## Current status (2026-07-17, still yet later the same day, part 2): tried
+## a combined two-part fix per explicit direction -- (1) redo the flat-
+## level-0 widening in `SearchForInitialization()`, but this time force
+## surviving matched keypoint pairs to flat-level 0 before they feed
+## `CreateInitialMapMonocular()`, so BA weights them uniformly instead of
+## penalizing whichever SIFT layer they happened to come from (the theorized
+## cause of the earlier regression); (2) lower `NewDetectCommonRegions()`'s
+## merge-candidate-search keyframe-count gate from 12 to 8, so young maps
+## need less survival time before merging back into the older, intact map
+## becomes possible. **Both implemented, both left in the tree, but neither
+## produced a scorable ATE, and the underlying problem is now understood
+## more precisely than before.**
+##
+## Part 1 (BA weighting fix) result: real, measured improvement over the
+## naive widening, but not enough -- 10 resets by frame 500 (vs. the naive
+## widening's much faster blowup, but still vs. the true original's *zero*
+## resets through frame 777), climbing to 103 destructive resets across the
+## full 4541-frame run (vs. 3 for the true original, 90+ for the naive
+## widening by a similar point). Final result: "Alignment failed -- too few
+## matched points (3)", i.e. still no scorable trajectory, though technically
+## a small one was produced this time (unlike the complete "No trajectory
+## produced" of the unwidened version) -- a marginal, not real, improvement.
+## So the BA-sigma-weighting theory was likely a real, partial contributor,
+## but not the whole explanation for why widening the match window
+## destabilizes tracking broadly (not just in the turn region) -- something
+## else about admitting cross-layer matches still costs real stability.
+##
+## Part 2 (lowered merge threshold) result: **never got a chance to matter.**
+## Verified directly via another temporary diagnostic
+## (`[merge-investigate]`, since removed) added at both
+## `KeyFrameDatabase::DetectNBestCandidates()`'s call site and
+## `DetectCommonRegionsFromBoW()`'s merge-path return, re-run via the
+## `[start-frame]`-jumped-to-3600 fast probe: across a full 941-frame probe
+## (23 destructive resets), **`DetectNBestCandidates()` was never once
+## invoked for the merge path** -- meaning no map in this hard region ever
+## survived long enough to reach even the lowered 8-keyframe bar, let alone
+## the old 12. So the merge threshold wasn't the bottleneck this session
+## found it to be in isolation -- it's downstream of Part 1's still-
+## unresolved stability problem. Also directly confirmed (real evidence, not
+## assumption) that `DetectNBestCandidates()` itself has no same-map
+## restriction bug like `DetectRelocalizationCandidates()` did -- it
+## correctly routes cross-map candidates to `vpMergeCand` (line ~440) --
+## so candidate retrieval was never the blocker; it's purely that
+## `NewDetectCommonRegions()` is never reached with a map old enough.
+##
+## Both diagnostic instrumentation blocks removed afterward (confirmed via
+## `git diff`); the two substantive changes -- forced flat-level-0 on
+## matched initialization pairs, and the 12->8 merge-search threshold --
+## remain in the tree, uncommitted, alongside the still-uncommitted
+## `clearMap()` fix and `[start-frame]` CLI additions from earlier in this
+## session. `orbslam3_sift_kitti_ate` left built against this state.
+##
+## **Net assessment**: the turn-region failure's true root cause is still
+## the fragility of monocular re-initialization after a hard tracking loss
+## in this fork -- not fully explained by the flat-level-0 match-pool size
+## (widened and partially BA-corrected, still unstable), not explained by
+## VLAD candidate-retrieval quality or a map-filtering bug (directly ruled
+## out), and not resolved by giving merging more time to fire (moot --
+## survival, not the threshold, is the blocker). Something about this
+## fork's re-initialization is still meaningfully less robust than the
+## original ORB+DBoW2 baseline even outside the turn region specifically
+## (103 resets across the whole sequence this attempt, vs. 3 originally).
+## **Next session should start with**: reverting to the known-good state
+## (the single unwidened `SearchForInitialization`, `clearMap()` fix, and
+## `[start-frame]` CLI addition only -- i.e. treat this session's Part 1/2
+## attempts as informative-but-negative results, not something to build on
+## directly) unless a genuinely new hypothesis for the broader (not just
+## turn-region) stability cost of widening the match pool emerges. Possible
+## angles not yet tried: instrumenting exactly which fraction of widened
+## matches are cross-layer (vs. same-layer) to see if the extra candidates
+## are mostly low-quality outliers RANSAC should be rejecting but isn't;
+## comparing this fork's post-loss re-initialization behavior frame-by-frame
+## against the original ORB fork's own (successful) recoveries elsewhere in
+## the sequence, if any exist, to find a concrete behavioral difference
+## instead of theorizing further.
+
+## Current status (2026-07-17, still yet later the same day): **root-caused
+## why relocalization/merge never recovers the earlier (still-intact, richly
+## keyframed) map once tracking is lost in the turn region** -- the other
+## lead flagged after the flat-level-0 fix was reverted. Confirmed via
+## direct measurement, not the theorized VLAD-retrieval-quality explanation:
+## `LoopClosing::NewDetectCommonRegions()` (the function that runs both loop
+## closing AND map-merge candidate detection) has a hardcoded early return --
+## `if(mpLastMap->GetAllKeyFrames().size() < 12) { ...; return false; }` --
+## that skips candidate search entirely whenever the *current* map has fewer
+## than 12 keyframes. This is what actually blocks recovery: it's not that
+## VLAD fails to find the old map as a merge candidate, it's that the
+## candidate search **never runs at all** for any of the short-lived maps
+## this fork keeps creating in the turn region.
+##
+## Verified directly, not inferred: added a temporary diagnostic print at
+## this exact branch (`[reloc-investigate]`, since removed) and re-ran via
+## the `[start-frame]` CLI arg jumped to frame 3600 (right before the
+## 3650-3699 turn) for a fast, targeted repro instead of replaying the whole
+## sequence. Result over the resulting 941-frame probe: **the `<12` skip
+## branch fired twice, both times with the map sitting at exactly 2
+## keyframes; the actual candidate-search branch fired zero times.** Both of
+## those 2-keyframe maps were destructively reset shortly after. This
+## directly confirms the theory with real numbers: maps created in this hard
+## region die from repeated tracking loss well before they can accumulate a
+## dozen keyframes, so `NewDetectCommonRegions()`'s merge path -- the one
+## mechanism that could reconnect a fresh map back to the older, well-
+## established one sitting right there in `mpKeyFrameDB` -- never gets a
+## chance to run. This is architecturally unchanged ORB-SLAM3 behavior (the
+## `<12` constant predates this session's SIFT/VLAD work entirely), but this
+## fork's specific weakness -- fragile re-initialization after a hard scene,
+## documented in the flat-level-0 investigation above -- means maps almost
+## never survive long enough to reach the threshold that would let this
+## fork's *other* recovery mechanism kick in.
+##
+## Diagnostic print removed afterward (confirmed via `git diff` back to
+## exact original text); `orbslam3_sift_kitti_ate` rebuilt clean.
+##
+## **Net picture now**: the turn-region failure has two compounding causes,
+## both now root-caused with real evidence -- (1) monocular
+## re-initialization is fragile after a hard loss (flat-level-0 restriction
+## in `SearchForInitialization`, still unfixed after the earlier attempt
+## regressed BA stability -- see the status block above), and (2) even if
+## re-init eventually succeeds, the resulting maps die again before
+## reaching the 12-KF bar that would let map-merging reconnect them to the
+## older map instead of starting over from scratch every time. Neither
+## `TH_HIGH`/`TH_LOW` calibration nor VLAD's relocalization-candidate
+## quality are the bottleneck -- both were directly measured and ruled out
+## earlier in this investigation.
+##
+## **Next session should start with**: deciding which of the two
+## compounding causes to address first. Options, not yet tried: (a) lower
+## the 12-KF merge-search threshold for this fork specifically (cheap,
+## mechanical, but doesn't fix why maps die so fast in the first place --
+## may just mean shorter-lived maps also fail to merge because
+## `DetectCommonRegionsFromBoW`'s own geometric-verification bar isn't met
+## either, untested); (b) revisit the flat-level-0
+## `SearchForInitialization` fix with the BA-sigma-weighting bug actually
+## fixed this time (compute per-flat-level sigma from octave alone, not the
+## full flat index, so within-octave cross-layer matches get correct
+## confidence) -- addresses the more fundamental problem, higher effort;
+## (c) reduce the local-mapping keyframe-insertion threshold specifically
+## for young/recovering maps so they accumulate keyframes faster and reach
+## 12 sooner, untested and might trade off map quality for count. No
+## consensus yet on which to pursue -- flag to the user rather than assume.
+
+## Current status (2026-07-17, yet later the same day): tried the
+## flat-level-0 fix flagged in the previous status block, found a real
+## regression, and **reverted it**. Widened `ORBmatcher::
+## SearchForInitialization()`'s level restriction from exactly flat-level 0
+## to the whole finest octave (flat levels `[0, nOctaveLayers)`, via a new
+## `ORBextractor::GetOctaveLayers()` getter) on both the F1 filter and the
+## F2 `GetFeaturesInArea` search window. This measurably fixed the intended
+## problem -- re-init point counts jumped from a marginal ~80-100 (right at
+## the `nmatches>=100` floor) to a healthy 150-1600+ -- but re-running the
+## full Stage 4 checkpoint surfaced a much worse regression: **90 destructive
+## `ResetActiveMap()` calls by frame 3600 alone, vs. 3 for the entire
+## 4541-frame sequence before this change.** The very first map (built at
+## frame 0, 746 points -- far richer than before) failed almost immediately,
+## nowhere near the turn region that motivated the fix, so this wasn't a
+## narrow side effect.
+##
+## Leading (not fully confirmed) explanation: this fork's
+## `mvScaleFactor`/`mvLevelSigma2`/`mvInvLevelSigma2` arrays are indexed by
+## flat level and used as bundle-adjustment confidence weights in ~54 sites
+## in `Optimizer.cc` (`invSigma2 = mvInvLevelSigma2[kp.octave]` and
+## friends) -- a direct carryover from ORB, where each pyramid level is a
+## genuinely different image resolution and a coarser level legitimately
+## deserves a looser weight. In this SIFT fork, flat level encodes
+## `(octave, layer)`, and only *octave* changes actual image resolution;
+## *layer* changes only the Gaussian blur sigma within one octave, at the
+## same resolution. Widening the match window let `SearchForInitialization`
+## freely pair, e.g., a flat-level-0 keypoint in F1 with a flat-level-7
+## keypoint in F2 -- both real, valid, same-resolution matches, but landing
+## in `Optimizer.cc`'s weighting scheme as if they were 7 ORB pyramid levels
+## apart in resolution, i.e. an ~85% looser confidence weight than the match
+## actually deserves. Feeding bundle adjustment (used inside
+## `CreateInitialMapMonocular` itself, not just later local BA) enough
+## mis-weighted residuals plausibly explains why richer-looking initial maps
+## were *less* stable, not more.
+##
+## Not proven -- didn't instrument actual BA residual weights to confirm --
+## just the most coherent explanation consistent with every observed
+## symptom (immediate post-init failure, far from the turn region, despite
+## higher raw point counts). **Reverted both changes**
+## (`ORBmatcher::SearchForInitialization()` back to the exact single-level
+## match, `ORBextractor::GetOctaveLayers()` getter removed) via `git
+## checkout` -- confirmed back to the exact pre-fix text. Rebuilt
+## `orbslam3_sift_kitti_ate` clean afterward.
+##
+## Per explicit direction, **not pursuing this lead further for now**.
+## Redirected to the other candidate from the previous status block:
+## investigating why `Tracking::Relocalization()` never recovers the
+## still-intact earlier map once a new one is created via
+## `CreateMapInAtlas()` -- does VLAD's candidate retrieval even return the
+## old map's keyframes from the rotated post-turn viewpoint? If this
+## `mvLevelSigma2`-weighting theory is ever revisited, the real fix is
+## likely computing per-flat-level sigma from *octave alone* (ignoring
+## layer) rather than from the full flat index, so within-octave matches
+## get equal, correct confidence regardless of which layer either point
+## came from -- untried.
+
+## Current status (2026-07-17, even later the same day): ran the real Stage 4
+## checkpoint (full KITTI seq00, `orbslam3_sift_kitti_ate`, no start-frame
+## skip) now that the `clearMap()` stall is fixed. **The stall fix is
+## confirmed real and working** -- the run reached `Shutdown` on all 4541
+## frames with zero hangs (previously: 10-20+ min stuck every retest in this
+## region). But it still produced **no ATE number** -- "No trajectory
+## produced" -- because the last of three map resets landed at frame 3941
+## with only ~600 frames of runway left, and monocular re-initialization
+## never once succeeded again before the sequence ended. So the stall and
+## the "no trajectory" failure were two separate bugs that looked identical
+## from the outside; only the first is fixed.
+##
+## Root-caused (not just observed) via direct measurement, ruling out the
+## obvious suspects one at a time instead of guessing:
+## - **Not feature starvation or blur**: a standalone probe
+##   (`cv::SIFT`/`cv::ORB` directly, bypassing the whole pipeline) showed all
+##   three detectors hitting the 2000-feature cap on every frame tested
+##   through the failure region, and Laplacian-variance blur scores showed
+##   nothing unusual.
+## - **Not Stage 4's TH_HIGH/TH_LOW miscalibration**: Stage 4's calibration
+##   tool only ever sampled frames 0-500 (a calm stretch) -- a real gap, so
+##   this looked like the prime suspect. Added a `[start-frame]` arg to
+##   `analyze/orbslam3_sift_calibrate.cpp` (same additive pattern as the
+##   `orbslam3_kitti_ate.cpp` fix) and re-ran calibration on frames 3600-4000
+##   specifically: true-match p50=10564/p95=51151/p99=68823 vs the original
+##   calm-region 8380/46778/67038 -- close enough to be noise, not a real
+##   miscalibration. This hypothesis is ruled out by direct measurement, not
+##   assumption.
+## - **The real cause: a genuine, sustained sharp-turn maneuver in KITTI
+##   seq00 that the original ORB-based fork tracks through cleanly, but this
+##   SIFT+VLAD fork cannot recover from once lost.** Computed real heading
+##   change from the ground-truth poses (`poses/00.txt`): 163.7 degrees of
+##   total turning in just frames 3650-3699 alone (peak single-step 18.1
+##   degrees/frame at frame 3686), another 155.8 degrees at frames 3950-3999,
+##   and more at 4350-4449 -- this is a real, sustained loop/turn maneuver,
+##   not sensor noise. Confirmed the *original* ORB-based fork
+##   (`third_party/ORB_SLAM3`, the one already validated at 6.4-10.7m ATE)
+##   sails through this exact span without incident: its saved
+##   `vendored_seq00_KeyFrameTrajectory.txt` has 113 continuous keyframes
+##   covering timestamps 378-471s (= frames ~3650-4541), no visible gap. So
+##   this is not KITTI seq00 being unTrackable -- it's a fork-specific
+##   weakness.
+##
+## Exact failure chain, read directly off the checkpoint log's own reset
+## markers: map B (initialized frame 778) tracked cleanly for ~2937 frames,
+## then lost tracking at frame ~3684 -- squarely inside the 3650-3699
+## turn window containing the 18 deg/frame spike -- and hard-reset at frame
+## 3715 after 31 frames of failed relocalization. Its replacement (map C)
+## barely initialized at frame 3745 ("New Map created with **100** points" --
+## exactly at `SearchForInitialization`'s `nmatches>=100` floor, a fragile
+## initialization by definition) and survived only ~113 frames before also
+## failing, hard-resetting at frame 3941. After that, **zero** successful
+## re-initializations for the remaining 600 frames, which span the second
+## (3950-3999) and third (4350-4449) turn bursts.
+##
+## One concrete, measured contributing factor found while investigating the
+## fragile-at-100-points re-inits: `ORBmatcher::SearchForInitialization()`
+## only matches keypoints at flat-level 0 (`if(level1>0) continue;`, a
+## leftover ORB assumption that level 0 = the majority scale level). For
+## this SIFT fork's remapped octave encoding, flat-level 0 means specifically
+## `octave==-1 && layer==1`, which a direct histogram probe (real
+## `ORBextractor`, real KITTI frames) showed holds only ~9-17% of each
+## frame's 2000 keypoints (182-337, sampled across both calm and turn-region
+## frames) -- present, but a much smaller and more marginal pool than ORB's
+## typical level-0 share, consistent with re-init repeatedly landing right at
+## the 100-match floor instead of comfortably above it. Not yet confirmed as
+## the full explanation (didn't instrument *why* relocalization against the
+## still-intact map B / VLAD database never succeeded either, which is the
+## other half of "why does it never recover") -- flagged as the most
+## promising lead, not a proven complete root cause.
+##
+## **Left in the tree, uncommitted along with the still-uncommitted
+## `clearMap()` fix from the previous status block**: the
+## `orbslam3_sift_calibrate.cpp` `[start-frame]` addition (small, additive,
+## same pattern as `orbslam3_kitti_ate.cpp`'s). The standalone probes used
+## for the feature-count/blur and octave-histogram measurements were
+## throwaway scratch files (`/tmp/.../sift_probe.cpp`,
+## `/tmp/.../octave_hist.cpp`), not added to the repo.
+##
+## **Next session should start with**: either (a) instrument why
+## `Tracking::Relocalization()` never recovers map B once map C is created
+## (does VLAD's candidate retrieval even return map B's keyframes as
+## candidates from the rotated post-turn viewpoint? is it being tried at
+## all, given `CreateMapInAtlas()` starts a fresh map rather than blocking on
+## relocalization?), or (b) directly address the flat-level-0 fragility in
+## `SearchForInitialization` (e.g. widen the level filter to a small window
+## of nearby flat-levels instead of requiring an exact match, given SIFT's
+## octave semantics don't carry the same "level 0 dominates" assumption ORB's
+## did) and re-run the Stage 4 checkpoint to see if re-init becomes robust
+## enough to survive the turn. Either way, re-run the full checkpoint
+## afterward -- this session never got a real ATE number, only proof that
+## the stall is fixed and a real, separate, well-characterized cause for why
+## no trajectory was produced.
+
+## Current status (2026-07-17, still later the same day): **found and fixed
+## the root cause of the frame ~3500-4000 stall** described in the status
+## block just below. It was a real bug, not a performance/tuning issue:
+## `KeyFrameDatabase::clearMap()` (`third_party/ORB_SLAM3_SIFT/src/
+## KeyFrameDatabase.cc`) cached `vend = mvDatabase.end()` once before a loop
+## that calls `mvDatabase.erase(vit)` repeatedly. That's undefined behavior
+## for `std::vector` (safe for `std::list`, which is probably where the
+## pattern got copied from while replacing DBoW2's list-based structures in
+## Stage 3) -- `erase()` shrinks the vector, so the cached `vend` goes stale
+## and the loop walks past the real logical end into leftover buffer
+## memory, potentially even calling `erase()` at/past the real `end()`
+## iterator, itself also undefined behavior. `clearMap()` is called on
+## every `Tracking::ResetActiveMap()` and typically erases *most* of
+## `mvDatabase` (everything belonging to the map being reset), so this
+## wasn't a rare edge case -- it fired on nearly every reset, and got worse
+## as the database grew. Fixed by re-querying `mvDatabase.end()` every
+## iteration instead of caching it (the standard, correct idiom for
+## erase-in-a-loop over a vector).
+##
+## Root-caused via live thread-level `/proc` inspection (no `gdb` access on
+## this machine, ptrace_scope blocks attach) rather than a stack trace:
+## added per-frame heartbeat/timing prints throughout `GrabImageMonocular`/
+## `Track()`/`MonocularInitialization`, which showed the hang always started
+## *after* `LocalMapping`'s reset acknowledgment ("Active map reset,
+## Done!!!") printed but *before* the next frame's processing ever began --
+## narrowing it to the handful of synchronous calls `Tracking::
+## ResetActiveMap()` makes in between. `ps -T`/`/proc/<pid>/task/*/stat`
+## confirmed only the single calling (Tracking) thread was burning CPU
+## (99.7-99.3%) while `LocalMapping`, `LoopClosing`, and the OpenCV worker
+## pool all sat fully idle -- which ruled out both reset-acknowledgment wait
+## loops (cheap `usleep`-based polling on the caller) and pointed straight
+## at the one synchronous, single-threaded call left in that gap:
+## `mpKeyFrameDB->clearMap(pMap)`.
+##
+## **Validated**: added a temporary `analyze/orbslam3_kitti_ate.cpp`
+## `[start-frame]` CLI arg (kept, harmless/additive, default 0) to jump into
+## the middle of KITTI seq00 near the known stall region instead of
+## replaying the whole sequence on every retest. The exact configuration
+## that reproduced the stall 4 times in a row this session (start frame
+## 3600) now runs clean through all 941 remaining frames to `Shutdown` with
+## zero hangs post-fix; both resets that occur complete in 0ms each. All
+## other TEMPORARY diagnostic instrumentation added while hunting this
+## (`[heartbeat]`, `[framector-timing]`, `[track-timing]`, `[sfi-timing]`,
+## `[rtv-timing]`, `[tlm-timing]`, `[ulkf-timing]`, `[clearmap-timing]`, and
+## the older `[reloc-timing]` in `Relocalization()`) has been removed now
+## that the bug is found; only the fix itself and the `[start-frame]` CLI
+## addition remain.
+##
+## **Not yet done**: a real Stage 4 checkpoint run (full KITTI seq00, frame
+## 0 to end, against the documented 6.4-10.7m ORB+DBoW2 baseline) -- the
+## validation above used the artificial `start-frame`-skipped diagnostic
+## setup, which never produces a scorable trajectory (fresh mid-sequence
+## init, too little map history) and isn't a real accuracy measurement.
+## **Next session should start with**: run
+## `./build/orbslam3_sift_kitti_ate vocabulary_sift/vlad_codebook_all.yml
+## <settings.yaml> .../sequences/00 .../poses/00.txt` (no start-frame arg)
+## end-to-end and report the real ATE RMSE/mean/median/max, then proceed to
+## Stage 5 (loop-closure/relocalization-specific validation) and Stage 6
+## (mechanical cleanup: `ORBextractor`->`SIFTextractor` rename, remove dead
+## `mBowVec`/`mFeatVec`, drop `Thirdparty/DBoW2` from `orbslam3_sift_ext`'s
+## build) per the original plan
+## (`/home/nam/.claude/plans/valiant-shimmying-tome.md`).
+
+## Current status (2026-07-17, later the same day): swapping the vendored ORB-SLAM3's
+## ORB features for SIFT, in a full fork (`third_party/ORB_SLAM3_SIFT`, the
+## original `third_party/ORB_SLAM3` is untouched and still independently
+## buildable) per explicit request, with DBoW2 loop-closure replaced by a
+## custom VLAD (Vector of Locally Aggregated Descriptors) index -- no
+## pretrained SIFT-compatible vocabulary exists anywhere (confirmed via web
+## search) and no pretrained VLAD codebook exists either (also confirmed);
+## NetVLAD does have real pretrained weights but was evaluated and rejected
+## for now given the added cost (Python/PyTorch weight-conversion toolchain,
+## new OpenCV dnn dependency, raw-image retention doesn't exist in this
+## project's monocular Frame path, unverified KITTI domain transfer from
+## Pittsburgh street-view). Followed a fully staged plan (see
+## `/home/nam/.claude/plans/valiant-shimmying-tome.md`): Stage 0 (verified
+## SIFT's octave/layer packing against real KITTI data, caught a real
+## off-by-one before it went live), Stage 1 (SIFTextractor swap, checkpoint
+## passed), Stage 2 (ORBmatcher reworked for L2/float descriptors, found and
+## fixed a real gap the plan itself missed -- `SearchForTriangulation` also
+## depended on DBoW2's FeatureVector, not just the two `SearchByBoW`
+## overloads), Stage 3 (new `VladVocabulary` class, `KeyFrameDatabase`
+## rewritten around a flat brute-force-scored list instead of DBoW2's
+## inverted file, codebook trained on all 22 available KITTI sequences --
+## ~85M descriptors seen, reservoir-sampled to 400k rows, k=64, sanity-
+## checked: 0.48 similarity for adjacent frames vs -0.01 for distant ones),
+## and Stage 4 (measured, not guessed, `TH_HIGH`/`TH_LOW` via RANSAC-verified
+## true/false-match squared-L2 distance percentiles on real KITTI data:
+## 227778 true pairs p50=8380, 43983 false pairs p50=25357).
+##
+## **Currently blocked** on a live performance stall: the first full-sequence
+## checkpoint run (Stage 3e) tracked 87% of KITTI seq00 before a late
+## tracking-loss/map-reset produced an empty trajectory (expected, given
+## Stage 2's placeholder thresholds at that point). After Stage 4's real
+## calibration, re-running consistently reaches a healthy pace through
+## frame ~3000-3500, then stalls for 10-20+ minutes around frame 3500-4000
+## on every attempt so far. Found and fixed three real, confirmed
+## performance bugs along the way (all committed, all genuine
+## improvements): (1) `KeyFrameDatabase::DetectRelocalizationCandidates()`
+## had no cap on returned candidates (DBoW2's word-sharing prefilter used
+## to keep this naturally small; VLAD has no equivalent) -- capped at
+## `kMaxRelocCandidates=20`, mirroring the cap `DetectNBestCandidates()`
+## already had; (2) `ORBmatcher`'s brute-force `SearchByBoW`/
+## `SearchForTriangulation` replacements (see Session 2) called
+## `cv::batchDistance()` once per KeyFrame descriptor (~1000-1500 small
+## calls per candidate) instead of once for the whole descriptor matrix --
+## fixed to one call per function invocation. Despite both fixes (confirmed
+## individually correct and each a real improvement), the frame 3500-4000
+## stall persists on every retest. Diagnostic instrumentation added to
+## `Tracking::Relocalization()` (`[reloc-timing]` stderr lines, still in the
+## tree, marked TEMPORARY) proved the stall is **not** repeated
+## relocalization calls this time (call count stayed flat while the process
+## kept burning CPU) -- it's stuck somewhere else in `Tracking`'s own code
+## that hasn't been identified yet. `gdb -p <pid>` is blocked by this
+## machine's ptrace_scope restriction, so a live stack trace wasn't
+## available; `/proc/<pid>/task/*/stack` showed the Tracking thread actively
+## running (not blocked on I/O/futex) while several worker threads sat idle
+## after ~160s of prior CPU time each, suggesting something CPU-bound and
+## single-threaded, but that's as far as `/proc`-only introspection got.
+## **Next session should start with**: either (a) get real `gdb` access
+## (adjust `/proc/sys/kernel/yama/ptrace_scope`, likely needs sudo) and
+## attach mid-stall for an actual stack trace instead of continuing to
+## guess-and-instrument one function at a time, or (b) keep adding
+## `[[reloc-timing]]`-style diagnostic timers to the next most-likely
+## Tracking functions (`TrackLocalMap`, `UpdateLocalKeyFrames`,
+## `CreateInitialMapMonocular` -- re-init is plausible given repeated map
+## resets happen right around this frame range) since that approach did
+## conclusively rule out relocalization as the cause. Whichever path is
+## taken, remove the temporary `[reloc-timing]` instrumentation once the
+## real cause is found and fixed. See Session 14 below for the full
+## staged account, every exact number, and the precise git commits.
+
 ## Current status (2026-07-17): wired the GUI's Feature Detector dropdown so
 ## selecting "ORB" is now a shortcut for the vendored real ORB-SLAM3 mode
 ## (bidirectionally synced with the "Use real ORB-SLAM3" checkbox) instead of
@@ -131,6 +1172,398 @@
 ## the IMU integration (unchanged from Session 4/5); (8) find/construct a
 ## scenario where homography wins the model-selection ratio (unchanged from
 ## Session 4/5).
+
+## Session 14 (2026-07-17, later the same day): forked third_party/ORB_SLAM3 -> ORB_SLAM3_SIFT and staged the ORB->SIFT+VLAD swap through Stage 4, currently blocked on an unidentified performance stall around frame 3500-4000
+
+Picked up directly from Session 13's own routing work on a new, explicit
+request: swap the vendored real ORB-SLAM3's ORB features for SIFT, not just
+route the GUI's "ORB" dropdown entry to it. Confirmed with the user this is
+a different, much larger undertaking than Session 13's dropdown wiring
+before starting (ORB-SLAM3 is ORB-based throughout its tracking, mapping,
+and loop-closing internals -- this isn't a config flag).
+
+### 0. Vocabulary/technique research, before committing to an approach
+
+Before writing any code, searched for whether a mature/pretrained solution
+already existed rather than assuming custom training was necessary:
+
+- **No pretrained DBoW2-compatible SIFT vocabulary exists** (web search) --
+  DBoW2 supports arbitrary float descriptors in principle via its templated
+  `FClass` interface, but every real deployment (including the ORB-SLAM
+  ecosystem) ships an ORB-trained vocabulary, and this project's vendored
+  DBoW2 copy only has the ORB-specific `FORB` descriptor class. Building
+  one from scratch means writing a new descriptor class AND training a
+  vocabulary tree -- real work, not a download.
+- User chose **VLAD** (Vector of Locally Aggregated Descriptors, Jegou et
+  al. 2010) over training a DBoW2-compatible vocabulary: a much lighter
+  technique (one small k-means codebook instead of a hierarchical
+  vocabulary tree), well-established in visual place recognition, needs no
+  new DBoW2 class.
+- **No pretrained VLAD codebook exists either** (web search, multiple
+  queries) -- every source is explicit that classical VLAD is meant to be
+  trained per-deployment, unlike deep-learned approaches.
+- **NetVLAD does have real pretrained weights** (`Nanne/pytorch-NetVlad`,
+  VGG16 backbone, Pittsburgh30k) -- investigated as an alternative when the
+  user pushed back on "just train it" a second time, and the full cost was
+  assessed honestly: no ready ONNX export exists (would need a one-time
+  PyTorch environment just for conversion), this project has no OpenCV
+  `dnn` linkage yet, ORB-SLAM3's monocular `Frame` constructor doesn't
+  retain the raw image at all (confirmed via grep -- only the stereo-
+  fisheye constructor does, `Frame.cc:1041`, never exercised in this
+  project), and Pittsburgh street-view is a real domain mismatch against
+  KITTI's forward-facing vehicle-mounted footage. User chose to proceed
+  with classical VLAD, training on this project's own KITTI data, after
+  this comparison -- confirmed as methodologically valid (training on the
+  deployment domain is standard for classical vocabulary/codebook methods,
+  unlike deep-learned approaches where pretrained-and-frozen is the whole
+  point).
+
+### 1. Fork instead of in-place edit (course-corrected mid-session)
+
+Initial approach edited `third_party/ORB_SLAM3` in place (Stage 1's
+`ORBextractor` swap, committed as `3342fae`). User strongly objected
+("why u change the ORB base??? copy to another file") -- the original,
+already-validated ORB-based vendored copy needed to stay completely
+untouched and independently buildable, not be mutated for an experimental
+fork. Reverted cleanly via `git checkout`/`git revert` (confirmed
+byte-identical to the pre-swap baseline via `git diff`), then `cp -r`'d the
+whole tree to `third_party/ORB_SLAM3_SIFT` (symlinked `Thirdparty/DBoW2`
+and `Thirdparty/g2o` dependencies preserved and confirmed to still resolve
+from the new location). Added a fully separate, additive CMake target pair
+(`orbslam3_sift_ext` + `orbslam3_sift_kitti_ate`, reusing the same
+`analyze/orbslam3_kitti_ate.cpp` source) -- confirmed the original
+`orbslam3_ext`/`orbslam3_kitti_ate`/`sift_vslam_gui`/`kitti_ate`/
+`sift_vslam_debug` targets all still build unaffected, and re-verified this
+repeatedly after every subsequent commit. The two copies define identical
+`ORB_SLAM3::*` class names in the same namespace, so `orbslam3_ext` and
+`orbslam3_sift_ext` must never both be linked into one executable (ODR
+violation) -- kept in permanently separate binaries for exactly that
+reason. `git init` was also added as a prerequisite this session (the
+project had no version control at all before this) -- specifically because
+a change this large, in-place, on vendored code needed a real safety net;
+this is what made the fork-and-revert above possible to do cleanly instead
+of by hand.
+
+All git history and staging below (Stages 0-4) happened against
+`third_party/ORB_SLAM3_SIFT` from this point on.
+
+### 2. Stage 0: octave-remap probe -- caught a real off-by-one before it went live
+
+Before touching any vendored code, a standalone probe (`cv::SIFT::create()`
+with this project's own `SiftSettings` defaults) ran against ~200 real
+KITTI seq00 frames, decoding each keypoint's packed `KeyPoint::octave`
+(`rawOctave = kpt.octave & 255; octave = rawOctave<128 ? rawOctave :
+(rawOctave|-128); layer = (kpt.octave>>8)&255`) to verify the planned
+flat-index remap design (needed because ORB-SLAM3 code treats `.octave` as
+a plain small array index into `mvScaleFactors`/`mvLevelSigma2`/
+`mvImagePyramid` everywhere, including ~25 sites in `Optimizer.cc`
+weighting every bundle-adjustment residual -- getting this wrong wouldn't
+crash, it would silently corrupt BA). Octave range `[-1,5]` was fine
+(within the assumed `[-1,8)`), but **layer range was `[1,3]`, not `[0,3)`
+as originally assumed** -- OpenCV's `cv::SIFT` reports layers 1-indexed
+over `[1,nOctaveLayers]`, not 0-indexed. Fixed the flat-index formula
+(`layer = clamp(layer,1,nOctaveLayers) - 1`) before it was ever used live,
+based on real measured data (~395k keypoints from frames 0-150) rather than
+assumption.
+
+### 3. Stage 1: SIFTextractor swap
+
+Reimplemented `ORBextractor.cc`'s internals to wrap `cv::SIFT` (kept the
+class *named* `ORBextractor` through Stages 1-4 for minimal signature
+churn -- rename deferred to a mechanical Stage 6 cleanup). Constructor
+signature unchanged (`nfeatures`->SIFT nfeatures cap, `nlevels`-
+>nOctaveLayers reinterpreted, `scaleFactor`/`iniThFAST`/`minThFAST`
+accepted-but-ignored) -- zero edits needed anywhere in `Frame.h`/
+`Tracking.h`/`Tracking.cc`/`Settings.cc`. Builds a real (not empty)
+`mvImagePyramid` via repeated `cv::resize` (dead for monocular correctness
+-- only stereo `ComputeStereoMatches()` reads it -- but built anyway to
+avoid a latent-UB class for near-zero cost, with target sizes clamped to
+>=1px since `kMaxOctaveSpan`'s outer levels can shrink below that).
+**Checkpoint**: a standalone probe (`ORBextractor` compiled and linked
+completely standalone -- it has zero dependency on g2o/Sophus/boost,
+confirmed via its own `#include` list) against real KITTI frames confirmed
+`CV_32F`/128-col descriptors and all keypoint octaves landing inside the
+valid `[0,30)` scale-array range (actual observed range `[0,17]`).
+
+### 4. Stage 2: ORBmatcher rework -- found a real gap the plan itself missed
+
+`DescriptorDistance()` became squared-L2 (not sqrt'd -- strictly monotonic,
+avoids `sqrtf()` in loops that run thousands of times per frame) for
+`CV_32F`/128-dim descriptors, replacing the 256-bit Hamming popcount.
+Retyped every `bestDist*`/`dist` local from `int` to `float` across ~16
+functions -- verified each site individually via `grep`, not just via
+blind search-replace, since implicit `int`<->`float` conversions don't
+produce compiler errors on their own (a real risk: the compiler would
+silently narrow/widen without complaint). `TH_HIGH`/`TH_LOW` became float
+placeholders (60000/30000, in squared-L2 space) seeded from a quick
+non-final probe, clearly commented as pending Stage 4.
+
+Both `SearchByBoW()` overloads' original DBoW2 `FeatureVector` node-
+bucketed matching (restricting comparisons to descriptors sharing a
+vocabulary-tree node -- no VLAD equivalent exists, VLAD has no discrete
+"node" concept) were replaced with brute-force matching. While doing this,
+grepped the whole file for `mFeatVec`/`FeatureVector` to check the
+approved plan's scope was actually complete -- **it wasn't**:
+`SearchForTriangulation()` used the identical DBoW2 node-bucketed pattern
+and was never named in the plan (which only explicitly called out the two
+`SearchByBoW` overloads). This function runs on *every keyframe insertion*
+during normal `LocalMapping` operation, not just occasionally like
+`SearchByBoW` (relocalization/loop-closing only) -- missing it would have
+silently broken new-landmark triangulation entirely once `mFeatVec` stopped
+being populated in Stage 3, a much worse failure mode than a slow path.
+Fixed by grepping first, not trusting the plan's stated scope as complete.
+**Checkpoint**: `orbslam3_sift_ext`/`orbslam3_sift_kitti_ate` build and link
+clean; confirmed zero remaining `mFeatVec`/`FeatureVector` usage outside
+comments; original targets still build unaffected.
+
+### 5. Stage 3: VladVocabulary, KeyFrameDatabase rewrite, ComputeBoW cutover
+
+New `ORB_SLAM3::VladVocabulary` (`include/VladVocabulary.h`/
+`src/VladVocabulary.cc`): `computeVlad()` (assign each descriptor to its
+nearest of k centroids via brute-force NN -- trivial at k=64 -- accumulate
++ intra-normalize per-centroid residuals, flatten + L2-normalize the
+whole vector) and `score()` (cosine similarity via plain dot product of
+two already-normalized vectors -- a direct drop-in analog of
+`DBoW2::TemplatedVocabulary::score()`). `loadFromTextFile()` deliberately
+keeps that exact method name (not renamed) so `System.cc`'s existing call
+site needs zero edits -- and it's still literally accurate, since the new
+codebook format is a flat-keyed, non-dotted-key `cv::FileStorage` YAML
+(avoiding the dotted-key `WRITE`-API crash documented in Session 12).
+
+`ORBVocabulary.h`'s typedef was repointed from
+`DBoW2::TemplatedVocabulary<FORB::TDescriptor,FORB>` to `VladVocabulary`
+directly -- kept as the exact same type name specifically so every
+existing `ORBVocabulary*`/`ORBVocabulary&` declaration throughout
+`Frame.h`/`KeyFrame.h`/`Tracking.cc`/`System.cc`/`KeyFrameDatabase.h`
+needed zero signature changes. This surfaced a real, non-obvious hidden
+dependency: `DBoW2::TemplatedVocabulary.h` had been silently providing
+`using namespace std;` PLUS several transitive includes (`<fstream>`,
+`<vector>`, `DUtils/Random.h`, etc.) at global scope to every file that
+ever included `ORBVocabulary.h` -- removing that transitive chain produced
+a cascade of "vector/map/set/string does not name a type" and
+"`std::ofstream` has incomplete type" compile errors across *unrelated*
+headers (`Frame.h`, `KeyFrame.h`, `KeyFrameDatabase.h`, `Map.h`,
+`Tracking.h`, `MLPnPsolver.cc`) that had nothing to do with the vocabulary
+change on the surface. Fixed by replicating the same transitive surface in
+`VladVocabulary.h` (not great practice, but the least invasive fix given
+how many files silently depended on it).
+
+`KeyFrameDatabase` rewritten: `mvInvertedFile` (word-id -> KeyFrame list)
+became a flat `mvDatabase` (`vector<KeyFrame*>`), and all 5 candidate-
+detection methods now brute-force-score against every entry via
+`VladVocabulary::score()` instead of DBoW2's word-sharing prefilter --
+confirmed via full-tree grep that only `DetectNBestCandidates()`
+(loop-closing) and `DetectRelocalizationCandidates()` are ever actually
+called in this project's monocular path; the other 3 (one already marked
+DEPRECATED upstream) were kept working via the same pattern for API
+completeness only. `Frame`/`KeyFrame::ComputeBoW()` now populate a new
+`mVladVec` member via `computeVlad()` instead of calling DBoW2's
+`transform()` into `mBowVec`/`mFeatVec` (now dead, cleanup deferred to
+Stage 6).
+
+**Training tool**: new `analyze/orbslam3_vlad_train.cpp` (+ CMake target,
+linked against `orbslam3_sift_ext` so the training-time extractor is
+byte-identical to the runtime one) -- extracts SIFT descriptors across one
+or more KITTI sequences via the real vendored extractor, reservoir-samples
+down to a 400k-row pool (uniform random subsample once past the cap, not
+just the first 400k seen), runs `cv::kmeans`, writes the codebook, then
+reloads it through the real `VladVocabulary` class for a reported (not
+asserted) sanity check comparing VLAD cosine similarity of adjacent vs.
+temporally-distant frames.
+
+Trained **two** codebooks (k=64): one on seq00 alone (sanity check: 0.4416
+adjacent vs -0.0074 distant), and — per explicit follow-up request to use
+all available data — one on **all 22 KITTI sequences** (00-21; only 00-10
+have public ground truth, but training doesn't need poses at all, only
+images) -- ~85M descriptors seen in total, reservoir-sampled to 400k rows,
+sanity check: 0.4771 vs -0.0101, a slightly cleaner separation than
+seq00-alone. Confirmed valid methodology (not overfitting/cheating) when
+asked directly: training classical vocabulary/codebook methods on the
+deployment domain is standard practice, unlike pretrained-and-frozen deep
+approaches; Stage 4's own plan already called for validating on a second
+sequence as a check against over-fitting the read to one sequence
+specifically.
+
+Moved both trained codebooks out of `build/` (gitignored) into a permanent
+`vocabulary_sift/` directory and committed them (~110KB each, small enough
+to commit directly, same treatment as `vocabulary/ORBvoc.txt`).
+
+**Checkpoint (Stage 3e, first real end-to-end attempt)**: ran
+`orbslam3_sift_kitti_ate` against KITTI seq00 with the full-dataset
+codebook -- tracked cleanly through 87% of the sequence (frames 0-3900, no
+failures logged at all in that stretch) then hit a cascade of "Fail to
+track local map!" and a `ResetActiveMap()` call, which in monocular mode
+without IMU genuinely **erases** the current map's keyframes in place
+(`mpAtlas->clearMap()`, confirmed via reading `Tracking::ResetActiveMap()`
+-- this is unchanged original ORB-SLAM3 behavior, not something this
+session's changes introduced). With only ~600 frames of runway left after
+the erase, the system never rebuilt a scorable map before the sequence
+ended, so `SaveKeyFrameTrajectoryTUM()` had nothing to write -- no ATE
+number at all, not just a bad one. Diagnosed (not just observed) as a
+plausible consequence of Stage 2's still-placeholder `TH_HIGH`/`TH_LOW`
+rather than a deeper bug, since loose/miscalibrated matching thresholds
+can let bad matches accumulate until a late catastrophic failure -- exactly
+what Stage 4 exists to fix.
+
+### 6. Stage 4: measured threshold calibration
+
+New `analyze/orbslam3_sift_calibrate.cpp` (+ CMake target): for KITTI seq00
+frame pairs at baselines 1/3/5 (600 frames), gets ratio-test candidate
+matches via the real `ORBextractor`, geometrically verifies via
+`cv::findFundamentalMat` RANSAC, splits into true-match (inlier) /
+false-match (outlier) squared-L2 distance distributions, reports
+percentiles -- mirrors this project's own established practice for
+threshold selection (`feature_detector::defaultRatioFor()`'s empirical
+0.75/0.85 ratio thresholds), measurement over guesswork.
+
+Measured: 227778 true-match pairs (squared-L2 p50=8380 p90=35425 p95=46778
+p99=67038 max=113387), 43983 false-match pairs (min=93 p1=1095 p5=2779
+p10=4699 p50=25357) -- a real, meaningful ~3x separation (true p50 vs false
+p50), with genuine overlap too (expected, since `TH_LOW`/`TH_HIGH` are a
+coarse sanity cutoff in this codebase's design, not the primary
+discriminator -- the ratio test does the fine-grained work downstream).
+Replaced the Stage 2 placeholders with `TH_LOW=46778` (true-match's own
+95th percentile, so it doesn't reject genuine matches) and
+`TH_HIGH=100557` (1.5x true-match's 99th percentile).
+
+### 7. Post-calibration re-test: found and fixed 3 real, confirmed performance bugs, but a stall persists
+
+Re-running Stage 3e's exact test with calibrated thresholds surfaced a live
+performance problem, root-caused (not just patched around) across several
+iterations of measure-fix-retest:
+
+1. **`DetectRelocalizationCandidates()` had no cap on returned
+   candidates.** DBoW2's word-sharing prefilter used to keep the candidate
+   list naturally small; VLAD's brute-force scoring against every keyframe
+   has no equivalent bound, and every returned candidate triggers an
+   expensive `ORBmatcher::SearchByBoW()` call inside
+   `Tracking::Relocalization()` -- which itself runs on *every single
+   frame* while tracking is lost (confirmed via `grep`, standard original
+   ORB-SLAM3 behavior, not something this session changed). A live run
+   stalled 20+ minutes with zero progress once tracking got stuck
+   relocalizing against a database that had grown large. Fixed: sorted by
+   score, capped at `kMaxRelocCandidates=20`, mirroring the cap
+   `DetectNBestCandidates()` (the loop-closing path) already had.
+2. **The vectorization fix was itself incomplete on the first attempt.**
+   Replaced `SearchByBoW`/`SearchForTriangulation`'s brute-force per-pair
+   `DescriptorDistance()` scalar loops with `cv::batchDistance()` -- but
+   the *first* version of this fix still called `batchDistance()` once
+   *per KeyFrame descriptor* inside the outer loop (up to ~1000-1500 small
+   calls per candidate keyframe, each individually fast but carrying its
+   own allocation/dispatch overhead). Re-testing after this "fix" still
+   showed a 7+ minute wall-clock stall (29+ min CPU) -- a real, confirmed-
+   via-live-retest finding that the first fix wasn't sufficient, not a
+   hypothesis. Root-caused via back-of-envelope math (20 candidates x
+   ~1000-1500 calls/candidate x ~75us/call overhead ~= 1.5s per lost
+   frame x hundreds of consecutive lost frames ~= exactly the observed
+   multi-minute magnitude) and fixed properly: moved each
+   `cv::batchDistance()` call *outside* the outer per-descriptor loop, so
+   it runs exactly once per function invocation, computing the full
+   query-matrix x train-matrix distance matrix in one vectorized call.
+   Applied to all three affected functions (both `SearchByBoW` overloads,
+   `SearchForTriangulation`).
+3. Both fixes are real, confirmed-correct, and committed (`18ae969`,
+   `d867247`, `9d0c13f`, `64e7756`) -- but **the frame ~3500-4000 stall
+   still persists** on every retest after all three fixes, now taking
+   10-20+ minutes in that region specifically. Added temporary diagnostic
+   instrumentation to `Tracking::Relocalization()`
+   (`[reloc-timing]` stderr lines: per-call elapsed time, candidate count,
+   database size, running cumulative total -- still in the tree, clearly
+   marked TEMPORARY, should be removed once this is resolved) to get real
+   numbers instead of continuing to guess. This instrumentation
+   **conclusively ruled out relocalization as the current bottleneck**:
+   during the frame-3500 stall, the relocalization call counter stayed
+   completely flat (no new calls logged) while the process kept actively
+   burning CPU for 10+ minutes -- the stall is somewhere else in
+   `Tracking`'s own code that hasn't been identified yet.
+   `gdb -p <pid> -batch -ex "thread apply all bt"` was blocked by this
+   machine's `ptrace_scope` restriction (`Could not attach to process`),
+   so a real stack trace wasn't available. `/proc/<pid>/task/*/stack` /
+   `wchan` inspection (doesn't need ptrace) showed the Tracking thread in
+   state `R` (actively running, not blocked on I/O or a futex) while 7
+   worker threads sat idle on `futex_do_wait` after each accumulating
+   ~160+ seconds of prior CPU time -- consistent with some earlier heavy
+   parallel computation (Ceres/g2o/OpenCV internal threading) having
+   finished, followed by a single-threaded phase that's still running, but
+   this is as far as `/proc`-only introspection could narrow it down.
+
+**Left in a known, honest state per explicit request**: rather than
+continuing to guess at the next function to instrument (already 3
+iterations deep on this specific stall), the diagnostic run was left to
+run to completion, however long that takes, and this account written up
+for whoever picks it up next.
+
+### 8. Net result / where things stand
+
+`third_party/ORB_SLAM3` (original, ORB-based) is completely untouched and
+still independently buildable/validated at 6.4-10.7m ATE RMSE.
+`third_party/ORB_SLAM3_SIFT` (the fork) has SIFT-based feature
+extraction, VLAD-based loop-closure/relocalization candidate search, and
+measured (not placeholder) matching thresholds, all building and linking
+cleanly, with three confirmed-real performance bugs found and fixed along
+the way. **Not yet validated end-to-end**: every full-sequence run so far
+either produced no trajectory (Stage 3e, before calibration) or stalled for
+10-20+ minutes in the same frame ~3500-4000 region (every retest since,
+despite three real, confirmed fixes each meaningfully improving on the
+last). No ATE number exists yet for the SIFT+VLAD fork.
+
+**Next session should start with**: getting real `gdb` access (adjust
+`/proc/sys/kernel/yama/ptrace_scope`) to attach mid-stall and get an actual
+stack trace, rather than continuing to guess-and-instrument one Tracking
+function at a time -- or, if that's not available, add `[reloc-timing]`-
+style temporary timers to the next most-likely candidates
+(`Tracking::TrackLocalMap()`, `Tracking::UpdateLocalKeyFrames()`,
+`Tracking::CreateInitialMapMonocular()` -- re-initialization is plausible
+given repeated map resets keep happening right around this frame range).
+Once the stall is root-caused and fixed, resume the plan at Stage 4's
+checkpoint (re-run `orbslam3_sift_kitti_ate` on seq00, compare against the
+6.4-10.7m ORB+DBoW2 baseline, then validate on a second sequence per the
+plan's own over-fitting check), then Stage 5 (loop-closure/relocalization-
+specific validation) and Stage 6 (mechanical cleanup: `ORBextractor`->
+`SIFTextractor` rename, remove dead `mBowVec`/`mFeatVec`, remove this
+session's temporary `[reloc-timing]` instrumentation, remove
+`Thirdparty/DBoW2` from `orbslam3_sift_ext`'s build once nothing
+references it). The full staged plan remains at
+`/home/nam/.claude/plans/valiant-shimmying-tome.md` for reference.
+
+### 7. Stall root-caused and fixed (later, same session)
+
+The stall above is resolved. Root cause: `KeyFrameDatabase::clearMap()`
+cached `vend = mvDatabase.end()` once before a loop that calls
+`mvDatabase.erase(vit)` repeatedly -- undefined behavior for
+`std::vector` (the cached `vend` goes stale as the vector shrinks, so the
+loop overruns into leftover buffer memory and can call `erase()` at/past
+the real `end()`). `clearMap()` runs on every `ResetActiveMap()` and
+typically erases most of `mvDatabase`, so this fired on nearly every reset
+rather than being a rare edge case.
+
+Found via live thread-level `/proc`/`ps -T` inspection rather than a stack
+trace (`gdb` attach is blocked by this machine's `ptrace_scope`): per-frame
+heartbeat/timing prints added throughout `GrabImageMonocular`/`Track()`/
+`MonocularInitialization` narrowed the hang to strictly between
+`LocalMapping`'s reset acknowledgment print and the next frame's
+processing; `ps -T` then showed only the single calling (Tracking) thread
+at 99%+ CPU with every other thread (`LocalMapping`, `LoopClosing`, the
+OpenCV worker pool) fully idle, which ruled out both `usleep`-based reset
+wait loops and left `mpKeyFrameDB->clearMap(pMap)` as the only remaining
+synchronous, single-threaded call in that gap.
+
+Fix: re-query `mvDatabase.end()` every loop iteration instead of caching
+it once. Added a small, permanent `[start-frame]` CLI arg to
+`analyze/orbslam3_kitti_ate.cpp` (default 0, additive/harmless) to jump
+into the middle of a sequence for fast repro instead of always replaying
+from frame 0. The exact config that reproduced the stall 4 times in a row
+(seq00 starting at frame 3600) now runs clean through all remaining frames
+to `Shutdown`, zero hangs, both resets in that run completing in 0ms each.
+All temporary timing/heartbeat instrumentation added during the hunt has
+been removed; only the fix and the `[start-frame]` addition remain in the
+tree.
+
+**Still not done**: a real Stage 4 checkpoint (full seq00, frame 0 to end,
+against the 6.4-10.7m baseline) -- everything validated above used the
+artificial start-frame-skipped setup, which never produces a scorable
+trajectory. That's the immediate next step, followed by Stage 5 and 6 as
+already described above.
 
 ## Session 13 (2026-07-17): GUI detector-dropdown/ORB-SLAM3 sync, OXTS/IMU off by default, and a constant-velocity motion model for guided search (measured, net loss, left opt-in)
 

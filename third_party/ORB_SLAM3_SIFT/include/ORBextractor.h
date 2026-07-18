@@ -58,8 +58,27 @@ public:
                     std::vector<cv::KeyPoint>& _keypoints,
                     cv::OutputArray _descriptors, std::vector<int> &vLappingArea);
 
+    // Reconfigures the live cv::SIFT detector's target feature count and
+    // contrast threshold without touching nOctaveLayers or any of the
+    // per-level scale/sigma arrays (nlevels-sized, and already relied on
+    // elsewhere -- resizing them mid-sequence would be a much bigger,
+    // riskier change). Cheap enough to call only when entering/leaving a
+    // high-angular-velocity window, not every frame -- see Tracking.cc's
+    // motion-model hook. See DEBUGGING.md for why this exists.
+    void SetDynamicDensity(int nfeatures_, double contrastThreshold_);
+
     int inline GetLevels(){
         return nlevels;}
+
+    // SIFT's own per-octave sub-layer count (see ORBextractor.cc's doc
+    // comments on flatLevel()/the constructor) -- flat levels
+    // [0, GetOctaveLayers()) are the finest octave's layers. Used by
+    // ORBmatcher::SearchForInitialization() to admit same-octave,
+    // cross-layer matches instead of requiring an exact flat-level-0 match;
+    // see DEBUGGING.md's BA-sigma-weighting investigation for why that's
+    // now safe to do.
+    int inline GetOctaveLayers(){
+        return nOctaveLayers;}
 
     float inline GetScaleFactor(){
         return scaleFactor;}

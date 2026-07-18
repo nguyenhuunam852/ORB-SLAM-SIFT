@@ -592,6 +592,7 @@ void Tracking::newParameterLoader(Settings *settings) {
     int fMinThFAST = settings->minThFAST();
     float fScaleFactor = settings->scaleFactor();
 
+    mnBaseNFeatures = nFeatures;
     mpORBextractorLeft = new ORBextractor(nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
 
     if(mSensor==System::STEREO || mSensor==System::IMU_STEREO)
@@ -1280,6 +1281,7 @@ bool Tracking::ParseORBParamFile(cv::FileStorage &fSettings)
         return false;
     }
 
+    mnBaseNFeatures = nFeatures;
     mpORBextractorLeft = new ORBextractor(nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
 
     if(mSensor==System::STEREO || mSensor==System::IMU_STEREO)
@@ -1999,8 +2001,32 @@ void Tracking::Track()
                     }
                     else
                     {
-                        // Relocalization
-                        bOK = Relocalization();
+                        // Dead-reckoning bridge (see DEBUGGING.md "Option 2"): try
+                        // constant-velocity motion-model tracking against the
+                        // still-intact local map first -- this reuses mVelocity,
+                        // which keeps its last value from before tracking was lost
+                        // (it's only updated on a successful frame, see below), so
+                        // it's exactly a constant-velocity dead-reckoning estimate
+                        // across the dropout, not a fresh assumption invented here.
+                        // Cheap to attempt and falls through to relocalization
+                        // unchanged if the projected points aren't found (e.g. the
+                        // camera really has moved somewhere the old map can't
+                        // cover), so this can only add a recovery path, not remove
+                        // the existing one.
+                        bOK = mbVelocity && TrackWithMotionModel();
+                        if(!bOK)
+                        {
+                            // Relocalization
+                            bOK = Relocalization();
+                        }
+                        // NOTE: renewing mTimeStampLost here on a bare
+                        // TrackWithMotionModel() success was tried and measured
+                        // worse (see DEBUGGING.md "Option 2b") -- a marginal
+                        // motion-model success doesn't mean TrackLocalMap() below
+                        // will also succeed, so extending the clock on it just
+                        // prolongs a still-broken RECENTLY_LOST state rather than
+                        // letting it time out and reset promptly. Deliberately not
+                        // renewing here.
                         //std::cout << "mCurrentFrame.mTimeStamp:" << to_string(mCurrentFrame.mTimeStamp) << std::endl;
                         //std::cout << "mTimeStampLost:" << to_string(mTimeStampLost) << std::endl;
                         if(mCurrentFrame.mTimeStamp-mTimeStampLost>3.0f && !bOK)
@@ -2213,6 +2239,51 @@ void Tracking::Track()
             }
             else {
                 mbVelocity = false;
+            }
+
+            // Dynamic feature density during aggressive turns (see
+            // DEBUGGING.md's "Option 1" session): a sharp per-frame
+            // rotation sweeps features across the FOV fast enough to risk
+            // starving the guided-search/BoW matching that keeps tracking
+            // alive through the maneuver, which is what the turn-region
+            // tracking losses documented earlier in this file trace back
+            // to. mVelocity already carries the relative rotation between
+            // the last two tracked frames -- reuse it instead of adding a
+            // second signal, and only reconfigure mpORBextractorLeft's
+            // live cv::SIFT object on a state *transition* (entering or
+            // leaving high-angular-velocity mode), not every frame.
+            if(mbVelocity && mnBaseNFeatures > 0)
+            {
+                // 5 deg/frame: real KITTI seq00 turns average well under
+                // 1 deg/frame with occasional few-degree bumps in normal
+                // curves, but hit an 18 deg/frame peak during the sharp
+                // maneuver that triggers the documented tracking-loss
+                // cascade (see DEBUGGING.md) -- 5 sits well above ordinary
+                // motion and well below that peak, but is a starting
+                // estimate, not measured/calibrated the way TH_HIGH/TH_LOW
+                // were in Stage 4.
+                constexpr float kHighAngularVelocityDeg = 5.0f;
+                // 2x base features, half the extractor's default 0.04
+                // contrast threshold (see ORBextractor.cc's kContrastThreshold
+                // -- kept in sync manually, there's no shared constant to
+                // reference across the two files).
+                constexpr int kDensityBoostFactor = 2;
+                constexpr double kBoostedContrastThreshold = 0.02;
+                constexpr double kBaseContrastThreshold = 0.04;
+
+                const float angleDeg = mVelocity.so3().log().norm() * 180.0f / static_cast<float>(M_PI);
+                const bool bHighAngularVelocity = angleDeg >= kHighAngularVelocityDeg;
+
+                if(bHighAngularVelocity && !mbHighAngularVelocityMode)
+                {
+                    mpORBextractorLeft->SetDynamicDensity(kDensityBoostFactor * mnBaseNFeatures, kBoostedContrastThreshold);
+                    mbHighAngularVelocityMode = true;
+                }
+                else if(!bHighAngularVelocity && mbHighAngularVelocityMode)
+                {
+                    mpORBextractorLeft->SetDynamicDensity(mnBaseNFeatures, kBaseContrastThreshold);
+                    mbHighAngularVelocityMode = false;
+                }
             }
 
             if(mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
@@ -2475,13 +2546,25 @@ void Tracking::MonocularInitialization()
 
             mbReadyToInitializate = true;
 
+            // [mono-init] TEMPORARY diagnostic, see DEBUGGING.md part 7 --
+            // remove once the slow-reinitialization root cause is found.
+            fprintf(stderr, "[mono-init] reference set id=%lu nkeys=%zu\n",
+                    mCurrentFrame.mnId, mCurrentFrame.mvKeys.size());
+
             return;
+        }
+        else
+        {
+            fprintf(stderr, "[mono-init] waiting for reference: id=%lu nkeys=%zu (need >100)\n",
+                    mCurrentFrame.mnId, mCurrentFrame.mvKeys.size());
         }
     }
     else
     {
         if (((int)mCurrentFrame.mvKeys.size()<=100)||((mSensor == System::IMU_MONOCULAR)&&(mLastFrame.mTimeStamp-mInitialFrame.mTimeStamp>1.0)))
         {
+            fprintf(stderr, "[mono-init] lost reference (nkeys=%zu<=100) at id=%lu, ref id=%lu -- restarting search\n",
+                    mCurrentFrame.mvKeys.size(), mCurrentFrame.mnId, mInitialFrame.mnId);
             mbReadyToInitializate = false;
 
             return;
@@ -2494,9 +2577,28 @@ void Tracking::MonocularInitialization()
         // Check if there are enough correspondences
         if(nmatches<100)
         {
+            fprintf(stderr, "[mono-init] reject: nmatches=%d<100 at id=%lu, ref id=%lu -- restarting search\n",
+                    nmatches, mCurrentFrame.mnId, mInitialFrame.mnId);
             mbReadyToInitializate = false;
             return;
         }
+
+        // [mono-init] TEMPORARY diagnostic (see DEBUGGING.md part 9): mean
+        // pixel disparity across matched pairs, logged (not yet gated on)
+        // to measure whether it correlates with the near-zero-baseline
+        // degenerate-init pattern before picking a threshold.
+        double sumDisparity = 0.0;
+        int nDisparitySamples = 0;
+        for(size_t i=0, iend=mvIniMatches.size(); i<iend; i++)
+        {
+            if(mvIniMatches[i]>=0)
+            {
+                const cv::Point2f d = mInitialFrame.mvKeysUn[i].pt - mCurrentFrame.mvKeysUn[mvIniMatches[i]].pt;
+                sumDisparity += std::sqrt(d.x*d.x + d.y*d.y);
+                nDisparitySamples++;
+            }
+        }
+        const double meanDisparity = nDisparitySamples>0 ? sumDisparity/nDisparitySamples : 0.0;
 
         Sophus::SE3f Tcw;
         vector<bool> vbTriangulated; // Triangulated Correspondences (mvIniMatches)
@@ -2512,11 +2614,19 @@ void Tracking::MonocularInitialization()
                 }
             }
 
+            fprintf(stderr, "[mono-init] SUCCESS id=%lu ref id=%lu nmatches=%d meanDisparityPx=%.1f\n",
+                    mCurrentFrame.mnId, mInitialFrame.mnId, nmatches, meanDisparity);
+
             // Set Frame Poses
             mInitialFrame.SetPose(Sophus::SE3f());
             mCurrentFrame.SetPose(Tcw);
 
             CreateInitialMapMonocular();
+        }
+        else
+        {
+            fprintf(stderr, "[mono-init] reconstruct FAILED id=%lu ref id=%lu nmatches=%d meanDisparityPx=%.1f -- keeping reference, retrying next frame\n",
+                    mCurrentFrame.mnId, mInitialFrame.mnId, nmatches, meanDisparity);
         }
     }
 }
@@ -2731,6 +2841,8 @@ bool Tracking::TrackReferenceKeyFrame()
 
     if(nmatches<15)
     {
+        // [track-ref-kf] TEMPORARY diagnostic, see DEBUGGING.md part 9.
+        fprintf(stderr, "[track-ref-kf] id=%lu nmatches=%d<15 -- FAIL\n", mCurrentFrame.mnId, nmatches);
         cout << "TRACK_REF_KF: Less than 15 matches!!\n";
         return false;
     }
@@ -2966,6 +3078,12 @@ bool Tracking::TrackLocalMap()
                 aux2++;
         }
 
+    // [track-local-map-detail] TEMPORARY diagnostic, see DEBUGGING.md part 9/10 --
+    // candidate matches found by SearchLocalPoints() before PoseOptimization's
+    // chi-square outlier rejection gets a chance to run.
+    fprintf(stderr, "[track-local-map-detail] id=%lu beforePO_candidates=%d beforePO_flaggedOutlier=%d\n",
+            mCurrentFrame.mnId, aux1, aux2);
+
     int inliers;
     if (!mpAtlas->isImuInitialized())
         Optimizer::PoseOptimization(&mCurrentFrame);
@@ -3001,6 +3119,10 @@ bool Tracking::TrackLocalMap()
                 aux2++;
         }
 
+    // [track-local-map-detail] TEMPORARY diagnostic, see DEBUGGING.md part 9/10.
+    fprintf(stderr, "[track-local-map-detail] id=%lu afterPO_candidates=%d afterPO_flaggedOutlier=%d afterPO_survivors=%d\n",
+            mCurrentFrame.mnId, aux1, aux2, aux1-aux2);
+
     mnMatchesInliers = 0;
 
     // Update MapPoints Statistics
@@ -3028,7 +3150,14 @@ bool Tracking::TrackLocalMap()
     // More restrictive if there was a relocalization recently
     mpLocalMapper->mnMatchesInliers=mnMatchesInliers;
     if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && mnMatchesInliers<50)
+    {
+        // [track-local-map-gate] TEMPORARY diagnostic, see DEBUGGING.md
+        // part 10 -- confirms/refutes whether the stricter post-relocalization
+        // >=50 bar (not the normal monocular >=30) is what's killing young maps.
+        fprintf(stderr, "[track-local-map-gate] id=%lu mnLastRelocFrameId=%u mMaxFrames=%d mnMatchesInliers=%d -- FAIL (post-reloc strict gate)\n",
+                mCurrentFrame.mnId, mnLastRelocFrameId, mMaxFrames, mnMatchesInliers);
         return false;
+    }
 
     if((mnMatchesInliers>10)&&(mState==RECENTLY_LOST))
         return true;
@@ -3054,6 +3183,11 @@ bool Tracking::TrackLocalMap()
     }
     else
     {
+        // [track-local-map] TEMPORARY diagnostic, see DEBUGGING.md part 9 --
+        // pinpointing why maps fail to track almost immediately after
+        // CreateInitialMapMonocular().
+        fprintf(stderr, "[track-local-map] id=%lu mnMatchesInliers=%d (need>=30) mapKFs=%d\n",
+                mCurrentFrame.mnId, mnMatchesInliers, mpAtlas->GetCurrentMap()->KeyFramesInMap());
         if(mnMatchesInliers<30)
             return false;
         else

@@ -25,11 +25,13 @@
 #include <System.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -151,10 +153,18 @@ int main(int argc, char **argv)
     if (argc < 5) {
         std::fprintf(stderr,
                       "usage: %s <path_to_vocabulary> <path_to_settings> <kitti-sequence-dir> "
-                      "<kitti-poses.txt> [out-prefix]\n"
+                      "<kitti-poses.txt> [out-prefix] [start-frame] [realtime]\n"
                       "  kitti-sequence-dir: e.g. .../sequences/00 (must contain times.txt, image_0/)\n"
                       "  kitti-poses.txt: e.g. .../poses/00.txt\n"
-                      "  out-prefix: writes <prefix>_KeyFrameTrajectory.txt, default 'orbslam3_kitti_ate'\n",
+                      "  out-prefix: writes <prefix>_KeyFrameTrajectory.txt, default 'orbslam3_kitti_ate'\n"
+                      "  start-frame: skip this many leading frames, re-initializing tracking from\n"
+                      "               scratch at that point instead of replaying the whole sequence --\n"
+                      "               DIAGNOSTIC ONLY, ATE against ground truth is still meaningful for\n"
+                      "               the remaining frames but ignores the skipped ones. Default 0.\n"
+                      "  realtime: 1 to pace frames to match each frame's recorded KITTI timestamp\n"
+                      "            delta (like mono_kitti.cc's own throttle, deliberately stripped from\n"
+                      "            this tool by default -- see the file's top comment), instead of\n"
+                      "            feeding frames as fast as the CPU can process them. Default 0.\n",
                       argv[0]);
         return 1;
     }
@@ -163,6 +173,8 @@ int main(int argc, char **argv)
     const std::string sequencePath = argv[3];
     const std::string posesPath = argv[4];
     const std::string outPrefix = argc > 5 ? argv[5] : "orbslam3_kitti_ate";
+    const size_t startFrame = argc > 6 ? static_cast<size_t>(std::stoul(argv[6])) : 0;
+    const bool realtime = argc > 7 && std::atoi(argv[7]) != 0;
 
     std::vector<std::string> imageFiles;
     std::vector<double> timestamps;
@@ -170,6 +182,15 @@ int main(int argc, char **argv)
     if (imageFiles.empty()) {
         std::fprintf(stderr, "Failed to load images from %s\n", sequencePath.c_str());
         return 1;
+    }
+    if (startFrame > 0) {
+        if (startFrame >= imageFiles.size()) {
+            std::fprintf(stderr, "start-frame %zu >= %zu total frames\n", startFrame, imageFiles.size());
+            return 1;
+        }
+        imageFiles.erase(imageFiles.begin(), imageFiles.begin() + startFrame);
+        timestamps.erase(timestamps.begin(), timestamps.begin() + startFrame);
+        std::fprintf(stderr, "[config] skipped %zu leading frames (diagnostic start-frame)\n", startFrame);
     }
     std::fprintf(stderr, "[config] %zu images loaded from %s\n", imageFiles.size(), sequencePath.c_str());
 
@@ -179,7 +200,8 @@ int main(int argc, char **argv)
     ORB_SLAM3::System SLAM(vocabPath, settingsPath, ORB_SLAM3::System::MONOCULAR, false);
     const float imageScale = SLAM.GetImageScale();
 
-    std::fprintf(stderr, "[config] tracking %zu frames (unthrottled, no real-time pacing)...\n", imageFiles.size());
+    std::fprintf(stderr, "[config] tracking %zu frames (%s)...\n", imageFiles.size(),
+                  realtime ? "real-time paced to KITTI timestamps" : "unthrottled, no real-time pacing");
     for (size_t i = 0; i < imageFiles.size(); ++i) {
         cv::Mat im = cv::imread(imageFiles[i], cv::IMREAD_UNCHANGED);
         if (im.empty()) {
@@ -189,7 +211,20 @@ int main(int argc, char **argv)
         if (imageScale != 1.f)
             cv::resize(im, im, cv::Size(static_cast<int>(im.cols * imageScale), static_cast<int>(im.rows * imageScale)));
 
+        const auto trackStart = std::chrono::steady_clock::now();
         SLAM.TrackMonocular(im, timestamps[i], std::vector<ORB_SLAM3::IMU::Point>(), imageFiles[i]);
+
+        // Real-time pacing (opt-in, see usage text): mirrors mono_kitti.cc's
+        // own throttle, which this tool otherwise deliberately strips -- lets
+        // LocalMapping/LoopClosing's background threads see the same
+        // wall-clock cadence they'd get from a live camera instead of being
+        // flooded as fast as Tracking alone can go.
+        if (realtime && i + 1 < imageFiles.size()) {
+            const double trackSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - trackStart).count();
+            const double frameSec = timestamps[i + 1] - timestamps[i];
+            if (trackSec < frameSec)
+                std::this_thread::sleep_for(std::chrono::duration<double>(frameSec - trackSec));
+        }
 
         if (i % 500 == 0) {
             std::fprintf(stderr, "[stats] frame %zu / %zu\n", i, imageFiles.size());

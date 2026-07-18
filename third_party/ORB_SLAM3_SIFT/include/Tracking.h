@@ -266,6 +266,17 @@ protected:
     ORBextractor* mpORBextractorLeft, *mpORBextractorRight;
     ORBextractor* mpIniORBextractor;
 
+    // Base (non-boosted) SIFT nfeatures from Settings, recorded once at
+    // construction -- needed to compute the boosted target when a
+    // high-angular-velocity frame is detected (see the motion-model hook
+    // in Track(), DEBUGGING.md's "Option 1" session). 0 until set by
+    // whichever constructor path actually runs.
+    int mnBaseNFeatures = 0;
+    // Whether mpORBextractorLeft is currently reconfigured for a
+    // high-angular-velocity window (avoids needlessly rebuilding the
+    // cv::SIFT object every single frame once already in that state).
+    bool mbHighAngularVelocityMode = false;
+
     //BoW
     ORBVocabulary* mpORBVocabulary;
     KeyFrameDatabase* mpKeyFrameDB;

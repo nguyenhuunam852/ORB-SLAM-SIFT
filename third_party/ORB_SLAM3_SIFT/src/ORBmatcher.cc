@@ -672,14 +672,26 @@ namespace ORB_SLAM3
         vector<float> vMatchedDistance(F2.mvKeysUn.size(),std::numeric_limits<float>::max());
         vector<int> vnMatches21(F2.mvKeysUn.size(),-1);
 
+        // Widened from "level1==0 only" to the whole finest octave
+        // (flat levels [0, nOctaveLayers)) -- see DEBUGGING.md's
+        // BA-sigma-weighting investigation. Requiring an exact flat-level
+        // match starved initialization of candidates: this SIFT
+        // reimplementation packs (octave, layer) into a flat level, so
+        // "level1==0 only" meant only ONE of nOctaveLayers same-resolution
+        // sub-layers was ever eligible. Safe now that ORBextractor.cc's
+        // scale/sigma arrays are computed per-octave (not per-flat-level),
+        // so cross-layer matches within the same octave get identical BA
+        // confidence, matching their identical real resolution.
+        const int nOctaveLayers = F1.mpORBextractorLeft->GetOctaveLayers();
+
         for(size_t i1=0, iend1=F1.mvKeysUn.size(); i1<iend1; i1++)
         {
             cv::KeyPoint kp1 = F1.mvKeysUn[i1];
             int level1 = kp1.octave;
-            if(level1>0)
+            if(level1>=nOctaveLayers)
                 continue;
 
-            vector<size_t> vIndices2 = F2.GetFeaturesInArea(vbPrevMatched[i1].x,vbPrevMatched[i1].y, windowSize,level1,level1);
+            vector<size_t> vIndices2 = F2.GetFeaturesInArea(vbPrevMatched[i1].x,vbPrevMatched[i1].y, windowSize,0,nOctaveLayers-1);
 
             if(vIndices2.empty())
                 continue;

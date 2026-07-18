@@ -467,13 +467,47 @@ namespace ORB_SLAM3
         mvLevelSigma2.resize(nlevels);
         mvInvLevelSigma2.resize(nlevels);
         for (int lvl = 0; lvl < nlevels; ++lvl) {
-            mvScaleFactor[lvl] = std::pow(2.0f, static_cast<float>(lvl) / static_cast<float>(nOctaveLayers));
+            // Octave-only scale, NOT the continuous-scale-space
+            // 2^(lvl/nOctaveLayers) formula (integer division here, not
+            // float) -- see DEBUGGING.md's BA-sigma-weighting investigation.
+            // flatLevel() packs (octave, layer) as
+            // (octave-kMinOctave)*nOctaveLayers + layer, so lvl/nOctaveLayers
+            // (integer) recovers the octave index alone. Every consumer of
+            // these arrays (~30 sites across Optimizer.cc, LocalMapping.cc,
+            // MLPnPsolver.cc, Sim3Solver.cc, ORBmatcher.cc, MapPoint.cc,
+            // checked directly, not assumed) uses them as a confidence/
+            // search-radius weight tied to real image resolution -- which
+            // only changes at octave boundaries in this SIFT reimplementation
+            // (layers within an octave are the same resolution, differing
+            // only in Gaussian-blur sigma). The previous formula gave
+            // different weights to same-resolution layers, which is why
+            // admitting cross-layer matches upstream (widening
+            // SearchForInitialization, see ORBmatcher.cc) previously
+            // destabilized BA -- this is the actual, non-band-aid fix for
+            // that, as opposed to the earlier "force matched keypoints to
+            // flat-level 0" workaround (which discarded real octave
+            // information instead of just ignoring layer).
+            const int octave = lvl / nOctaveLayers;
+            mvScaleFactor[lvl] = std::pow(2.0f, static_cast<float>(octave));
             mvInvScaleFactor[lvl] = 1.0f / mvScaleFactor[lvl];
             mvLevelSigma2[lvl] = mvScaleFactor[lvl] * mvScaleFactor[lvl];
             mvInvLevelSigma2[lvl] = 1.0f / mvLevelSigma2[lvl];
         }
 
         mvImagePyramid.resize(nlevels);
+    }
+
+    // Rebuilds mSift with a new target feature count / contrast threshold.
+    // nOctaveLayers (and therefore nlevels and every mvScaleFactor/
+    // mvLevelSigma2/mvImagePyramid array) is deliberately left untouched --
+    // those are sized once at construction and relied on by every existing
+    // consumer as fixed-length arrays; changing octave/layer structure
+    // mid-sequence would be a much larger, riskier change than just asking
+    // SIFT to look harder within the same scale structure.
+    void ORBextractor::SetDynamicDensity(int nfeatures_, double contrastThreshold_)
+    {
+        nfeatures = nfeatures_;
+        mSift = cv::SIFT::create(nfeatures, nOctaveLayers, contrastThreshold_, kEdgeThreshold, kSigma);
     }
 
     static void computeOrientation(const Mat& image, vector<KeyPoint>& keypoints, const vector<int>& umax)

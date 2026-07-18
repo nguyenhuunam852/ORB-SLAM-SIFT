@@ -75,7 +75,16 @@ void KeyFrameDatabase::clearMap(Map* pMap)
 {
     unique_lock<mutex> lock(mMutex);
 
-    for(vector<KeyFrame*>::iterator vit=mvDatabase.begin(), vend=mvDatabase.end(); vit!=vend;)
+    // NOTE: end() must be re-queried every iteration, not cached once before
+    // the loop -- vector::erase() shrinks the container, so a cached end()
+    // goes stale and the loop walks past the real end into leftover memory
+    // (and can call erase() at/past the real end(), itself undefined
+    // behavior). This was a real bug here: harmless when few/no elements
+    // matched, but clearMap() typically erases MOST of mvDatabase (everything
+    // belonging to the map being reset), so the stale-iterator overrun was
+    // real and got worse as the database grew across repeated resets --
+    // root cause of the Session 14 multi-minute stall.
+    for(vector<KeyFrame*>::iterator vit=mvDatabase.begin(); vit!=mvDatabase.end();)
     {
         if(pMap == (*vit)->GetMap())
         {
