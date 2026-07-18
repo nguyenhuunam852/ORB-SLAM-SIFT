@@ -83,8 +83,24 @@ namespace ORB_SLAM3
                 if(bFactor)
                     r*=th;
 
+                // Widened from [nPredictedLevel-1, nPredictedLevel] (meant to
+                // allow +-1 real pyramid level of scale-prediction slack) to
+                // the whole octave nPredictedLevel falls in -- see
+                // DEBUGGING.md's SearchByProjection investigation. In this
+                // SIFT reimplementation flat levels pack (octave, layer), so
+                // a literal 2-flat-level window only ever spans a sliver of
+                // one octave's nOctaveLayers same-resolution sub-layers, not
+                // a real +-1 resolution level's worth of candidates the way
+                // it does for ORB's true per-level pyramid -- measured
+                // directly to cause a catastrophic (1-10%) match rate on
+                // points already confirmed in-frustum. Safe now that
+                // ORBextractor.cc's scale/sigma arrays are per-octave (not
+                // per-flat-level, see the SearchForInitialization fix).
+                const int nOctaveLayers = F.mpORBextractorLeft->GetOctaveLayers();
+                const int octaveBase = (nPredictedLevel/nOctaveLayers)*nOctaveLayers;
+
                 const vector<size_t> vIndices =
-                        F.GetFeaturesInArea(pMP->mTrackProjX,pMP->mTrackProjY,r*F.mvScaleFactors[nPredictedLevel],nPredictedLevel-1,nPredictedLevel);
+                        F.GetFeaturesInArea(pMP->mTrackProjX,pMP->mTrackProjY,r*F.mvScaleFactors[nPredictedLevel],octaveBase,octaveBase+nOctaveLayers-1);
 
                 if(!vIndices.empty()){
                     const cv::Mat MPdescriptor = pMP->GetDescriptor();
@@ -1725,12 +1741,27 @@ namespace ORB_SLAM3
 
                     vector<size_t> vIndices2;
 
+                    // Widened the plain (non-forward/backward -- i.e. every
+                    // monocular call, since bForward/bBackward require
+                    // !bMono) case from [nLastOctave-1, nLastOctave+1] to the
+                    // whole octave nLastOctave falls in -- same fix, same
+                    // reasoning, as SearchByProjection's other overload (see
+                    // DEBUGGING.md): this SIFT reimplementation's flat levels
+                    // pack (octave, layer), so a fixed +-1-flat-level window
+                    // doesn't reliably cover one real resolution level's
+                    // worth of candidates. This overload backs
+                    // TrackWithMotionModel(), the primary per-frame
+                    // continuous-tracking path, not just local-map
+                    // re-acquisition.
+                    const int nOctaveLayers = CurrentFrame.mpORBextractorLeft->GetOctaveLayers();
+                    const int octaveBase = (nLastOctave/nOctaveLayers)*nOctaveLayers;
+
                     if(bForward)
                         vIndices2 = CurrentFrame.GetFeaturesInArea(uv(0),uv(1), radius, nLastOctave);
                     else if(bBackward)
                         vIndices2 = CurrentFrame.GetFeaturesInArea(uv(0),uv(1), radius, 0, nLastOctave);
                     else
-                        vIndices2 = CurrentFrame.GetFeaturesInArea(uv(0),uv(1), radius, nLastOctave-1, nLastOctave+1);
+                        vIndices2 = CurrentFrame.GetFeaturesInArea(uv(0),uv(1), radius, octaveBase, octaveBase+nOctaveLayers-1);
 
                     if(vIndices2.empty())
                         continue;

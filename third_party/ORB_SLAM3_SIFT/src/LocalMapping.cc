@@ -411,6 +411,11 @@ void LocalMapping::CreateNewMapPoints()
 
     ORBmatcher matcher(th,false);
 
+    // [create-new-map-points] TEMPORARY diagnostic, see DEBUGGING.md --
+    // measuring whether the baseline/depth ratio gate below is starving
+    // new-point creation because keyframes are inserted too close together.
+    int diagPairsConsidered = 0, diagPairsRejectedBaseline = 0, diagNewPointsCreated = 0;
+
     Sophus::SE3<float> sophTcw1 = mpCurrentKeyFrame->GetPose();
     Eigen::Matrix<float,3,4> eigTcw1 = sophTcw1.matrix3x4();
     Eigen::Matrix<float,3,3> Rcw1 = eigTcw1.block<3,3>(0,0);
@@ -455,8 +460,12 @@ void LocalMapping::CreateNewMapPoints()
             const float medianDepthKF2 = pKF2->ComputeSceneMedianDepth(2);
             const float ratioBaselineDepth = baseline/medianDepthKF2;
 
+            diagPairsConsidered++;
             if(ratioBaselineDepth<0.01)
+            {
+                diagPairsRejectedBaseline++;
                 continue;
+            }
         }
 
         // Search matches that fullfil epipolar constraint
@@ -707,8 +716,13 @@ void LocalMapping::CreateNewMapPoints()
 
             mpAtlas->AddMapPoint(pMP);
             mlpRecentAddedMapPoints.push_back(pMP);
+            diagNewPointsCreated++;
         }
-    }    
+    }
+
+    // [create-new-map-points] TEMPORARY diagnostic, see DEBUGGING.md.
+    fprintf(stderr, "[create-new-map-points] curKF=%lu neighKFs=%zu baselinePairsConsidered=%d rejectedLowBaseline=%d newPoints=%d\n",
+            mpCurrentKeyFrame->mnId, vpNeighKFs.size(), diagPairsConsidered, diagPairsRejectedBaseline, diagNewPointsCreated);
 }
 
 void LocalMapping::SearchInNeighbors()

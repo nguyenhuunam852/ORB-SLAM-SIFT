@@ -1,5 +1,119 @@
 # Debugging log: homography fallback caused a permanent tracking lockup
 
+## Current status (2026-07-18, part 12): per explicit direction to dig
+## deeper into why `TwoViewReconstruction` and Local Mapping's point-
+## creation flow don't sustain map survival, found and fixed a real,
+## previously-undiscovered bug -- **but it's still not enough for a
+## scorable ATE, and a misleadingly good-looking ATE number surfaced
+## along the way that must NOT be trusted or cited.**
+##
+## **Ruled out first (both directly measured, not guessed)**:
+## `LocalMapping.cc` and `NeedNewKeyFrame()` are byte-identical to the
+## untouched `third_party/ORB_SLAM3` -- confirmed via `diff`, so neither is
+## fork-modified. Instrumented `CreateNewMapPoints()` directly (baseline/
+## depth-ratio rejections, new-point count per call): the
+## `ratioBaselineDepth<0.01` gate essentially never fires
+## (`rejectedLowBaseline=0` in every sampled call), and new-point creation
+## is healthy (99-651 new points per keyframe insertion). Keyframe
+## insertion cadence is also reasonable (every 1-14 frames, not
+## continuous). **Point-creation throughput is not the bottleneck** --
+## contrary to this investigation's own working hypothesis at the start of
+## the session.
+##
+## **The real find**: instrumented `SearchLocalPoints()`
+## (`nToMatch` = points confirmed in-frustum vs `matched` = points
+## `SearchByProjection()` actually associated) and found a catastrophic
+## 1-10% match rate on points already confirmed visible -- e.g. 633
+## in-frustum candidates yielding only 5 matches. This held regardless of
+## the search-radius multiplier `th` (even `th=15` for `RECENTLY_LOST` only
+## reached ~6-8%), which pointed away from "search window too small in
+## pixels" and toward "search window wrong in *flat-level*". Confirmed
+## directly in `ORBmatcher::SearchByProjection(Frame&, const
+## vector<MapPoint*>&, ...)`: `GetFeaturesInArea(...,
+## nPredictedLevel-1, nPredictedLevel)` restricts candidates to a 2-flat-
+## level window -- the **exact same category of bug** as the
+## `SearchForInitialization()` flat-level-0 restriction fixed in part 9,
+## just in the function that backs ordinary, continuous local-map
+## re-acquisition (i.e. nearly every frame of normal tracking), never
+## touched before now. For this SIFT reimplementation's (octave, layer)
+## flat-level packing, a fixed 2-level window only ever spans a sliver of
+## one octave's `nOctaveLayers` same-resolution sub-layers -- not a
+## meaningful "+-1 real pyramid level" the way it does for ORB's true
+## per-level pyramid.
+##
+## **Fixed the same way as part 9's widening** (safe because of part 9's
+## octave-only sigma fix): widened the window to the whole octave
+## `nPredictedLevel` falls in, via the same `GetOctaveLayers()` accessor.
+## Also found and fixed the identical pattern in the OTHER
+## `SearchByProjection` overload (`Frame&, const Frame&, th, bMono`, used
+## by `TrackWithMotionModel()` -- the primary per-frame continuous-tracking
+## path, not just local-map re-acquisition): its non-forward/non-backward
+## branch (always taken for monocular, since forward/backward require
+## `!bMono`) used a fixed `[nLastOctave-1, nLastOctave+1]` window, same fix
+## applied.
+##
+## **Measured, step by step, on the identical `[start-frame]`-700,
+## 3841-frame probe used throughout this file**:
+## | variant | resets |
+## |---|---|
+## | part 9 baseline (sigma-fix + widened SearchForInitialization only) | 94-97 |
+## | + widened local-map SearchByProjection | 74 |
+## | + widened motion-model SearchByProjection too | 72 |
+##
+## A real, incremental, twice-confirmed improvement (~24% fewer resets) --
+## but still nowhere near the true baseline's 3, and still not sufficient
+## for a healthy trajectory on its own.
+##
+## **Important correction, in real time during this session**: the 72-reset
+## run's tail output included an `ATE RMSE: 0.129 m` line that looked like
+## a spectacular result (matching or beating the 6.4-10.7m baseline by
+## ~50x) -- **this is a misleading artifact, not a real measurement, and
+## must not be cited or trusted.** Checked the actual
+## `KeyFrameTrajectory.txt` before reporting anything: only 8 keyframes
+## survived to the end of the run, spanning just 2.7 seconds and ~30m of
+## real-world travel (after scale recovery) -- the tiny last surviving map
+## fragment at the very end of the sequence, not a real trajectory. A
+## Umeyama similarity alignment (rotation+scale+translation) fit to 8
+## points along a short, nearly-straight segment will trivially produce a
+## tiny RMSE regardless of whether the estimate is actually correct, since
+## such a short simple path barely constrains the fit. The "ATE RMSE /
+## path len: 0.00%" figure divides this trivial error by the *entire*
+## probed region's ground-truth path length (3722m), which is completely
+## disconnected from what was actually being compared (8 points). Any
+## future session seeing a suspiciously good ATE number from a run with a
+## very small `Matched keyframes: N / N` count should treat it the same
+## way -- check the raw trajectory file's actual timestamp/position span
+## before trusting the summary statistics.
+##
+## **Net assessment**: this session's deep-dive found a second real,
+## independently-verified bug (the `SearchByProjection` flat-level-window
+## restriction, present in TWO call sites) beyond part 9's
+## `SearchForInitialization`/BA-sigma fix -- both are legitimate, measured
+## improvements to match yield and reset count. Neither, alone or
+## combined, has yet produced a real scorable ATE. The honest, unresolved
+## question is still whether the survival problem in this hard region is
+## fully attributable to bugs like this one (fixable, mechanical,
+## SIFT-packing-specific) or partly inherent scene difficulty (e.g. a
+## genuinely sharp rotation sweeping too many points out of frustum too
+## fast for any local-map-based approach to keep up) -- today's fixes have
+## narrowed the gap but not closed it.
+##
+## **Next session should start with**: (1) grep for any OTHER
+## `GetFeaturesInArea(...)` call sites across `ORBmatcher.cc` that pass a
+## literal `+-1`-style flat-level window (the two found and fixed today
+## were found by tracing specific failing code paths, not by an exhaustive
+## search -- there could be more, e.g. in `Relocalization()`'s or
+## `Fuse()`'s own `SearchByProjection`-family calls); (2) re-run the full,
+## no-`[start-frame]` seq00 checkpoint with both `SearchByProjection` fixes
+## in place and actually verify the resulting `Matched keyframes: N/N`
+## count is large (covering most of the sequence) before trusting any ATE
+## figure it reports -- this session ran out of time to do that full
+## checkpoint after finding the misleading-ATE issue. All temporary
+## diagnostic tag families from parts 9-12 remain in the tree
+## (`[mono-init]`, `[track-ref-kf]`, `[track-local-map]`,
+## `[track-local-map-detail]`, `[track-local-map-gate]`,
+## `[create-new-map-points]`, `[create-new-kf]`, `[search-local-points]`).
+
 ## Current status (2026-07-18, part 11 -- end-of-day wrap-up): confirmed the
 ## `mnLastRelocFrameId+mMaxFrames` stricter (`>=50` instead of `>=30`)
 ## post-relocalization gate from part 10 is a **real, measured, but stock/

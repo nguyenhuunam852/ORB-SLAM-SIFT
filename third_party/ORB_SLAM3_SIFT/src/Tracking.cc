@@ -3355,6 +3355,11 @@ void Tracking::CreateNewKeyFrame()
     if(!mpLocalMapper->SetNotStop(true))
         return;
 
+    // [create-new-kf] TEMPORARY diagnostic, see DEBUGGING.md -- measuring
+    // keyframe insertion cadence (frames since the last keyframe).
+    fprintf(stderr, "[create-new-kf] id=%lu framesSinceLastKF=%lu\n",
+            mCurrentFrame.mnId, mCurrentFrame.mnId - mnLastKeyFrameId);
+
     KeyFrame* pKF = new KeyFrame(mCurrentFrame,mpAtlas->GetCurrentMap(),mpKeyFrameDB);
 
     if(mpAtlas->isImuInitialized()) //  || mpLocalMapper->IsInitializing())
@@ -3545,6 +3550,20 @@ void Tracking::SearchLocalPoints()
             th=15; // 15
 
         int matches = matcher.SearchByProjection(mCurrentFrame, mvpLocalMapPoints, th, mpLocalMapper->mbFarPoints, mpLocalMapper->mThFarPoints);
+
+        // [search-local-points] TEMPORARY diagnostic, see DEBUGGING.md --
+        // nToMatch = points that passed isInFrustum (in-view candidates);
+        // matches = actually matched by SearchByProjection. A big gap
+        // between them at low `th` means points are visible but not being
+        // matched (a threshold/radius problem), not that they left the
+        // frustum (a scene-difficulty problem).
+        fprintf(stderr, "[search-local-points] id=%lu localMapSize=%zu nToMatch=%d th=%d matched=%d\n",
+                mCurrentFrame.mnId, mvpLocalMapPoints.size(), nToMatch, th, matches);
+    }
+    else
+    {
+        fprintf(stderr, "[search-local-points] id=%lu localMapSize=%zu nToMatch=0 (nothing in frustum)\n",
+                mCurrentFrame.mnId, mvpLocalMapPoints.size());
     }
 }
 
