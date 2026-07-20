@@ -2025,29 +2025,18 @@ void Tracking::Track()
                     }
                     else
                     {
-                        // Dead-reckoning bridge (see DEBUGGING.md "Option 2"): try
-                        // constant-velocity motion-model tracking against the
-                        // still-intact local map first -- this reuses mVelocity,
-                        // which keeps its last value from before tracking was lost
-                        // (it's only updated on a successful frame, see below), so
-                        // it's exactly a constant-velocity dead-reckoning estimate
-                        // across the dropout, not a fresh assumption invented here.
-                        // Cheap to attempt and falls through to relocalization
-                        // unchanged if the projected points aren't found (e.g. the
-                        // camera really has moved somewhere the old map can't
-                        // cover), so this can only add a recovery path, not remove
-                        // the existing one.
-                        const bool bDR = mbVelocity && TrackWithMotionModel();
-                        bOK = bDR;
-                        // Part 58 continued -- try the cheaper KLT+RANSAC-PnP
-                        // recovery (TrackWithKLTRecovery(), see its own doc
-                        // comment in Tracking.h) before falling through to the
-                        // heavy VLAD-database Relocalization() below. Purely
-                        // additive: if it fails, bOK stays false and behavior
-                        // is identical to before this change. See
+                        // Part 58 continued: the constant-velocity dead-
+                        // reckoning attempt that used to run here
+                        // (mbVelocity && TrackWithMotionModel()) is removed
+                        // per explicit user instruction -- go straight to
+                        // KLT+RANSAC-PnP recovery (TrackWithKLTRecovery(),
+                        // see its own doc comment in Tracking.h) instead of
+                        // gating on a velocity estimate. Falls through to
+                        // the existing heavy VLAD-database Relocalization()
+                        // unchanged if KLT recovery also fails. See
                         // DEBUGGING.md part 58.
-                        if(!bOK)
-                            bOK = TrackWithKLTRecovery();
+                        const bool bKltOK = TrackWithKLTRecovery();
+                        bOK = bKltOK;
                         bool bRelocAttempted = false;
                         if(!bOK)
                         {
@@ -2062,9 +2051,12 @@ void Tracking::Track()
                         // Verbose::PrintMess, since Verbose::th is set to
                         // VERBOSITY_QUIET for this CLI tool (System.cc) and would
                         // silently produce zero output (see part 18's postmortem
-                        // on that exact mistake).
+                        // on that exact mistake). drOK now reports the KLT+PnP
+                        // recovery's outcome (bKltOK), not motion-model dead-
+                        // reckoning, since that step was removed (part 58
+                        // continued, see above).
                         fprintf(stderr, "[recently-lost] id=%lu mapKFs=%d mbVelocity=%d drOK=%d relocAttempted=%d relocOK=%d elapsed=%.2fs\n",
-                                mCurrentFrame.mnId, pCurrentMap->KeyFramesInMap(), (int)mbVelocity, (int)bDR,
+                                mCurrentFrame.mnId, pCurrentMap->KeyFramesInMap(), (int)mbVelocity, (int)bKltOK,
                                 (int)bRelocAttempted, (int)bOK, mCurrentFrame.mTimeStamp-mTimeStampLost);
                         // NOTE: renewing mTimeStampLost here on a bare
                         // TrackWithMotionModel() success was tried and measured
