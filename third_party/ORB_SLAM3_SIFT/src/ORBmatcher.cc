@@ -495,6 +495,23 @@ namespace ORB_SLAM3
 
         }
 
+        // [searchbybow-diag] part 58 continued -- TrackReferenceKeyFrame()
+        // failures (nmatches<15) persist even when the reference KF has
+        // hundreds of valid triangulated points (refKFvalidPoints, see
+        // Tracking.cc's [track-ref-kf] diagnostic), meaning points exist
+        // but aren't matching -- unlike SearchByProjection (~44% accepted,
+        // see [sbp-diag]), this function has no pose-prediction/search-
+        // window constraint, relying purely on descriptor distinctiveness
+        // plus this orientation-histogram prune (assumes all true matches
+        // share one global rotation delta -- valid regardless of
+        // descriptor type IF orientation estimates are repeatable, but
+        // CudaSIFT's GPU orientation estimation was never checked for
+        // this specific repeatability property, only for the raw
+        // angle-in-degrees encoding itself, see cudasift_probe). Logging
+        // nmatches before/after this prune isolates whether the
+        // histogram is the culprit before touching anything. See
+        // DEBUGGING.md part 58.
+        const int nBeforeOrientCheck = nmatches;
         if(mbCheckOrientation)
         {
             int ind1=-1;
@@ -513,6 +530,11 @@ namespace ORB_SLAM3
                     nmatches--;
                 }
             }
+        }
+        if(nBeforeOrientCheck != nmatches || nBeforeOrientCheck < 30)
+        {
+            fprintf(stderr, "[searchbybow-diag] refPoints=%zu nBeforeOrientCheck=%d nAfterOrientCheck=%d\n",
+                    vpMapPointsKF.size(), nBeforeOrientCheck, nmatches);
         }
 
         return nmatches;
