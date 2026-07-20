@@ -209,13 +209,6 @@ add_executable(orbslam3_visualize_keypoints analyze/orbslam3_visualize_keypoints
 target_include_directories(orbslam3_visualize_keypoints PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(orbslam3_visualize_keypoints PRIVATE orbslam3_ext)
 
-# Standalone ASIFT (cv::AffineFeature-wrapped SIFT) feasibility test (see
-# DEBUGGING.md part 56 / next-session plan) -- pure OpenCV, no dependency
-# on either ORB_SLAM3 fork's own extractor code.
-add_executable(asift_test analyze/asift_test.cpp)
-target_include_directories(asift_test PRIVATE ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(asift_test PRIVATE ${OpenCV_LIBS})
-
 # Standalone SIFT+LightGlue feasibility test (ASIFT investigation closed as
 # a NEGATIVE RESULT, see DEBUGGING.md part 57 -- LightGlue is the
 # follow-up: a learned matcher, official SIFT-trained weights exist, kept

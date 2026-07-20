@@ -593,7 +593,6 @@ void Tracking::newParameterLoader(Settings *settings) {
     int fMinThFAST = settings->minThFAST();
     float fScaleFactor = settings->scaleFactor();
 
-    mnBaseNFeatures = nFeatures;
     mpORBextractorLeft = new ORBextractor(nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
 
     if(mSensor==System::STEREO || mSensor==System::IMU_STEREO)
@@ -1282,7 +1281,6 @@ bool Tracking::ParseORBParamFile(cv::FileStorage &fSettings)
         return false;
     }
 
-    mnBaseNFeatures = nFeatures;
     mpORBextractorLeft = new ORBextractor(nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
 
     if(mSensor==System::STEREO || mSensor==System::IMU_STEREO)
@@ -2325,75 +2323,6 @@ void Tracking::Track()
             }
             else {
                 mbVelocity = false;
-            }
-
-            // Dynamic feature density -- RETARGETED (part 50) from angular to
-            // translation velocity. Originally ("Option 1" session, see
-            // DEBUGGING.md) this boosted density during sharp turns, on the
-            // theory that fast rotation sweeps features across the FOV and
-            // starves matching. That session measured it neutral -- now
-            // explained: part 45's GT-pose correlation directly REFUTED the
-            // turn hypothesis (failures were, if anything, UNDER-represented
-            // at high rotation, 7.7% vs 10% baseline) and instead found a real
-            // correlation with translation SPEED (18.1% of failures in the
-            // top-10%-speed bucket). This boost mechanism -- 2x features, half
-            // the contrast threshold -- was sound infrastructure aimed at the
-            // wrong trigger the whole time. Reusing the same mVelocity signal,
-            // just its translation magnitude instead of rotation, and the same
-            // threshold already calibrated and validated for the search-radius
-            // fix (part 46/47, true measured p90=0.087 from a 3486-sample
-            // checkpoint) rather than inventing a new one. Only reconfigures
-            // the live cv::SIFT object on a state *transition*, not every
-            // frame, same as before. NOT yet measured, see DEBUGGING.md part 50.
-            if(mbVelocity && mnBaseNFeatures > 0)
-            {
-                // Part 51 tested always-on (-1.0f, unconditional boost) across 4
-                // separate samples (primary hot zone 4000-4540: 120 fails vs 107
-                // baseline/102 gated; plus 3 more samples all trending worse) --
-                // CONFIRMED WORSE, not better: flooding every frame with 2x
-                // features at a lower contrast threshold dilutes match quality/
-                // slows processing rather than helping. Reverted to the
-                // calibrated, velocity-gated value (0.087, true measured p90,
-                // part 47) -- this remains the best result so far (102/541 on
-                // the primary hot zone). See DEBUGGING.md part 51.
-                constexpr float kHighTranslationVelocity = 0.087f;
-                // 2x base features, half the extractor's default 0.04
-                // contrast threshold (see ORBextractor.cc's kContrastThreshold
-                // -- kept in sync manually, there's no shared constant to
-                // reference across the two files).
-                constexpr int kDensityBoostFactor = 2;
-                constexpr double kBoostedContrastThreshold = 0.02;
-                // Part 55: DIRECT measurement (raw keypoint count on identical
-                // frames) found SIFT extracts far fewer raw keypoints than ORB
-                // under matched nFeatures=5000 settings -- mean 3860.7 vs
-                // ORB's 5843.7, worst frame 2354 vs ORB's 4916. Tried lowering
-                // this BASE threshold to 0.01 to close that gap: mean DID rise
-                // (3860.7->4598.2) but MEASURED WORSE overall -- 105 fails/58
-                // resets/103.3m (14.4% of GT path) vs baseline's 67/33/320m
-                // (44.7%), and the worst-frame count actually got WORSE (1409,
-                // below even the original 2354). Letting more borderline
-                // keypoints through adds noise/dilutes match quality rather
-                // than helping -- same failure mode as part 51's always-on
-                // boost (0.02) being confirmed worse. Reverted to stock 0.04.
-                // The raw-keypoint-count gap is real and unexplained, but
-                // "just lower the contrast bar" is confirmed NOT the fix
-                // (tried at two different thresholds, both worse). See
-                // DEBUGGING.md part 55.
-                constexpr double kBaseContrastThreshold = 0.04;
-
-                const float velNorm = mVelocity.translation().norm();
-                const bool bHighTranslationVelocity = velNorm >= kHighTranslationVelocity;
-
-                if(bHighTranslationVelocity && !mbHighAngularVelocityMode)
-                {
-                    mpORBextractorLeft->SetDynamicDensity(kDensityBoostFactor * mnBaseNFeatures, kBoostedContrastThreshold);
-                    mbHighAngularVelocityMode = true;
-                }
-                else if(!bHighTranslationVelocity && mbHighAngularVelocityMode)
-                {
-                    mpORBextractorLeft->SetDynamicDensity(mnBaseNFeatures, kBaseContrastThreshold);
-                    mbHighAngularVelocityMode = false;
-                }
             }
 
             if(mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)

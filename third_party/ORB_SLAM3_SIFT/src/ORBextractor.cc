@@ -434,16 +434,6 @@ namespace ORB_SLAM3
         constexpr int kMinOctave = -1;      // matches OpenCV SIFT's hardcoded firstOctave=-1
         constexpr int kMaxOctaveSpan = 10;  // generous margin over the ~7 octaves KITTI's
                                              // ~1241x376 images actually produce (verified: [-1,5])
-        // Part 50: briefly considered lowering this default directly, but it's
-        // effectively dead as a base default -- Tracking.cc's dynamic-density
-        // mechanism (SetDynamicDensity(), see its call sites) reconfigures the
-        // live cv::SIFT object's contrast threshold on every high/low-velocity
-        // state transition, always overriding whatever this constructor sets
-        // initially. The real, effective lever is Tracking.cc's own
-        // kBaseContrastThreshold/kBoostedContrastThreshold constants -- see
-        // that file for the actual part 50 change (retargeting this existing
-        // boost mechanism from angular velocity, which part 45 showed does
-        // NOT correlate with failures, to translation velocity, which does).
         // TESTED part 56 continued (see DEBUGGING.md): user's insight --
         // all four earlier road-density recovery attempts (parts 51, 55,
         // DistributeOctTree, CLAHE) were tested against the STRICT
@@ -480,16 +470,13 @@ namespace ORB_SLAM3
         // may be discarding as "too edge-like to localize well," directly
         // reducing the surviving-feature count this session's evidence (part 45)
         // points to as the likely root cause of this fork's high tracking-loss
-        // rate. Unlike kContrastThreshold, this one is NOT overridden by
-        // Tracking.cc's dynamic-density mechanism (SetDynamicDensity only
-        // reconfigures nfeatures/contrastThreshold, edgeThreshold stays fixed
-        // at whatever this constructor sets) -- so this edit takes effect
-        // unconditionally, every frame. Doubled as a first testable step.
-        // Part 52 measured: 10.0->20.0 combined with the velocity-gated density
-        // boost (part 50) gave 107 fails on the primary hot zone -- back to the
-        // pure baseline, WORSE than the boost alone (102). Raising edgeThreshold
-        // apparently cancels out the boost's benefit rather than being neutral
-        // or additive. Reverted to stock 10.0. See DEBUGGING.md part 52.
+        // rate. Doubled as a first testable step.
+        // Part 52 measured: 10.0->20.0 combined with the (since-removed)
+        // velocity-gated density boost gave 107 fails on the primary hot
+        // zone -- back to the pure baseline, WORSE than the boost alone
+        // (102). Raising edgeThreshold apparently cancelled out the
+        // boost's benefit rather than being neutral or additive. Reverted
+        // to stock 10.0. See DEBUGGING.md part 52.
         constexpr double kEdgeThreshold = 10.0;
         constexpr double kSigma = 1.6;
 
@@ -544,7 +531,6 @@ namespace ORB_SLAM3
                                                    // consumer expects as the valid array length
 
         mSift = cv::SIFT::create(nfeatures, nOctaveLayers, kContrastThreshold, kEdgeThreshold, kSigma);
-        mAsift = cv::AffineFeature::create(mSift, /*maxTilt=*/2, /*minTilt=*/0); // reduced from paper/default 5 -- see DEBUGGING.md part 57 continued (runtime-scaling fix). maxTilt=1 was tried as a speed/quality test and abandoned (negative result, killed mid-run) -- 2 remains the kept value.
 
         mvScaleFactor.resize(nlevels);
         mvInvScaleFactor.resize(nlevels);
@@ -579,20 +565,6 @@ namespace ORB_SLAM3
         }
 
         mvImagePyramid.resize(nlevels);
-    }
-
-    // Rebuilds mSift with a new target feature count / contrast threshold.
-    // nOctaveLayers (and therefore nlevels and every mvScaleFactor/
-    // mvLevelSigma2/mvImagePyramid array) is deliberately left untouched --
-    // those are sized once at construction and relied on by every existing
-    // consumer as fixed-length arrays; changing octave/layer structure
-    // mid-sequence would be a much larger, riskier change than just asking
-    // SIFT to look harder within the same scale structure.
-    void ORBextractor::SetDynamicDensity(int nfeatures_, double contrastThreshold_)
-    {
-        nfeatures = nfeatures_;
-        mSift = cv::SIFT::create(nfeatures, nOctaveLayers, contrastThreshold_, kEdgeThreshold, kSigma);
-        mAsift = cv::AffineFeature::create(mSift, /*maxTilt=*/2, /*minTilt=*/0); // reduced from paper/default 5 -- see DEBUGGING.md part 57 continued (runtime-scaling fix). maxTilt=1 was tried as a speed/quality test and abandoned (negative result, killed mid-run) -- 2 remains the kept value.
     }
 
     static void computeOrientation(const Mat& image, vector<KeyPoint>& keypoints, const vector<int>& umax)
@@ -1235,89 +1207,7 @@ namespace ORB_SLAM3
         _keypoints.clear();
         Mat descriptors;
 
-        // ASIFT integration, KEPT (see DEBUGGING.md part 57): mAsift
-        // (cv::AffineFeature wrapping mSift, maxTilt reduced from the
-        // paper/OpenCV default 5 to 2 for runtime reasons -- see below)
-        // simulates multiple affine tilts/rotations, runs SIFT on each,
-        // and merges results in original-image coordinates -- recovers
-        // real road-surface structure plain SIFT structurally cannot find
-        // (raw count 2420->35293 at maxTilt=5, 16379 at maxTilt=2, on the
-        // hardest measured KITTI frame).
-        //
-        // Getting here took two false starts, both instructive: (1) with
-        // Tracking.cc's TrackLocalMap accept gate at need>=1, ASIFT LOST
-        // to plain SIFT on every metric (coverage 63.8% vs 81.6%, outlier
-        // rate 11.8% vs 6.3%) -- the extra candidates were diluting match
-        // reliability, the same failure mode as five earlier road-density
-        // attempts this session (parts 51, 55, DistributeOctTree, CLAHE,
-        // a 0.02-threshold+need>=1 combo). (2) AffineFeature's paper
-        // default maxTilt=5 caused catastrophic loop-closure-candidate-
-        // checking slowdown once keyframe count grew past ~150-200
-        // (killed twice -- 1-1000 at frame 722, 1-300 at frame 214) --
-        // reduced to maxTilt=2, which also happens to keep keyframe
-        // growth more controlled.
-        //
-        // The fix that actually worked: pairing ASIFT with a TIGHTER
-        // acceptance gate (need>=15, not the looser need>=1) instead of a
-        // looser one -- opposite direction from the failed 0.02+need>=1
-        // combo. Tightening filters out enough of ASIFT's extra noisy
-        // candidates while still keeping its extra genuine road-region
-        // matches. Result (frames 1-300, GT=217.1m, matched against the
-        // same plain-SIFT-need>=1 baseline): fails 9->2, resets 5(plain)/
-        // 7(ASIFT+need>=1)->2, coverage 81.6%->**89.2%**, accepted-rate
-        // 17.3%->25.2%, empty_window 47.2%->42.1% -- ASIFT+need>=15 beats
-        // BOTH plain SIFT and ASIFT-with-the-looser-gate on nearly every
-        // axis. Outlier rate (11.5%) stays elevated vs plain SIFT's 6.3%,
-        // but the massive fails/resets/coverage gains are worth it. This
-        // is the session's second major, unconditionally-adopted result
-        // alongside the GetScaleFactor fix.
-        mAsift->detectAndCompute(image, cv::noArray(), _keypoints, descriptors);
-
-        // ASIFT's merged output is far larger than nfeatures (measured
-        // ~14x). Tested capping via cv::KeyPointsFilter::retainBest
-        // (global response ranking, matching plain cv::SIFT's own
-        // internal behavior) first -- it collapsed back onto a handful of
-        // extreme-response clusters (overexposed sign/window regions),
-        // discarding almost all the newly-recovered road coverage (see
-        // asift_test.cpp's *_asift_capped.png). Grid-based capping (best
-        // response per spatial cell, sized to land close to nfeatures
-        // cells) kept the road coverage intact instead (*_asift_gridcapped.png)
-        // -- used here.
-        if (static_cast<int>(_keypoints.size()) > nfeatures) {
-            const int cellsX = std::max(1, static_cast<int>(std::round(
-                    std::sqrt(static_cast<double>(nfeatures) * image.cols / std::max(1, image.rows)))));
-            const int cellsY = std::max(1, nfeatures / cellsX);
-            const float cw = static_cast<float>(image.cols) / cellsX;
-            const float ch = static_cast<float>(image.rows) / cellsY;
-
-            std::vector<int> bestIdx(static_cast<size_t>(cellsX) * cellsY, -1);
-            for (size_t i = 0; i < _keypoints.size(); ++i) {
-                const KeyPoint &kp = _keypoints[i];
-                int cx = std::min(cellsX - 1, std::max(0, static_cast<int>(kp.pt.x / cw)));
-                int cy = std::min(cellsY - 1, std::max(0, static_cast<int>(kp.pt.y / ch)));
-                size_t idx = static_cast<size_t>(cy) * cellsX + cx;
-                if (bestIdx[idx] == -1 || kp.response > _keypoints[bestIdx[idx]].response)
-                    bestIdx[idx] = static_cast<int>(i);
-            }
-
-            vector<KeyPoint> cappedKeypoints;
-            vector<int> keepRows;
-            cappedKeypoints.reserve(bestIdx.size());
-            keepRows.reserve(bestIdx.size());
-            for (int idx : bestIdx) {
-                if (idx != -1) {
-                    cappedKeypoints.push_back(_keypoints[idx]);
-                    keepRows.push_back(idx);
-                }
-            }
-
-            Mat cappedDescriptors(static_cast<int>(keepRows.size()), descriptors.cols, descriptors.type());
-            for (size_t i = 0; i < keepRows.size(); ++i)
-                descriptors.row(keepRows[i]).copyTo(cappedDescriptors.row(static_cast<int>(i)));
-
-            _keypoints = std::move(cappedKeypoints);
-            descriptors = cappedDescriptors;
-        }
+        mSift->detectAndCompute(image, cv::noArray(), _keypoints, descriptors);
 
         // Remap every keypoint's packed SIFT octave/layer into the flat
         // scale-array index every downstream consumer (ORBmatcher,

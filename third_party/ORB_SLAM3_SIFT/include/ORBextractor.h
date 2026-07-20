@@ -59,15 +59,6 @@ public:
                     std::vector<cv::KeyPoint>& _keypoints,
                     cv::OutputArray _descriptors, std::vector<int> &vLappingArea);
 
-    // Reconfigures the live cv::SIFT detector's target feature count and
-    // contrast threshold without touching nOctaveLayers or any of the
-    // per-level scale/sigma arrays (nlevels-sized, and already relied on
-    // elsewhere -- resizing them mid-sequence would be a much bigger,
-    // riskier change). Cheap enough to call only when entering/leaving a
-    // high-angular-velocity window, not every frame -- see Tracking.cc's
-    // motion-model hook. See DEBUGGING.md for why this exists.
-    void SetDynamicDensity(int nfeatures_, double contrastThreshold_);
-
     int inline GetLevels(){
         return nlevels;}
 
@@ -147,16 +138,6 @@ protected:
     // pyramid level count.
     int nOctaveLayers;
     cv::Ptr<cv::SIFT> mSift;
-    // ASIFT integration (see DEBUGGING.md part 56 / next-session plan):
-    // cv::AffineFeature wraps mSift and simulates multiple affine
-    // tilts/rotations per the ASIFT algorithm (Morel & Yu), running SIFT
-    // on each simulated view and merging results in original-image
-    // coordinates. Tests directly on KITTI's road surface showed this
-    // recovers real, spatially well-distributed low-texture structure
-    // that plain SIFT structurally cannot find (unlike the five failed
-    // "just lower the threshold" attempts) -- see
-    // analyze/asift_test.cpp and the keypoint visualizations it produced.
-    cv::Ptr<cv::AffineFeature> mAsift;
 
     std::vector<int> mnFeaturesPerLevel;
 
