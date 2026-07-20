@@ -798,6 +798,278 @@ experiment), on frames 1-1000.
 | coverage | 53.1% | 61.7% | 55.1% | **43.2%** |
 | outlier rate | 6.6% | 6.4% | -- | 6.9% |
 
+## Part 57 (2026-07-20): ASIFT integration -- a genuinely different lever, not another threshold tweak
+
+Per user's explicit next-session plan (see [[project_orbslam3_vendoring]]
+memory), tried **ASIFT** (Affine-SIFT, Morel & Yu) instead of repeating
+the already-exhausted "lower the threshold" family of fixes. OpenCV 4.10
+ships `cv::AffineFeature`, which wraps a base detector (here `cv::SIFT`,
+identical config to the rest of this project) and simulates multiple
+affine tilts/rotations, running the base detector on each simulated view
+and merging results back into original-image coordinates -- this is a
+direct, maintained implementation of the ASIFT algorithm, no need to
+clone/integrate the unmaintained original IPOL reference code.
+
+**Standalone feasibility test first** (`analyze/asift_test.cpp`, new
+`asift_test` CMake target, pure OpenCV, no ORB_SLAM3 dependency) on the
+same hardest-measured KITTI frame (004435.png, plain SIFT=2420 keypoints):
+**ASIFT finds 35293 keypoints (~14.6x more)** in 1547ms (~7.8x slower
+than plain SIFT's 197ms -- accepted per explicit user instruction,
+"chấp nhận đánh đổi thời gian"). Visually, the road/sidewalk region --
+where plain SIFT and four different threshold-based recovery attempts
+all failed to find structure -- now shows dense, genuine keypoint
+coverage following real tile-joint/pavement texture, not noise. Raw
+`.octave` values are in the same encoding order of magnitude as plain
+SIFT's (same 3-component bit-packing OpenCV uses internally), so this
+project's existing `flatLevel()` decode logic needs no changes.
+
+**Critical follow-up check before any real integration**: ASIFT's merged
+35293 keypoints need capping down to this project's `nfeatures=5000`
+target. Naive global-response capping (`cv::KeyPointsFilter::retainBest`,
+matching plain `cv::SIFT`'s own internal behavior) **collapsed back onto
+a handful of extreme-response clusters** (overexposed sign/window
+regions) and threw away almost all the newly-recovered road coverage --
+the same failure mode as every earlier "just lower the threshold, let
+global response ranking decide" attempt. **Grid-based capping** (keep
+the single best-response candidate per spatial cell, cell count sized to
+land near the `nfeatures` target -- reusing the DistributeOctTree idea,
+but applied to a genuinely richer candidate source this time) **kept the
+road coverage intact** (`analyze/asift_test.cpp`'s three output images
+document this progression directly).
+
+**Integrated into the real pipeline**: `third_party/ORB_SLAM3_SIFT/
+include/ORBextractor.h` gained a `cv::Ptr<cv::AffineFeature> mAsift`
+member (wrapping `mSift`, constructed alongside it in both the
+constructor and `SetDynamicDensity`); `operator()` now calls
+`mAsift->detectAndCompute()` instead of `mSift->detectAndCompute()`
+directly, followed by the grid-based capping logic (implemented inline,
+not reusing `DistributeOctTree` verbatim, to keep the cell-sizing target
+tied directly to `nfeatures`). Smoke-tested on 20 and 30 frames first
+(no crashes; the 30-frame run's exit code 1 was just "too few keyframes
+to align," an expected short-segment artifact, not a bug) before
+committing to a full 1-1000 run. Measured runtime: ~2.5s/frame
+(30 frames in 74.8s wall-clock, ~5.5x parallelism from `user` time/`real`
+time ratio) -- roughly 12-13x slower than plain SIFT's established
+~9-10fps baseline, projecting to ~40-60 minutes for a full 1-1000
+evaluation (running now).
+
+### Part 57 continued: runtime-scaling problems, then a final apples-to-apples verdict
+
+**The full 1-1000 evaluation (maxTilt=5, the ASIFT paper's own default)
+had to be killed twice.** First attempt (frames 1-1000): reached frame
+722/1000 with 185 keyframes accumulated, then slowed from ~2s/frame to
+~72s/frame -- `LoopClosing`'s candidate-checking cost (VLAD/BoW
+retrieval + Sim3Solver RANSAC per candidate) scales with accumulated
+keyframe count, and ASIFT's much larger per-frame match yield plausibly
+drives faster keyframe creation, compounding the problem. Projected
+5-6 hours to finish; killed per user's explicit choice. Second attempt,
+shortened to frames 1-300: hit the same wall at frame 214 (46-82s/frame
+once keyframes passed ~40-50). User asked to find a speedup rather than
+cut further ("tìm cách tăng tốc").
+
+**Fix**: reduced `cv::AffineFeature::create`'s `maxTilt` parameter from
+the paper/OpenCV-default 5 to 2 (fewer simulated affine views per frame
+-- standalone test showed this cuts raw keypoint count from 35293 to
+16379 on the hardest frame and per-frame extraction time from 1547ms to
+843ms, while still recovering most of the visible road-surface
+coverage). This also indirectly controls keyframe-creation rate (fewer
+matches per frame -> less aggressive keyframe insertion), which is what
+actually fixed the runtime problem: the 1-300 run with maxTilt=2
+completed in **~4.5 minutes** total, maintaining ~1-2s/frame throughout
+thanks to periodic map resets keeping keyframe count from running away
+(peaked at 50 KFs, vs the 150-200+ that caused the earlier slowdowns).
+
+**Result (frames 1-300, GT=217.1m, both configs using `need>=1`, ASIFT
+at maxTilt=2)**: 9 fails, 7 resets, coverage 138.5m (**63.8%**), outlier
+rate 11.8%, accepted-of-total 16.1%, empty_window 54.7%, all fragment
+RMSEs safely under budget (max 2.304m).
+
+**But this needed a matched baseline to mean anything** -- no prior test
+this session used exactly frames 1-300 with `need>=1`. Ran plain SIFT
+(temporarily swapping `mAsift->detectAndCompute()` back to
+`mSift->detectAndCompute()`, identical everything else) on the identical
+segment:
+
+| metric (frames 1-300, both need>=1) | Plain SIFT | ASIFT (maxTilt=2) |
+|---|---|---|
+| fails | 9 | 9 |
+| resets | 5 | **7** |
+| coverage | **81.6%** | 63.8% |
+| outlier rate | **6.3%** | 11.8% (nearly double) |
+| accepted-of-total | 17.3% | 16.1% |
+| empty_window | 47.2% | 54.7% |
+
+**Plain SIFT wins on every single metric.** This is the **sixth**
+confirmed instance of the same pattern this session (parts 51, 55,
+DistributeOctTree, CLAHE, the 0.02+need>=1 combo, and now ASIFT): more
+keypoints -- even from a fundamentally different, qualitatively richer
+source (real affine-simulated multi-view DoG extrema, not just a
+loosened single-view threshold) -- do not translate into better SLAM
+tracking on this dataset. The extra candidates measurably dilute match
+reliability (outlier rate nearly doubled) more than their quantity
+helps, exactly mirroring every earlier attempt despite using a
+completely different underlying mechanism. Separately, the maxTilt=5->2
+reduction needed just to make testing *practical at all* already weakens
+ASIFT's road-recovery benefit relative to the full algorithm, so the
+net cost (still meaningfully slower per-frame than plain SIFT, plus real
+keyframe-count/runtime risk at scale) isn't justified even setting the
+accuracy regression aside.
+
+**Initial decision (superseded below)**: reverted `operator()` to use
+`mSift->detectAndCompute()` (plain SIFT) as the active default.
+
+### Part 57 continued: user's fix -- pair ASIFT with a TIGHTER gate, not a looser one -- reverses the verdict
+
+User's insight: the losing ASIFT result above paired more (noisier)
+candidates with `need>=1`, the LOOSEST acceptance gate tested this
+session. What if ASIFT needs the OPPOSITE pairing -- more candidates
+filtered by a STRICTER gate, so the extra noise gets rejected while the
+extra genuine road-region matches still get through? This is the exact
+opposite direction from the earlier failed 0.02-threshold+need>=1 combo
+(which loosened both detection and acceptance together), so not
+something already ruled out.
+
+Re-enabled `mAsift` and set `Tracking.cc`'s `TrackLocalMap` gate back to
+`need>=15` (the original, tightest value tested this session). Result on
+the same matched frames 1-300 segment (GT=217.1m):
+
+| metric | Plain SIFT + need>=1 | ASIFT(maxTilt=2) + need>=1 | **ASIFT(maxTilt=2) + need>=15** |
+|---|---|---|---|
+| fails | 9 | 9 | **2** |
+| resets | 5 | 7 | **2** |
+| coverage | 81.6% | 63.8% | **89.2%** |
+| accepted-of-total | 17.3% | 16.1% | **25.2%** |
+| empty_window | 47.2% | 54.7% | **42.1%** |
+| outlier rate | **6.3%** | 11.8% | 11.5% |
+
+**ASIFT+need>=15 wins decisively** -- beats not just ASIFT+need>=1 but
+*plain SIFT itself*, on nearly every axis: fails collapsed from 9 to 2,
+resets from 5-7 to 2, coverage climbed to 89.2% (vs plain SIFT's already-
+strong 81.6%), and match quality metrics (accepted-rate, empty_window)
+both improved too. Only the outlier rate stays elevated relative to
+plain SIFT (11.5% vs 6.3%) -- but with fails/resets this much lower and
+coverage this much higher, that tradeoff is clearly worth it. All
+fragment RMSEs stayed safely under budget (max 2.311m).
+
+**This is the session's second major, unconditionally-adopted result**,
+alongside the `GetScaleFactor` fix. The lesson: ASIFT's extra candidates
+were never inherently bad -- part 57's first attempt paired them with
+the wrong (too-permissive) downstream filter. Tightening the filter
+instead of loosening it lets the genuine road-region recovery pay off
+without the noise cost. **Kept configuration**: `mAsift` active
+(`operator()` calls `mAsift->detectAndCompute()`, `maxTilt=2`),
+`TrackLocalMap` gate at `need>=15`. Confirmed via grep and rebuild.
+Validating on longer segments (1-1000, 1-2000) next.
+
+### Part 57 continued: final validation on frames 1-1000 -- confirms the win at scale
+
+A parallel 1-2000 run (GT=1483.7m) was also launched but killed early
+(frame ~94/2000) per explicit user choice, to conserve memory/CPU for the
+1-1000 run rather than run both to completion.
+
+**Result (frames 1-1000, GT=715.2m, ASIFT maxTilt=2 + need>=15)**: 44
+fails, 31 resets, 3 fragments totaling 497.3m matched path (**69.5%
+coverage**), outlier rate 11.9% (consistent with the 1-300 result's
+11.5%), all fragment ATE RMSEs far under budget (0.699m / 0.031m /
+1.258m). sbp-diag: 12.0% accepted, 57.0% empty_window.
+
+| metric (frames 1-1000, GT=715.2m) | Plain SIFT + need>=15 (GetScaleFactor-fix-only baseline) | **ASIFT(maxTilt=2) + need>=15** | Stock ORB |
+|---|---|---|---|
+| fails | 53 | **44** | 152 |
+| resets | **29** | 31 | 6 |
+| coverage | 53.1% | **69.5%** | 74.6% |
+
+**ASIFT+need>=15's win generalizes from the short 1-300 segment (89.2%
+coverage) to the full 1-1000 segment (69.5% coverage)** -- the margin
+over plain SIFT shrinks on the longer run (+16.4 points here vs +7.6
+points on 1-300, since 1-300's plain-SIFT baseline was itself already
+81.6% with `need>=1`, not the `need>=15` baseline used here) but stays
+decisively positive on every core metric except a small reset uptick
+(+2). It does not fully close the gap to stock ORB's 74.6%, but cuts the
+plain-SIFT-vs-ORB gap (21.5 points) by more than three-quarters (down to
+5.1 points). **This is the confirmed final result of the ASIFT
+investigation**: ASIFT(maxTilt=2) + `TrackLocalMap` need>=15 is adopted
+as the new kept configuration, superseding both plain SIFT and the
+earlier (need>=1-paired) losing ASIFT trial.
+
+### Part 57 continued: 1-2500 validation -- coverage is excellent, but exposes a real RMSE-budget violation
+
+Ran the same config on the longest segment tested this session, frames
+1-2500 (GT=1884.1m computed directly from `poses/00.txt`). Runtime was
+~44 minutes; mapKFs oscillated between ~26 and ~200 across several
+resets rather than growing unbounded, so the maxTilt=5-era runaway
+slowdown did not recur.
+
+**Result**: 11 fails, 6 resets, 3 fragments totaling 1820.3m matched
+path (**96.6% coverage** -- by far the best coverage number of the whole
+ASIFT investigation), outlier rate 11.9% (consistent with every other
+segment). But:
+
+| fragment | KFs | pathLen | ATE RMSE | budget status |
+|---|---|---|---|---|
+| 0 | 232 | 756.3m | 7.976m | OK |
+| 1 | 191 | 559.2m | **24.553m** | **OVER the 20m budget** |
+| 2 | 139 | 504.8m | **36.806m** | **OVER the 20m budget, badly** |
+
+**This is a real, previously-unseen problem, not a wash**: 2 of 3
+fragments blow past the user's standing <20m-RMSE-per-fragment
+constraint, one by nearly 2x. The mechanism is a direct tradeoff against
+the very thing that drove coverage up: only 6 resets across 2500 frames
+(vs 31 for the same config on 1-1000, and far more for the historical
+`need>=1`+plain-SIFT baseline on 1-2500, which had "10/10 fragments
+aligned, max RMSE 2.2m" per Session 16 notes) means each surviving map
+lives far longer without a reset to bound accumulated drift -- fewer
+resets is *usually* read as a pure win in this investigation's metrics,
+but a long-lived map with no correction mechanism (no ground-truth-scale
+loop closure in this monocular SIFT+VLAD setup) just accumulates error
+unchecked until the segment ends. High coverage and low RMSE are not the
+same axis, and this config's biggest strength (very few resets) is also
+what let two of its three fragments drift out of budget.
+
+**Net assessment**: ASIFT+need>=15 is not an unconditional win at this
+scale the way it was at 1-300/1-1000 -- it is a genuine coverage
+improvement that comes with a real, budget-violating accuracy risk on
+long, low-reset stretches. Whether this is acceptable depends on whether
+coverage or per-fragment accuracy is weighted higher for segments this
+long; flagged to the user rather than declared a clean win. Motivated
+the next investigation: pairing ASIFT with an even stricter accept gate
+(`need>=30`, ORB-SLAM3's true original default, pulled to 15 in this
+fork back in part 29) to see if tighter downstream filtering also helps
+control drift, not just coverage.
+
+**Tested need>=30, reverted per explicit user instruction before further validation.** Quick check on frames 1-300 (GT=217.1m): 17 fails, 10 resets, coverage 63.9% (only 1 of 2 fragments aligned, at 138.7m/0.240m RMSE; the other failed alignment outright with just 2 KFs), outlier rate 12.6%. Clearly worse than need>=15 on every metric (2 fails, 2 resets, 89.2% coverage, 11.5% outlier) -- the "stricter filter helps more" pattern that worked going from need>=1 to need>=15 did not repeat going from 15 to 30; 30 is simply too strict for this segment, rejecting too much otherwise-usable tracking. **Reverted to need>=15** (confirmed via grep and rebuild) -- this remains the final kept gate value, paired with ASIFT(maxTilt=2). The 1-2500 RMSE-budget-violation problem found just before this test remains open and unresolved by this attempt.
+
+### Part 57 continued: full-sequence validation (frames 0-4541, the whole of KITTI seq00) -- coverage/RMSE tradeoff resolves the other way
+
+Per explicit user instruction ("tối ưu RMSE sau, bây giờ chạy full đi" -- defer fixing the RMSE-budget issue, just get the full-sequence number now), ran ASIFT(maxTilt=2)+need>=15 on the entire sequence, frames 0-4541 (GT=3722.3m, computed directly from `poses/00.txt`). Runtime was ~2h12m -- by far the longest run of the investigation, and it visibly passed through at least two distinct hard stretches (frames ~2600-2900 and ~4000-4450, the latter matching a "primary hot zone" flagged in earlier session notes) where pace degraded to several seconds/frame and resets/fails clustered heavily, before recovering each time. mapKFs briefly spiked to 386 (the highest seen this session) around frame 4130 but was flushed by a natural map reset rather than spiraling into the catastrophic loop-closing runaway seen earlier with maxTilt=5 -- the maxTilt=2 fix held up even under this much more demanding full-sequence load.
+
+**Result**: 180 fails, 121 resets, 8 map fragments (6 aligned, 2 failed alignment outright with only 3 KFs each) totaling 964.3m matched path (**25.9% coverage** -- far lower than every shorter segment tested: 1-300's 89.2%, 1-1000's 69.5%, 1-2500's 96.6%), outlier rate 15.0% (the highest seen this session). sbp-diag: 18.9% accepted, 45.4% empty_window.
+
+| fragment | KFs | pathLen | ATE RMSE | budget status |
+|---|---|---|---|---|
+| 0 | 83 | 224.4m | 1.015m | OK |
+| 1 | 3 | -- | alignment failed | n/a |
+| 2 | 23 | 81.9m | 0.093m | OK |
+| 3 | 137 | 402.8m | 2.478m | OK |
+| 4 | 62 | 146.8m | 0.874m | OK |
+| 5 | 10 | 27.3m | 0.317m | OK |
+| 6 | 15 | 81.1m | 0.430m | OK |
+| 7 | 3 | -- | alignment failed | n/a |
+
+**Every aligned fragment stayed comfortably within the 20m RMSE budget** (worst case 2.478m) -- the OPPOSITE outcome from 1-2500 (where 2 of 3 fragments blew the budget). This is the coverage/RMSE tradeoff identified at 1-2500 playing out in the other direction: 121 resets over 4541 frames (~1 reset per 37.5 frames) is a much higher reset density than 1-2500's 6 resets over 2500 frames (~1 per 417), so no single map fragment got the chance to live long enough to accumulate drift past budget -- but the flip side is heavy fragmentation (8 fragments, 2 of them too short to even align) and a correspondingly low total-coverage number, since resets cost dead time (relocalization attempts, short-lived low-value fragments) that doesn't contribute matched path.
+
+**Net assessment closing out the ASIFT investigation**: ASIFT(maxTilt=2)+need>=15 does not have a single "coverage number" independent of how hard/long the segment is -- on easier, shorter stretches it delivers excellent coverage (up to 96.6%) sometimes at real RMSE-budget risk; on the full, harder sequence it self-regulates via more frequent resets into a materially lower-coverage (25.9%) but fully budget-safe result. Both the coverage win (vs. the 53.1%/44-fails/31-resets plain-SIFT 1-1000 baseline) and the accuracy discipline (0 budget violations across the whole sequence) are real and reproducible; the two just don't co-occur at the same segment length in the same way. **This is the final, confirmed full-sequence result for the session's adopted configuration.** No RMSE-specific fix was attempted this round (explicitly deferred by the user); that remains a legitimate follow-up if higher full-sequence coverage is wanted without sacrificing the current budget safety margin.
+
+### Part 57 continued: two abandoned follow-up attempts, then a root-cause diagnosis via the ASIFT paper -- final verdict: NEGATIVE RESULT
+
+**User pushback on the framing above**: after the full-sequence result, the user directly rejected treating "0 RMSE-budget violations" as a consolation for 25.9% coverage -- they had already told the session RMSE violations were acceptable for this run, so the low coverage number stands on its own as a real problem, not offset by anything. This is the correct framing; the prior paragraph's "coverage/RMSE tradeoff, both real and reproducible" language undersold how bad 25.9% coverage actually is when RMSE safety isn't being valued.
+
+**Two follow-up attempts were launched to try to fix it, both abandoned mid-run without producing usable results**: (1) `maxTilt=1` (further reduced from the kept `maxTilt=2`) tested on frames 1-1000 as a speed/quality tradeoff -- early signal was clearly bad (26 fails, 20 resets in just the first 182/1000 frames, worse pace than the full 1000-frame maxTilt=2 result of 44 fails/31 resets total); (2) `need>=1` (loosest gate) tested in parallel on frames 2500-4541 (the hard back-half that caused most of the full-sequence fragmentation) to see if a looser gate would reduce resets there now that RMSE safety wasn't the priority. **Both were killed by explicit user instruction ("kill hết đi, chắc dừng lại ở đây, NEGATIVE RESULT") before either produced a complete result** -- no fragment/coverage data exists for either. Both code changes were reverted (`maxTilt` back to 2, gate back to `need>=15`) and the rebuild reconfirmed the tree matches the originally-adopted state.
+
+**Root-cause diagnosis, via the actual ASIFT paper (Morel & Yu, IPOL 2011), not just further parameter search**: fetched and read the paper directly. **ASIFT was designed and validated for wide-baseline matching** (two images from substantially different viewpoints -- stereo with large disparity, image retrieval, panorama stitching) -- not for per-frame feature extraction on consecutive video frames, where the baseline between frames is inherently small. The paper's whole mechanism (simulating multiple affine tilts/rotations before running SIFT) exists specifically to compensate for *large* affine distortion between the two views being compared; it gives no guidance for scaling tilt range down for small-baseline pairs, and nothing in the paper suggests it's intended for near-fronto-parallel image pairs. **This is a genuine, citable explanation for the elevated outlier rate observed at every scale this session (11.5-15% vs plain SIFT's consistent ~6.3%)**: most of ASIFT's extra affine-simulated keypoints have no true correspondence in an actual small-baseline consecutive-frame pair, so they contribute disproportionately to false matches rather than genuine recoverable structure. The `need>=15` gate's apparent "fix" (parts above) was never fixing the mismatch -- it was filtering out enough of this structural noise, on short/easy segments, for the surviving genuine road-recovery keypoints to still net out ahead. On harder/longer segments (1-2500, and especially the full sequence) there isn't a filter setting that avoids the tradeoff, because the noise source itself doesn't go away by tuning a downstream threshold.
+
+**Final verdict: NEGATIVE RESULT.** ASIFT is not the right tool for this use case (continuous small-baseline monocular VO/SLAM feature extraction) at a structural level, not a tuning level -- no combination of `maxTilt`, capping strategy, or accept-gate value tested this session (or likely to be tested in the future) can fix a mismatch that exists between the algorithm's designed operating regime and this project's actual per-frame baseline. The earlier "wins" (1-300: 89.2%, 1-1000: 69.5%, 1-2500: 96.6% coverage) were real and reproducible on those specific segments, but do not represent ASIFT being fundamentally suited to this task -- they represent the `need>=15` gate successfully laundering enough of ASIFT's structurally-elevated noise on those particular (shorter/easier) segments to still come out ahead of plain SIFT. The full-sequence result (25.9% coverage) is the more representative number for what this configuration actually delivers at real operating scale. **`mAsift` remains present in the code (constructed, available) but is being retired as an active investigation path** -- future SIFT-quality work should look elsewhere (e.g., the still-open, unrelated `dist_reject`-dominance finding in [[Match-Rate-Investigation]], or genuinely different detectors/strategies) rather than further ASIFT parameter search.
+
 **Result: worse than need>=1 alone (both trials) AND worse than the
 original baseline.** This cleanly refutes the interaction hypothesis --
 lowering the contrast threshold is independently harmful regardless of

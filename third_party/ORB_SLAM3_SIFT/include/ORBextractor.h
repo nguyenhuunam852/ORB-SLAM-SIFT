@@ -147,6 +147,16 @@ protected:
     // pyramid level count.
     int nOctaveLayers;
     cv::Ptr<cv::SIFT> mSift;
+    // ASIFT integration (see DEBUGGING.md part 56 / next-session plan):
+    // cv::AffineFeature wraps mSift and simulates multiple affine
+    // tilts/rotations per the ASIFT algorithm (Morel & Yu), running SIFT
+    // on each simulated view and merging results in original-image
+    // coordinates. Tests directly on KITTI's road surface showed this
+    // recovers real, spatially well-distributed low-texture structure
+    // that plain SIFT structurally cannot find (unlike the five failed
+    // "just lower the threshold" attempts) -- see
+    // analyze/asift_test.cpp and the keypoint visualizations it produced.
+    cv::Ptr<cv::AffineFeature> mAsift;
 
     std::vector<int> mnFeaturesPerLevel;
 

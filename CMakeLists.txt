@@ -209,6 +209,25 @@ add_executable(orbslam3_visualize_keypoints analyze/orbslam3_visualize_keypoints
 target_include_directories(orbslam3_visualize_keypoints PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(orbslam3_visualize_keypoints PRIVATE orbslam3_ext)
 
+# Standalone ASIFT (cv::AffineFeature-wrapped SIFT) feasibility test (see
+# DEBUGGING.md part 56 / next-session plan) -- pure OpenCV, no dependency
+# on either ORB_SLAM3 fork's own extractor code.
+add_executable(asift_test analyze/asift_test.cpp)
+target_include_directories(asift_test PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(asift_test PRIVATE ${OpenCV_LIBS})
+
+# Standalone SIFT+LightGlue feasibility test (ASIFT investigation closed as
+# a NEGATIVE RESULT, see DEBUGGING.md part 57 -- LightGlue is the
+# follow-up: a learned matcher, official SIFT-trained weights exist, kept
+# extractor untouched, only replacing the matching step). No official ONNX
+# export of SIFT+LightGlue exists anywhere -- the model this loads comes
+# from analyze/export_lightglue_sift.py (weights/lightglue_sift.onnx),
+# verified numerically equivalent to the original PyTorch module. Requires
+# ONNX Runtime (libonnxruntime-dev, installed via apt).
+add_executable(lightglue_test analyze/lightglue_test.cpp)
+target_include_directories(lightglue_test PRIVATE ${OpenCV_INCLUDE_DIRS} /usr/include/onnxruntime)
+target_link_libraries(lightglue_test PRIVATE ${OpenCV_LIBS} onnxruntime)
+
 # SIFT-based fork of the vendored ORB-SLAM3, built from an entirely separate
 # copy (third_party/ORB_SLAM3_SIFT, `cp -r` of third_party/ORB_SLAM3) rather
 # than modifying the original in place -- per explicit request, so the
@@ -243,6 +262,7 @@ target_include_directories(orbslam3_sift_ext PUBLIC
     third_party/ORB_SLAM3_SIFT/include
     third_party/ORB_SLAM3_SIFT/include/CameraModels
     third_party/ORB_SLAM3_SIFT/Thirdparty/Sophus
+    /usr/include/onnxruntime
 )
 target_include_directories(orbslam3_sift_ext SYSTEM PUBLIC
     "${BOOST_INCLUDE_DIR}"
@@ -250,6 +270,7 @@ target_include_directories(orbslam3_sift_ext SYSTEM PUBLIC
 target_link_libraries(orbslam3_sift_ext PUBLIC
     ${OpenCV_LIBS}
     g2o_ext
+    onnxruntime
     /usr/lib/x86_64-linux-gnu/libssl.so
     /usr/lib/x86_64-linux-gnu/libcrypto.so
     "${CONDA_ENV_ROOT}/lib/libboost_serialization.so"

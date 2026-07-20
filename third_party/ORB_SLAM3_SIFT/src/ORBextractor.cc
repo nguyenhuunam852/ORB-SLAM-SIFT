@@ -544,6 +544,7 @@ namespace ORB_SLAM3
                                                    // consumer expects as the valid array length
 
         mSift = cv::SIFT::create(nfeatures, nOctaveLayers, kContrastThreshold, kEdgeThreshold, kSigma);
+        mAsift = cv::AffineFeature::create(mSift, /*maxTilt=*/2, /*minTilt=*/0); // reduced from paper/default 5 -- see DEBUGGING.md part 57 continued (runtime-scaling fix). maxTilt=1 was tried as a speed/quality test and abandoned (negative result, killed mid-run) -- 2 remains the kept value.
 
         mvScaleFactor.resize(nlevels);
         mvInvScaleFactor.resize(nlevels);
@@ -591,6 +592,7 @@ namespace ORB_SLAM3
     {
         nfeatures = nfeatures_;
         mSift = cv::SIFT::create(nfeatures, nOctaveLayers, contrastThreshold_, kEdgeThreshold, kSigma);
+        mAsift = cv::AffineFeature::create(mSift, /*maxTilt=*/2, /*minTilt=*/0); // reduced from paper/default 5 -- see DEBUGGING.md part 57 continued (runtime-scaling fix). maxTilt=1 was tried as a speed/quality test and abandoned (negative result, killed mid-run) -- 2 remains the kept value.
     }
 
     static void computeOrientation(const Mat& image, vector<KeyPoint>& keypoints, const vector<int>& umax)
@@ -1233,35 +1235,89 @@ namespace ORB_SLAM3
         _keypoints.clear();
         Mat descriptors;
 
-        // TESTED part 56 (see DEBUGGING.md): tried CLAHE-preprocessing the
-        // image before detection (cv::createCLAHE(2.0, {8,8})) to boost
-        // local contrast so genuinely-present-but-weak road texture could
-        // clear the ORIGINAL unchanged 0.04 threshold on its own merit,
-        // rather than lowering the threshold itself (the three already-
-        // failed attempts: parts 51, 55, and the DistributeOctTree test).
-        // Raw keypoint count on the hardest measured frame did jump to the
-        // full 5000 cap (from 2420), and road coverage visibly improved.
-        // But the real evaluation on frames 1-1000 was the FOURTH
-        // consecutive failure: fails 53->84, resets 29->43, coverage
-        // 53.1%->29.8%, accepted-rate 16.7%->12.9%, plus a concerning
-        // 13.764m-RMSE fragment (still under the 20m budget, but far
-        // worse than this session's typical sub-1m fragments) -- likely
-        // because near-planar road-surface points give poor triangulation
-        // geometry even when 2D matching succeeds, and/or CLAHE's
-        // per-frame-adaptive normalization hurts frame-to-frame descriptor
-        // repeatability for otherwise-good points. Reverted.
-        mSift->detectAndCompute(image, cv::noArray(), _keypoints, descriptors);
+        // ASIFT integration, KEPT (see DEBUGGING.md part 57): mAsift
+        // (cv::AffineFeature wrapping mSift, maxTilt reduced from the
+        // paper/OpenCV default 5 to 2 for runtime reasons -- see below)
+        // simulates multiple affine tilts/rotations, runs SIFT on each,
+        // and merges results in original-image coordinates -- recovers
+        // real road-surface structure plain SIFT structurally cannot find
+        // (raw count 2420->35293 at maxTilt=5, 16379 at maxTilt=2, on the
+        // hardest measured KITTI frame).
+        //
+        // Getting here took two false starts, both instructive: (1) with
+        // Tracking.cc's TrackLocalMap accept gate at need>=1, ASIFT LOST
+        // to plain SIFT on every metric (coverage 63.8% vs 81.6%, outlier
+        // rate 11.8% vs 6.3%) -- the extra candidates were diluting match
+        // reliability, the same failure mode as five earlier road-density
+        // attempts this session (parts 51, 55, DistributeOctTree, CLAHE,
+        // a 0.02-threshold+need>=1 combo). (2) AffineFeature's paper
+        // default maxTilt=5 caused catastrophic loop-closure-candidate-
+        // checking slowdown once keyframe count grew past ~150-200
+        // (killed twice -- 1-1000 at frame 722, 1-300 at frame 214) --
+        // reduced to maxTilt=2, which also happens to keep keyframe
+        // growth more controlled.
+        //
+        // The fix that actually worked: pairing ASIFT with a TIGHTER
+        // acceptance gate (need>=15, not the looser need>=1) instead of a
+        // looser one -- opposite direction from the failed 0.02+need>=1
+        // combo. Tightening filters out enough of ASIFT's extra noisy
+        // candidates while still keeping its extra genuine road-region
+        // matches. Result (frames 1-300, GT=217.1m, matched against the
+        // same plain-SIFT-need>=1 baseline): fails 9->2, resets 5(plain)/
+        // 7(ASIFT+need>=1)->2, coverage 81.6%->**89.2%**, accepted-rate
+        // 17.3%->25.2%, empty_window 47.2%->42.1% -- ASIFT+need>=15 beats
+        // BOTH plain SIFT and ASIFT-with-the-looser-gate on nearly every
+        // axis. Outlier rate (11.5%) stays elevated vs plain SIFT's 6.3%,
+        // but the massive fails/resets/coverage gains are worth it. This
+        // is the session's second major, unconditionally-adopted result
+        // alongside the GetScaleFactor fix.
+        mAsift->detectAndCompute(image, cv::noArray(), _keypoints, descriptors);
 
-        // TESTED part 56 (see DEBUGGING.md): tried wiring DistributeOctTree
-        // in here (previously dead code for SIFT) to re-select the final
-        // nfeatures target with spatial fairness instead of cv::SIFT's own
-        // global response ranking, combined with a lower detection
-        // threshold to admit road-region candidates in the first place.
-        // Measured worse on every metric (fails 53->72, coverage
-        // 53.1%->35.1%, outlier rate 6.6%->8.1%) -- reverted. See the
-        // constructor's kContrastThreshold-area comment for the full
-        // writeup of why (descriptor quality at low contrast, not spatial
-        // ranking, is the real problem).
+        // ASIFT's merged output is far larger than nfeatures (measured
+        // ~14x). Tested capping via cv::KeyPointsFilter::retainBest
+        // (global response ranking, matching plain cv::SIFT's own
+        // internal behavior) first -- it collapsed back onto a handful of
+        // extreme-response clusters (overexposed sign/window regions),
+        // discarding almost all the newly-recovered road coverage (see
+        // asift_test.cpp's *_asift_capped.png). Grid-based capping (best
+        // response per spatial cell, sized to land close to nfeatures
+        // cells) kept the road coverage intact instead (*_asift_gridcapped.png)
+        // -- used here.
+        if (static_cast<int>(_keypoints.size()) > nfeatures) {
+            const int cellsX = std::max(1, static_cast<int>(std::round(
+                    std::sqrt(static_cast<double>(nfeatures) * image.cols / std::max(1, image.rows)))));
+            const int cellsY = std::max(1, nfeatures / cellsX);
+            const float cw = static_cast<float>(image.cols) / cellsX;
+            const float ch = static_cast<float>(image.rows) / cellsY;
+
+            std::vector<int> bestIdx(static_cast<size_t>(cellsX) * cellsY, -1);
+            for (size_t i = 0; i < _keypoints.size(); ++i) {
+                const KeyPoint &kp = _keypoints[i];
+                int cx = std::min(cellsX - 1, std::max(0, static_cast<int>(kp.pt.x / cw)));
+                int cy = std::min(cellsY - 1, std::max(0, static_cast<int>(kp.pt.y / ch)));
+                size_t idx = static_cast<size_t>(cy) * cellsX + cx;
+                if (bestIdx[idx] == -1 || kp.response > _keypoints[bestIdx[idx]].response)
+                    bestIdx[idx] = static_cast<int>(i);
+            }
+
+            vector<KeyPoint> cappedKeypoints;
+            vector<int> keepRows;
+            cappedKeypoints.reserve(bestIdx.size());
+            keepRows.reserve(bestIdx.size());
+            for (int idx : bestIdx) {
+                if (idx != -1) {
+                    cappedKeypoints.push_back(_keypoints[idx]);
+                    keepRows.push_back(idx);
+                }
+            }
+
+            Mat cappedDescriptors(static_cast<int>(keepRows.size()), descriptors.cols, descriptors.type());
+            for (size_t i = 0; i < keepRows.size(); ++i)
+                descriptors.row(keepRows[i]).copyTo(cappedDescriptors.row(static_cast<int>(i)));
+
+            _keypoints = std::move(cappedKeypoints);
+            descriptors = cappedDescriptors;
+        }
 
         // Remap every keypoint's packed SIFT octave/layer into the flat
         // scale-array index every downstream consumer (ORBmatcher,

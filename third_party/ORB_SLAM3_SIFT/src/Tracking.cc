@@ -20,6 +20,7 @@
 #include "Tracking.h"
 
 #include "ORBmatcher.h"
+#include "LightGlueMatcher.h"
 #include "FrameDrawer.h"
 #include "Converter.h"
 #include "G2oTypes.h"
@@ -2693,9 +2694,16 @@ void Tracking::MonocularInitialization()
             return;
         }
 
-        // Find correspondences
-        ORBmatcher matcher(0.9,true);
-        int nmatches = matcher.SearchForInitialization(mInitialFrame,mCurrentFrame,mvbPrevMatched,mvIniMatches,100);
+        // Find correspondences -- LightGlue (see DEBUGGING.md part 58):
+        // InitialFrame-vs-CurrentFrame is a genuinely pairwise frame match,
+        // a clean fit for LightGlue's design (unlike the local-map-point
+        // search path, left on the traditional matcher). mvIniMatches'
+        // format (mvIniMatches[i]=j, -1 if none) matches LightGlueMatcher::
+        // Match's output directly.
+        cv::Size initImgSize(static_cast<int>(Frame::mnMaxX - Frame::mnMinX), static_cast<int>(Frame::mnMaxY - Frame::mnMinY));
+        int nmatches = GetLightGlueMatcher()->Match(mInitialFrame.mvKeys, mInitialFrame.mDescriptors,
+                                                      mCurrentFrame.mvKeys, mCurrentFrame.mDescriptors,
+                                                      initImgSize, mvIniMatches);
 
         // Check if there are enough correspondences
         if(nmatches<100)
@@ -3117,18 +3125,36 @@ bool Tracking::TrackWithMotionModel()
         th=7;
     else
         th=15;
+    (void)th; // unused in the LightGlue path below -- no radius-window retry concept
 
-    int nmatches = matcher.SearchByProjection(mCurrentFrame,mLastFrame,th,mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR);
-
-    // If few matches, uses a wider window search
-    if(nmatches<20)
+    // LightGlue (see DEBUGGING.md part 58): mLastFrame-vs-mCurrentFrame is
+    // a genuinely pairwise frame match (the same shape of comparison as
+    // SearchForInitialization above), a clean fit for LightGlue's design.
+    // Unlike the original projection+radius-window search, LightGlue
+    // doesn't take a geometric prior/threshold, so there's no "wider
+    // window" retry -- a single full-frame match either finds enough
+    // correspondences or it doesn't.
+    int nmatches = 0;
     {
-        Verbose::PrintMess("Not enough matches, wider window search!!", Verbose::VERBOSITY_NORMAL);
-        fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(NULL));
-
-        nmatches = matcher.SearchByProjection(mCurrentFrame,mLastFrame,2*th,mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR);
-        Verbose::PrintMess("Matches with wider search: " + to_string(nmatches), Verbose::VERBOSITY_NORMAL);
-
+        std::vector<int> lgMatches; // lgMatches[i]=j: mLastFrame kp i <-> mCurrentFrame kp j
+        cv::Size imgSize(static_cast<int>(Frame::mnMaxX - Frame::mnMinX), static_cast<int>(Frame::mnMaxY - Frame::mnMinY));
+        GetLightGlueMatcher()->Match(mLastFrame.mvKeys, mLastFrame.mDescriptors,
+                                      mCurrentFrame.mvKeys, mCurrentFrame.mDescriptors,
+                                      imgSize, lgMatches);
+        for (int i = 0; i < mLastFrame.N; ++i) {
+            MapPoint* pMP = mLastFrame.mvpMapPoints[i];
+            if (!pMP || mLastFrame.mvbOutlier[i])
+                continue;
+            int j = lgMatches[i];
+            if (j < 0)
+                continue;
+            if (mCurrentFrame.mvpMapPoints[j] && mCurrentFrame.mvpMapPoints[j]->Observations() > 0)
+                continue;
+            mCurrentFrame.mvpMapPoints[j] = pMP;
+            ++nmatches;
+        }
+        fprintf(stderr, "[lightglue-motion-model] id=%lu lastFrameN=%d currentFrameN=%d nmatches=%d\n",
+                mCurrentFrame.mnId, mLastFrame.N, mCurrentFrame.N, nmatches);
     }
 
     if(nmatches<20)
@@ -3360,15 +3386,34 @@ bool Tracking::TrackLocalMap()
         // essentially flat-to-slightly-worse (53.1%->50.6%, within this
         // session's established noise band for this segment length) -- no
         // clear benefit to justify keeping the looser gate. Reverted to 15.
-        // TESTING part 56 continued: user asked to push even further
-        // ("giảm xuống 0.1" -- mnMatchesInliers is an integer count, so
-        // interpreted as the most extreme possible relaxation: accept ANY
-        // nonzero inlier count as good enough). Kept at need>=1 per user's
-        // explicit request to test contrastThreshold=0.005 combined with
-        // need>=1, not need>=15.
-        fprintf(stderr, "[track-local-map] id=%lu mnMatchesInliers=%d (need>=1) mapKFs=%d\n",
+        // TESTING part 57 continued: user's idea -- pair ASIFT (more raw
+        // candidates) with a TIGHTER gate (need>=15, the original) instead
+        // of the looser need>=1 used in ASIFT's first (losing) evaluation,
+        // to filter out the extra noise ASIFT introduces while hopefully
+        // keeping its extra genuine road-region matches. need>=15 confirmed
+        // as a real win on 1-300/1-1000, but on 1-2500 it produced only 6
+        // resets and 2 of 3 fragments blew the 20m RMSE budget (24.6m,
+        // 36.8m) -- long-lived maps drift unchecked without loop-closure-
+        // scale correction. Briefly tried need>=30 (ORB-SLAM3's true
+        // original default, pulled to 15 in part 29 before ASIFT existed)
+        // to see if a stricter filter also helps bound drift -- reverted
+        // back to need>=15 per explicit user instruction before that test
+        // finished/was evaluated. need>=15 remains the kept, adopted gate.
+        // TESTING part 57 continued: full-sequence run showed 0 RMSE-budget
+        // violations but only 25.9% coverage (121 resets fragmented the
+        // map heavily through the hard back-half). User judged low-RMSE-
+        // but-low-coverage as not a meaningful result on its own. Tried
+        // need>=1 (loosest gate) on the hard remainder (frames 2500-4541)
+        // plus a parallel maxTilt=1 speed/quality test on 1-1000 -- BOTH
+        // killed mid-run per explicit user instruction ("kill hết đi,
+        // NEGATIVE RESULT") before either produced a usable result. This
+        // closes the post-full-sequence follow-up investigation without a
+        // fix for the low full-sequence coverage; need>=15 remains the
+        // final kept, adopted gate (the fix for full-sequence coverage, if
+        // pursued again, needs a different lever than gate/maxTilt tuning).
+        fprintf(stderr, "[track-local-map] id=%lu mnMatchesInliers=%d (need>=15) mapKFs=%d\n",
                 mCurrentFrame.mnId, mnMatchesInliers, mpAtlas->GetCurrentMap()->KeyFramesInMap());
-        if(mnMatchesInliers<1)
+        if(mnMatchesInliers<15)
             return false;
         else
             return true;
