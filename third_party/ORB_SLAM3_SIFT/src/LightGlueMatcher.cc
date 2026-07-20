@@ -187,15 +187,25 @@ int LightGlueMatcher::Match(const std::vector<cv::KeyPoint>& kps0, const cv::Mat
 }
 
 namespace {
-    std::unique_ptr<LightGlueMatcher> g_lightGlueMatcher;
+    // Deliberately never destroyed (raw pointer, no delete) -- ONNX Runtime's
+    // CUDA execution provider frees GPU memory (cudaFreeHost etc.) in its own
+    // destructor, and at normal process-exit time the CUDA driver can already
+    // be mid-teardown, turning that free into an uncaught
+    // onnxruntime::OnnxRuntimeException -> std::terminate -> SIGABRT that
+    // kills the whole process, including any in-flight file write (this is
+    // exactly what truncated a completed KeyFrameTrajectory.txt to 0 bytes
+    // on a Kaggle GPU run despite tracking/ATE having already finished
+    // successfully -- see DEBUGGING.md). The OS reclaims all GPU/process
+    // memory on exit regardless, so skipping this destructor is safe.
+    LightGlueMatcher* g_lightGlueMatcher = nullptr;
 }
 
 LightGlueMatcher* GetLightGlueMatcher()
 {
     if (!g_lightGlueMatcher) {
-        g_lightGlueMatcher = std::make_unique<LightGlueMatcher>("weights/lightglue_sift.onnx");
+        g_lightGlueMatcher = new LightGlueMatcher("weights/lightglue_sift.onnx");
     }
-    return g_lightGlueMatcher.get();
+    return g_lightGlueMatcher;
 }
 
 } // namespace ORB_SLAM3
