@@ -29,23 +29,29 @@ if(USE_CUDASIFT)
     # fresh into CUDASIFT_SRC_DIR by setup_and_run.sh.
     set(CUDASIFT_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cudasift_src" CACHE PATH
         "Root of a fresh git clone of Celebrandil/CudaSift (cloned by setup_and_run.sh)")
-    # Explicit allowlist, NOT a glob -- the repo's root also contains
-    # cudaSiftD.cu (device kernels, #included by cudaSiftH.cu, not an
-    # independent translation unit -- compiling it separately produced
-    # duplicate-symbol nvlink errors for every kernel/global), the
-    # cudaSiftD_old.cu/cudaSiftH_old.cu/cudaSiftH_old.h legacy duplicates
-    # (same problem), cudaSift_gold.cpp (a CPU reference/test harness), and
-    # mainSift.cpp (the repo's own demo main(), conflicting with this
-    # project's own main() in orbslam3_kitti_ate.cpp -- confirmed live via
-    # a duplicate-`main`-symbol link error). This exact file list matches
-    # what CudaSift's own upstream CMakeLists.txt compiles into its
-    # `cudasift` executable (verified by fetching it directly), minus
-    # mainSift.cpp.
+    # Explicit allowlist, NOT a glob. CudaSift's own upstream CMakeLists.txt
+    # (fetched directly) lists cuda_sources as cudaImage.cu/cudaSiftH.cu/
+    # matching.cu/singular.cu -- but that CMakeLists.txt is stale relative
+    # to the actual current file tree (confirmed via the GitHub API's real
+    # directory listing): singular.cu no longer exists at all (CMake
+    # "Cannot find source file" when included), and the tree instead has a
+    # newer match.cu the stale CMakeLists.txt doesn't even mention -- which
+    # turned out to have its own main(), conflicting with this project's
+    # own main() in orbslam3_kitti_ate.cpp (confirmed live via a duplicate-
+    # `main`-symbol link error). cudaSiftD.cu is also real but is
+    # #included by cudaSiftH.cu, not an independent translation unit
+    # (compiling it separately produced duplicate-symbol nvlink errors for
+    # every kernel/global). mainSift.cpp is the repo's own demo main(),
+    # excluded for the same reason as match.cu. Net: only the 4 files below
+    # are both real (verified via the GitHub API, not a possibly-stale
+    # CMakeLists.txt) and free of a conflicting main()/duplicate symbols.
+    # If a future build reports an undefined reference, something singular.cu
+    # used to provide may have moved elsewhere in the tree -- check the
+    # actual current repo contents again rather than guessing.
     set(CUDASIFT_SOURCES
         "${CUDASIFT_SRC_DIR}/cudaImage.cu"
         "${CUDASIFT_SRC_DIR}/cudaSiftH.cu"
         "${CUDASIFT_SRC_DIR}/matching.cu"
-        "${CUDASIFT_SRC_DIR}/singular.cu"
         "${CUDASIFT_SRC_DIR}/geomFuncs.cpp"
     )
 endif()
