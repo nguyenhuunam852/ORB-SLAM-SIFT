@@ -4057,7 +4057,13 @@ bool Tracking::Relocalization()
 
     // We perform first an ORB matching with each candidate
     // If enough matches are found we setup a PnP solver
-    ORBmatcher matcher(0.75,true);
+    //
+    // Ratio 0.75->0.8, part 58 continued: same fix as
+    // TrackReferenceKeyFrame's SearchByBoW call (see that constructor's
+    // comment) -- 0.75 was still stricter than Lowe's own SIFT-paper-
+    // measured optimum of 0.8 (IJCV 2004, sec 7.1). Not yet measured here
+    // specifically; see DEBUGGING.md part 58 for the follow-up result.
+    ORBmatcher matcher(0.8,true);
 
     vector<MLPnPsolver*> vpMLPnPsolvers;
     vpMLPnPsolvers.resize(nKFs);
@@ -4155,7 +4161,20 @@ bool Tracking::Relocalization()
                 int nGood = Optimizer::PoseOptimization(&mCurrentFrame);
 
                 if(nGood<10)
+                {
+                    // [reloc-pnp-diag] part 58 continued -- retraining the
+                    // VLAD codebook on RootSIFT (see DEBUGGING.md) fixed
+                    // candidate discovery (dbCandidates now often 2-5, up
+                    // from mostly 1) but finalMatch stayed ~0 almost every
+                    // time. This traces WHERE in the RANSAC/PnP pipeline
+                    // candidates die: here means RANSAC produced a pose but
+                    // pose optimization found fewer than 10 good inliers --
+                    // the earliest, cheapest exit, before the two
+                    // SearchByProjection refinement passes below even run.
+                    fprintf(stderr, "[reloc-pnp-diag] id=%lu candidate=%d nInliers(ransac)=%d nGood(afterFirstOpt)=%d<10 -- EARLY EXIT\n",
+                            mCurrentFrame.mnId, i, nInliers, nGood);
                     continue;
+                }
 
                 for(int io =0; io<mCurrentFrame.N; io++)
                     if(mCurrentFrame.mvbOutlier[io])
@@ -4200,6 +4219,18 @@ bool Tracking::Relocalization()
                     bMatch = true;
                     pRelocWinnerKF = vpCandidateKFs[i];
                     break;
+                }
+                else
+                {
+                    // [reloc-pnp-diag] part 58 continued -- reached past the
+                    // nGood<10 early exit and through both
+                    // SearchByProjection refinement passes, but still short
+                    // of the need>=50 final bar. Reports how far short, to
+                    // tell "close, refinement almost got there" apart from
+                    // "still fundamentally too few matches even after
+                    // refinement". See DEBUGGING.md part 58.
+                    fprintf(stderr, "[reloc-pnp-diag] id=%lu candidate=%d nGood(final)=%d<50 -- REFINEMENT INSUFFICIENT\n",
+                            mCurrentFrame.mnId, i, nGood);
                 }
             }
         }
