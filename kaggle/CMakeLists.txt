@@ -166,3 +166,18 @@ if(USE_CUDASIFT)
     target_link_libraries(cudasift_probe PRIVATE ${OpenCV_LIBS} CUDA::cudart CUDA::cufft)
     set_target_properties(cudasift_probe PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 endif()
+
+# VLAD codebook trainer (see analyze/orbslam3_vlad_train.cpp) -- was only
+# registered in the root CMakeLists.txt (which needs Qt6/Ceres, unusable on
+# Kaggle). Mirrors orbslam3_sift_kitti_ate: links orbslam3_sift_ext directly,
+# so with USE_CUDASIFT=ON the descriptor extraction it runs over all 22 KITTI
+# sequences is the same GPU CudaSift path, not a separate CPU-only trainer.
+# The k-means clustering step itself stays CPU (cv::kmeans has no CUDA path
+# in this codebase, and the ~400k-row/128-dim pool it runs on is small enough
+# that this isn't a bottleneck worth chasing).
+add_executable(orbslam3_vlad_train ${CMAKE_CURRENT_SOURCE_DIR}/../analyze/orbslam3_vlad_train.cpp)
+target_include_directories(orbslam3_vlad_train PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(orbslam3_vlad_train PRIVATE orbslam3_sift_ext)
+set_target_properties(orbslam3_vlad_train PROPERTIES
+    BUILD_RPATH "${ONNXRUNTIME_ROOT}/lib;${G2O_ROOT}/lib"
+)

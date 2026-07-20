@@ -149,7 +149,19 @@ int main(int argc, char **argv)
 
     cv::Mat labels, centers;
     cv::TermCriteria criteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 50, 1e-4);
-    cv::kmeans(pool, k, labels, criteria, 3, cv::KMEANS_PP_CENTERS, centers);
+    // cv::kmeans's return value IS the k-means "loss" -- compactness, the
+    // sum over all points of squared L2 distance to their assigned
+    // centroid (the objective k-means actually minimizes). Not a neural-
+    // net loss curve (OpenCV's kmeans is a single black-box call, no
+    // per-iteration callback), but this before/after-normalized number is
+    // the real, directly comparable signal: lower per-descriptor
+    // compactness means tighter, more separated clusters. Reported here
+    // instead of silently discarded (the previous version of this file
+    // never captured cv::kmeans's return value at all).
+    const double compactness = cv::kmeans(pool, k, labels, criteria, 3, cv::KMEANS_PP_CENTERS, centers);
+    std::fprintf(stderr, "[kmeans-loss] compactness=%.2f (raw sum of squared dist) "
+                          "avgPerDescriptor=%.6f (compactness/%d rows) -- lower is better\n",
+                 compactness, compactness / pool.rows, pool.rows);
     centers.convertTo(centers, CV_32F);
 
     std::fprintf(stderr, "[config] writing codebook to %s\n", outPath.c_str());
