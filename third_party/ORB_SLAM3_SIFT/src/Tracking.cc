@@ -4179,9 +4179,16 @@ bool Tracking::TrackWithKLTRecovery()
 
     // Same RANSAC tuning Relocalization() already uses (Tracking.cc, see
     // its own SetRansacParameters call) -- reuse, don't invent new numbers
-    // without a reason to.
-    MLPnPsolver solver(mCurrentFrame, vpMatches);
-    solver.SetRansacParameters(0.99,10,300,6,0.5,5.991);
+    // without a reason to. Heap pointer, never deleted: MLPnPsolver::
+    // ~MLPnPsolver() is declared (MLPnPsolver.h) but has no definition
+    // anywhere in MLPnPsolver.cc (a pre-existing gap in the vendored code
+    // -- Relocalization() itself only ever uses `new MLPnPsolver(...)` via
+    // its own vpMLPnPsolvers, never `delete`s them either, confirmed via
+    // grep). A stack-allocated instance here fails to LINK (undefined
+    // destructor reference), not just leaks -- matching the existing
+    // pointer-only usage pattern is required, not just stylistic.
+    MLPnPsolver* solver = new MLPnPsolver(mCurrentFrame, vpMatches);
+    solver->SetRansacParameters(0.99,10,300,6,0.5,5.991);
 
     bool bMatch = false;
     int nGood = 0;
@@ -4191,7 +4198,7 @@ bool Tracking::TrackWithKLTRecovery()
     {
         vector<bool> vbInliers;
         Eigen::Matrix4f eigTcw;
-        bool bTcw = solver.iterate(5,bNoMore,vbInliers,nInliers,eigTcw);
+        bool bTcw = solver->iterate(5,bNoMore,vbInliers,nInliers,eigTcw);
 
         if(!bTcw)
             continue;
