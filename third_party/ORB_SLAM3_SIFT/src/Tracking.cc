@@ -33,9 +33,26 @@
 
 #include <mutex>
 #include <chrono>
+#include <atomic>
 
 
 using namespace std;
+
+namespace {
+    // [track-local-map-gate] TEMPORARY diagnostic, part 58 -- tallies how
+    // often the post-relocalization strict gate (TrackLocalMap(), see its
+    // own doc comment) fires, now that its threshold has been lowered
+    // 35->25 as an experiment for CudaSIFT+RootSIFT's higher-match-density
+    // regime. Printed at shutdown so a full run gives real aggregate
+    // evidence instead of one anecdotal log line.
+    std::atomic<long> g_postRelocGateFails{0};
+    struct PostRelocGatePrinter {
+        ~PostRelocGatePrinter() {
+            fprintf(stderr, "[track-local-map-gate-summary] total post-reloc-gate fails this run=%ld\n",
+                    g_postRelocGateFails.load());
+        }
+    } g_postRelocGatePrinter;
+}
 
 namespace ORB_SLAM3
 {
@@ -3227,22 +3244,31 @@ bool Tracking::TrackLocalMap()
     // weaker pose may walk it into a harder failure shortly after, instead
     // of resetting promptly and getting a fresh, possibly easier, restart
     // -- or possibly just run-to-run RANSAC/threading nondeterminism, see
-    // the vendoring memory). 35 was the best measured result of the three;
-    // do NOT push this specific gate below 35 again without first
-    // confirming the 30-result with repeat trials (single-run comparisons
-    // have already flipped conclusions once this session). See DEBUGGING.md
-    // part 27/28. Part 55 re-tested reverting to stock's 50 on the frames
-    // 1-1000 segment (isolated) -- MEASURED WORSE there too (85 fails/36
-    // resets/290.1m vs 35's 67/33/320m), confirming 35 remains the right
-    // value at this segment length too, not just full-sequence. Reverted
-    // back to 35. See DEBUGGING.md part 55.
-    if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && mnMatchesInliers<35)
+    // the vendoring memory). 35 was the best measured result of the three
+    // for PLAIN SIFT (part 27/28, part 55) -- but that tuning was done in a
+    // match-quality regime this fork no longer runs in: CudaSIFT+RootSIFT
+    // (part 58) measures 43-45% sbp-diag accepted-of-total, vs the ~10-17%
+    // this gate was calibrated against. A real live run (part 58, frames
+    // 0-4000) showed this exact gate rejecting id=63 at mnMatchesInliers=34
+    // -- ONE below the bar -- immediately after a successful relocalization
+    // that the RECENTLY_LOST bypass just above did NOT catch (state was
+    // already back to OK, not RECENTLY_LOST, despite still being inside the
+    // mMaxFrames window), cascading into a fresh "Fail to track local map!"
+    // reset a few frames later. EXPERIMENT (part 58 continued, not yet
+    // measured): lowered 35->25 -- splits the difference against the base
+    // >=15 gate below, giving real slack for this class of near-miss in the
+    // new higher-match-density regime, rather than re-running the exact
+    // 50/35/30 sweep already exhausted for the old regime. Counts every
+    // occurrence via g_postRelocGateFails (see ~shutdown reporting) so the
+    // next run gives real aggregate evidence, not one anecdotal instance.
+    if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && mnMatchesInliers<25)
     {
         // [track-local-map-gate] TEMPORARY diagnostic, see DEBUGGING.md
         // part 10 -- confirms/refutes whether the stricter post-relocalization
         // bar (not the normal monocular >=30) is what's killing young maps.
-        fprintf(stderr, "[track-local-map-gate] id=%lu mnLastRelocFrameId=%u mMaxFrames=%d mnMatchesInliers=%d -- FAIL (post-reloc strict gate)\n",
-                mCurrentFrame.mnId, mnLastRelocFrameId, mMaxFrames, mnMatchesInliers);
+        g_postRelocGateFails++;
+        fprintf(stderr, "[track-local-map-gate] id=%lu mnLastRelocFrameId=%u mMaxFrames=%d mnMatchesInliers=%d -- FAIL (post-reloc strict gate, total fails so far=%ld)\n",
+                mCurrentFrame.mnId, mnLastRelocFrameId, mMaxFrames, mnMatchesInliers, g_postRelocGateFails.load());
         return false;
     }
 
