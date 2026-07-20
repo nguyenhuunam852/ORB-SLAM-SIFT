@@ -2903,7 +2903,23 @@ bool Tracking::TrackReferenceKeyFrame()
 
     // We perform first an ORB matching with the reference keyframe
     // If enough matches are found we setup a PnP solver
-    ORBmatcher matcher(0.7,true);
+    //
+    // Ratio 0.7->0.8, part 58 continued: live evidence ([track-ref-kf] +
+    // [searchbybow-diag], see DEBUGGING.md) showed TRACK_REF_KF failures
+    // with refKFvalidPoints in the hundreds but raw pre-orientation-check
+    // matches already down at 18-36 -- i.e. this ratio test itself, not
+    // the orientation-histogram prune, is the dominant filter. 0.7 was
+    // inherited unchanged from stock ORB-SLAM3 (tuned for ORB's Hamming
+    // space, never re-validated for SIFT/RootSIFT's L2 space -- the same
+    // class of leftover-ORB-tuning issue TH_LOW/TH_HIGH had). Lowe's own
+    // SIFT paper (IJCV 2004, section 7.1, verified directly against the
+    // PDF): "we reject all matches in which the distance ratio is greater
+    // than 0.8, which eliminates 90% of the false matches while
+    // discarding less than 5% of the correct matches" -- 0.7 discards
+    // strictly more than that 5% of genuine matches with no paper-backed
+    // justification for this specific call site. Not yet measured on
+    // Kaggle; see DEBUGGING.md part 58 for the follow-up result.
+    ORBmatcher matcher(0.8,true);
     vector<MapPoint*> vpMapPointMatches;
 
     int nmatches = matcher.SearchByBoW(mpReferenceKF,mCurrentFrame,vpMapPointMatches);
