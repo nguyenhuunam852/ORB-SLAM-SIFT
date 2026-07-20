@@ -64,6 +64,16 @@ if [ ! -f "${G2O_BUILD_ROOT}/lib/libg2o.so" ]; then
 else
     echo "g2o already built at ${G2O_BUILD_ROOT}, skipping (set SKIP_BUILD=0 and rm -rf it to force)"
 fi
+# third_party/ORB_SLAM3_SIFT/Thirdparty/g2o is committed as a symlink to an
+# absolute path on the original dev machine (/home/nam/ORB_SLAM3/Thirdparty/g2o)
+# -- it only resolved there because that machine actually has a real g2o
+# checkout at that path; on a fresh clone (Kaggle included) it's a dangling
+# symlink. The vendored source does literal `#include
+# "Thirdparty/g2o/g2o/types/types_six_dof_expmap.h"`-style includes (not
+# `<g2o/...>`), so no amount of extra `-I` flags fixes it -- a real
+# `Thirdparty/g2o` directory has to exist under the SIFT fork. Point it at
+# the g2o we just built instead.
+ln -sfn "${G2O_BUILD_ROOT}" "${REPO_ROOT}/third_party/ORB_SLAM3_SIFT/Thirdparty/g2o"
 
 echo "=== [4/6] Download ONNX Runtime GPU ==="
 ORT_ROOT="${WORK_DIR}/onnxruntime"
