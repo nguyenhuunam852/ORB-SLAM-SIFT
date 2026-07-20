@@ -227,16 +227,24 @@ protected:
 
     bool Relocalization();
 
-    // Part 58 continued -- short-term recovery attempted before the
-    // heavy, currently-often-failing VLAD-database Relocalization(): KLT-
-    // tracks mLastFrame's map points into mCurrentFrame (photometric
-    // alignment, no redetection needed) and solves a fresh RANSAC PnP
-    // (MLPnPsolver, same solver Relocalization() itself uses) on those
-    // correspondences. Only viable for short dropouts where mLastImGray
-    // is still the genuinely-last-good frame (see RECENTLY_LOST's ~0.1s
-    // budget) -- not a substitute for true place recognition. See
-    // DEBUGGING.md part 58.
-    bool TrackWithKLTRecovery();
+    // Part 58 continued -- KLT+RANSAC-PnP tracker: KLT-tracks mLastFrame's
+    // map points into mCurrentFrame (photometric alignment, no CudaSIFT
+    // redetection needed for the correspondence itself) and solves a fresh
+    // RANSAC PnP (MLPnPsolver, same solver Relocalization() uses) on those
+    // correspondences, then refines with Optimizer::PoseOptimization.
+    // Per explicit user instruction, this replaced BOTH
+    // TrackWithMotionModel() (constant-velocity) and
+    // TrackReferenceKeyFrame() (BoW/descriptor-matching) as the sole
+    // per-frame tracker in the main state==OK path -- CudaSIFT extraction
+    // and descriptors are still computed every frame as before (needed for
+    // KeyFrame promotion/BoW/VLAD/TrackLocalMap, see DEBUGGING.md part 58's
+    // Explore-agent findings), only the frame-to-frame correspondence
+    // step changed. Also still used as the RECENTLY_LOST short-term
+    // recovery attempt before falling through to the heavy VLAD-database
+    // Relocalization() (same function, two call sites -- mLastFrame/
+    // mLastImGray are equally valid in both contexts). See DEBUGGING.md
+    // part 58.
+    bool TrackWithKLT();
 
     void UpdateLocalMap();
     void UpdateLocalPoints();

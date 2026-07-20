@@ -1968,18 +1968,18 @@ void Tracking::Track()
                 // Local Mapping might have changed some MapPoints tracked in last frame
                 CheckReplacedInLastFrame();
 
-                if((!mbVelocity && !pCurrentMap->isImuInitialized()) || mCurrentFrame.mnId<mnLastRelocFrameId+2)
-                {
-                    Verbose::PrintMess("TRACK: Track with respect to the reference KF ", Verbose::VERBOSITY_DEBUG);
-                    bOK = TrackReferenceKeyFrame();
-                }
-                else
-                {
-                    Verbose::PrintMess("TRACK: Track with motion model", Verbose::VERBOSITY_DEBUG);
-                    bOK = TrackWithMotionModel();
-                    if(!bOK)
-                        bOK = TrackReferenceKeyFrame();
-                }
+                // Part 58 continued: per explicit user instruction,
+                // TrackWithMotionModel() (constant-velocity) and
+                // TrackReferenceKeyFrame() (BoW/descriptor-matching) are
+                // both replaced by TrackWithKLT() as the sole per-frame
+                // tracker here -- no more mbVelocity/mnLastRelocFrameId
+                // branching. CudaSIFT extraction/descriptors still run
+                // every frame as before (needed for KeyFrame promotion/
+                // TrackLocalMap, untouched); only this frame-to-frame
+                // correspondence step changed. See DEBUGGING.md part 58 and
+                // Tracking.h's TrackWithKLT() doc comment.
+                Verbose::PrintMess("TRACK: Track with KLT+PnP", Verbose::VERBOSITY_DEBUG);
+                bOK = TrackWithKLT();
 
 
                 if (!bOK)
@@ -2029,13 +2029,13 @@ void Tracking::Track()
                         // reckoning attempt that used to run here
                         // (mbVelocity && TrackWithMotionModel()) is removed
                         // per explicit user instruction -- go straight to
-                        // KLT+RANSAC-PnP recovery (TrackWithKLTRecovery(),
-                        // see its own doc comment in Tracking.h) instead of
-                        // gating on a velocity estimate. Falls through to
-                        // the existing heavy VLAD-database Relocalization()
+                        // KLT+RANSAC-PnP recovery (TrackWithKLT(), see its
+                        // own doc comment in Tracking.h) instead of gating
+                        // on a velocity estimate. Falls through to the
+                        // existing heavy VLAD-database Relocalization()
                         // unchanged if KLT recovery also fails. See
                         // DEBUGGING.md part 58.
-                        const bool bKltOK = TrackWithKLTRecovery();
+                        const bool bKltOK = TrackWithKLT();
                         bOK = bKltOK;
                         bool bRelocAttempted = false;
                         if(!bOK)
@@ -4091,7 +4091,7 @@ void Tracking::UpdateLocalKeyFrames()
     }
 }
 
-bool Tracking::TrackWithKLTRecovery()
+bool Tracking::TrackWithKLT()
 {
     // Part 58 continued -- see Tracking.h's doc comment. Only viable if
     // there's an actual previous image/frame to KLT from (e.g. skip
