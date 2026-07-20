@@ -2910,8 +2910,29 @@ bool Tracking::TrackReferenceKeyFrame()
 
     if(nmatches<15)
     {
-        // [track-ref-kf] TEMPORARY diagnostic, see DEBUGGING.md part 9.
-        fprintf(stderr, "[track-ref-kf] id=%lu nmatches=%d<15 -- FAIL\n", mCurrentFrame.mnId, nmatches);
+        // [track-ref-kf] diagnostic, extended part 58 continued -- the KF-
+        // starvation fix (KeyframesInQueue()<3 tolerance) eliminated most
+        // resets, but TRACK_REF_KF failures are now the dominant remaining
+        // cause (confirmed live: recurs throughout the full 0-4541 run, not
+        // just early frames). TH_LOW/TH_HIGH are already SIFT-L2SQR-
+        // calibrated (46778/100557, see this file's own comment above), so
+        // this isn't a leftover ORB-vs-SIFT threshold mismatch. Reports the
+        // reference KF's own valid triangulated-point ceiling (nmatches can
+        // never exceed this -- distinguishes "ref KF legitimately has too
+        // few points yet" from "points exist but didn't match") plus both
+        // sides' raw keypoint counts, to find the real cause before
+        // touching anything. See DEBUGGING.md part 58.
+        int nValidRefPoints = 0;
+        const vector<MapPoint*> vpRefMPs = mpReferenceKF->GetMapPointMatches();
+        for(size_t i=0; i<vpRefMPs.size(); i++)
+        {
+            MapPoint* pMP = vpRefMPs[i];
+            if(pMP && !pMP->isBad())
+                nValidRefPoints++;
+        }
+        fprintf(stderr, "[track-ref-kf] id=%lu nmatches=%d<15 -- FAIL refKFid=%lu refKFvalidPoints=%d refKFkeys=%d curFrameKeys=%d\n",
+                mCurrentFrame.mnId, nmatches, mpReferenceKF->mnId, nValidRefPoints,
+                (int)vpRefMPs.size(), mCurrentFrame.N);
         cout << "TRACK_REF_KF: Less than 15 matches!!\n";
         return false;
     }
