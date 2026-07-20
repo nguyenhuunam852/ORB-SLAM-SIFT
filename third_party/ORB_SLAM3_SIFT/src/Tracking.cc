@@ -20,7 +20,6 @@
 #include "Tracking.h"
 
 #include "ORBmatcher.h"
-#include "LightGlueMatcher.h"
 #include "FrameDrawer.h"
 #include "Converter.h"
 #include "G2oTypes.h"
@@ -2623,16 +2622,9 @@ void Tracking::MonocularInitialization()
             return;
         }
 
-        // Find correspondences -- LightGlue (see DEBUGGING.md part 58):
-        // InitialFrame-vs-CurrentFrame is a genuinely pairwise frame match,
-        // a clean fit for LightGlue's design (unlike the local-map-point
-        // search path, left on the traditional matcher). mvIniMatches'
-        // format (mvIniMatches[i]=j, -1 if none) matches LightGlueMatcher::
-        // Match's output directly.
-        cv::Size initImgSize(static_cast<int>(Frame::mnMaxX - Frame::mnMinX), static_cast<int>(Frame::mnMaxY - Frame::mnMinY));
-        int nmatches = GetLightGlueMatcher()->Match(mInitialFrame.mvKeys, mInitialFrame.mDescriptors,
-                                                      mCurrentFrame.mvKeys, mCurrentFrame.mDescriptors,
-                                                      initImgSize, mvIniMatches);
+        // Find correspondences
+        ORBmatcher matcher(0.9,true);
+        int nmatches = matcher.SearchForInitialization(mInitialFrame,mCurrentFrame,mvbPrevMatched,mvIniMatches,100);
 
         // Check if there are enough correspondences
         if(nmatches<100)
@@ -3054,36 +3046,18 @@ bool Tracking::TrackWithMotionModel()
         th=7;
     else
         th=15;
-    (void)th; // unused in the LightGlue path below -- no radius-window retry concept
 
-    // LightGlue (see DEBUGGING.md part 58): mLastFrame-vs-mCurrentFrame is
-    // a genuinely pairwise frame match (the same shape of comparison as
-    // SearchForInitialization above), a clean fit for LightGlue's design.
-    // Unlike the original projection+radius-window search, LightGlue
-    // doesn't take a geometric prior/threshold, so there's no "wider
-    // window" retry -- a single full-frame match either finds enough
-    // correspondences or it doesn't.
-    int nmatches = 0;
+    int nmatches = matcher.SearchByProjection(mCurrentFrame,mLastFrame,th,mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR);
+
+    // If few matches, uses a wider window search
+    if(nmatches<20)
     {
-        std::vector<int> lgMatches; // lgMatches[i]=j: mLastFrame kp i <-> mCurrentFrame kp j
-        cv::Size imgSize(static_cast<int>(Frame::mnMaxX - Frame::mnMinX), static_cast<int>(Frame::mnMaxY - Frame::mnMinY));
-        GetLightGlueMatcher()->Match(mLastFrame.mvKeys, mLastFrame.mDescriptors,
-                                      mCurrentFrame.mvKeys, mCurrentFrame.mDescriptors,
-                                      imgSize, lgMatches);
-        for (int i = 0; i < mLastFrame.N; ++i) {
-            MapPoint* pMP = mLastFrame.mvpMapPoints[i];
-            if (!pMP || mLastFrame.mvbOutlier[i])
-                continue;
-            int j = lgMatches[i];
-            if (j < 0)
-                continue;
-            if (mCurrentFrame.mvpMapPoints[j] && mCurrentFrame.mvpMapPoints[j]->Observations() > 0)
-                continue;
-            mCurrentFrame.mvpMapPoints[j] = pMP;
-            ++nmatches;
-        }
-        fprintf(stderr, "[lightglue-motion-model] id=%lu lastFrameN=%d currentFrameN=%d nmatches=%d\n",
-                mCurrentFrame.mnId, mLastFrame.N, mCurrentFrame.N, nmatches);
+        Verbose::PrintMess("Not enough matches, wider window search!!", Verbose::VERBOSITY_NORMAL);
+        fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(NULL));
+
+        nmatches = matcher.SearchByProjection(mCurrentFrame,mLastFrame,2*th,mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR);
+        Verbose::PrintMess("Matches with wider search: " + to_string(nmatches), Verbose::VERBOSITY_NORMAL);
+
     }
 
     if(nmatches<20)
