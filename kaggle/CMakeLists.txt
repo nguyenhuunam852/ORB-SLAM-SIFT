@@ -29,20 +29,25 @@ if(USE_CUDASIFT)
     # fresh into CUDASIFT_SRC_DIR by setup_and_run.sh.
     set(CUDASIFT_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cudasift_src" CACHE PATH
         "Root of a fresh git clone of Celebrandil/CudaSift (cloned by setup_and_run.sh)")
-    file(GLOB CUDASIFT_SOURCES
-        "${CUDASIFT_SRC_DIR}/*.cu"
-        "${CUDASIFT_SRC_DIR}/*.cpp"
+    # Explicit allowlist, NOT a glob -- the repo's root also contains
+    # cudaSiftD.cu (device kernels, #included by cudaSiftH.cu, not an
+    # independent translation unit -- compiling it separately produced
+    # duplicate-symbol nvlink errors for every kernel/global), the
+    # cudaSiftD_old.cu/cudaSiftH_old.cu/cudaSiftH_old.h legacy duplicates
+    # (same problem), cudaSift_gold.cpp (a CPU reference/test harness), and
+    # mainSift.cpp (the repo's own demo main(), conflicting with this
+    # project's own main() in orbslam3_kitti_ate.cpp -- confirmed live via
+    # a duplicate-`main`-symbol link error). This exact file list matches
+    # what CudaSift's own upstream CMakeLists.txt compiles into its
+    # `cudasift` executable (verified by fetching it directly), minus
+    # mainSift.cpp.
+    set(CUDASIFT_SOURCES
+        "${CUDASIFT_SRC_DIR}/cudaImage.cu"
+        "${CUDASIFT_SRC_DIR}/cudaSiftH.cu"
+        "${CUDASIFT_SRC_DIR}/matching.cu"
+        "${CUDASIFT_SRC_DIR}/singular.cu"
+        "${CUDASIFT_SRC_DIR}/geomFuncs.cpp"
     )
-    list(FILTER CUDASIFT_SOURCES EXCLUDE REGEX ".*mainSift\\.cpp$")
-    # cudaSiftD.cu is NOT an independent translation unit -- confirmed via
-    # the upstream CMakeLists.txt's own source list, which compiles only
-    # cudaSiftH.cu (the host-side wrapper); cudaSiftD.cu (device kernels) is
-    # #included directly by cudaSiftH.cu. Compiling both as separate .cu
-    # files (as a naive glob does) produces duplicate-symbol nvlink errors
-    # for every kernel/global (LowPassBlock, FindPointsMulti,
-    # ExtractSiftDescriptors, d_MaxNumPoints, etc.) -- confirmed live on a
-    # Kaggle build attempt.
-    list(FILTER CUDASIFT_SOURCES EXCLUDE REGEX ".*cudaSiftD\\.cu$")
 endif()
 
 # Minimal, Kaggle-clean build of just the SIFT ORB-SLAM3 fork's headless
