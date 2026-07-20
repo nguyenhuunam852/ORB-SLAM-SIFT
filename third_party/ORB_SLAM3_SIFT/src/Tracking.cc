@@ -4192,7 +4192,20 @@ bool Tracking::TrackWithKLT()
         Eigen::Matrix4f eigTcw;
         bool bTcw = solver->iterate(5,bNoMore,vbInliers,nInliers,eigTcw);
 
-        if(!bTcw)
+        // Guard added per user request -- RANSAC iterations that return a
+        // pose backed by too few inliers (occasionally 0) were calling
+        // Optimizer::PoseOptimization() with an empty/near-empty vertex
+        // set, spamming g2o's own "0 vertices to optimize" stderr warning
+        // (confirmed pre-existing in this codebase, not introduced by
+        // TrackWithKLT() -- it already appeared 50-53 times in this
+        // session's earlier baseline logs -- just far more frequent now
+        // that this RANSAC loop runs every frame instead of only during
+        // Relocalization()). 6 matches MLPnPsolver's own configured
+        // minimum set size (SetRansacParameters's minSet=6 above) --
+        // below that, PoseOptimization has nothing meaningful to refine
+        // anyway. Purely a noise/efficiency fix, not a behavior change:
+        // these attempts could never have reached nGood>=50 regardless.
+        if(!bTcw || nInliers<6)
             continue;
 
         Sophus::SE3f Tcw(eigTcw);
