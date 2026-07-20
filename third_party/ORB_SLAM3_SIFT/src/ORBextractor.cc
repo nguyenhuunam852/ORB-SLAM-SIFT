@@ -1253,16 +1253,28 @@ namespace ORB_SLAM3
                 // doc comment) *** -- CudaSift's SiftPoint has no packed
                 // octave/layer field the way cv::SIFT does; `subsampling` is
                 // its octave-downsample factor (assumed power-of-2: 1,2,4,...)
-                // and `scale` is a continuous sigma. This formula (octave =
-                // log2(subsampling), layer = position of scale within one
-                // octave-doubling on a log scale) is a best-effort guess
-                // based on CudaSift's general SIFT-pyramid design, NOT
-                // measured against real data -- run analyze/cudasift_probe.cpp
-                // on real KITTI frames FIRST and correct this before trusting
-                // any live tracking result (this project's own repeated
-                // lesson, see Session 14 Stage 0's real off-by-one catch and
+                // and `scale` is a continuous sigma. Run analyze/cudasift_probe.cpp
+                // on real KITTI frames and correct this before trusting any
+                // live tracking result (this project's own repeated lesson,
+                // see Session 14 Stage 0's real off-by-one catch and
                 // flatLevel()'s doc comment above the constructor).
-                const int octaveGuess = static_cast<int>(std::lround(std::log2(std::max(1.0f, sp.subsampling))));
+                //
+                // FIXED bug (found via live 0-matches-ever symptom on a real
+                // Kaggle run): log2(subsampling) is a RELATIVE step count
+                // from CudaSift's own finest octave (subsampling==1 is its
+                // baseline, no downsampling), NOT an absolute octave number
+                // in flatLevel()'s kMinOctave==-1-based numbering -- must
+                // add kMinOctave to shift into that numbering. The previous
+                // version also floored the log argument at 1.0
+                // (std::max(1.0f, sp.subsampling)), which made log2 >= 0
+                // ALWAYS, so octaveGuess could structurally never reach the
+                // finest flat level (kMinOctave==-1) that
+                // ORBmatcher::SearchForInitialization's `level1>=nOctaveLayers`
+                // gate requires to admit ANY candidate at all -- every single
+                // keypoint was silently skipped, every frame, hence exactly
+                // 0 matches always (not just fewer/lower-quality matches).
+                const int octaveGuess = kMinOctave +
+                        static_cast<int>(std::lround(std::log2(std::max(1e-6f, sp.subsampling))));
                 const float layerFloat = static_cast<float>(nOctaveLayers) *
                         std::log2(std::max(1e-6f, sp.scale / std::max(1e-6f, sp.subsampling)));
                 const int layerGuess = static_cast<int>(std::lround(layerFloat)) % std::max(1, nOctaveLayers) + 1;
