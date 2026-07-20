@@ -68,20 +68,50 @@ fi
 echo "=== [4/6] Download ONNX Runtime GPU ==="
 ORT_ROOT="${WORK_DIR}/onnxruntime"
 if [ ! -f "${ORT_ROOT}/lib/libonnxruntime.so" ]; then
-    ORT_ASSET_URL=$(curl -s https://api.github.com/repos/microsoft/onnxruntime/releases/latest \
-        | grep -o '"browser_download_url": *"[^"]*onnxruntime-linux-x64-gpu-[0-9][^"]*\.tgz"' \
-        | head -1 | sed -E 's/.*"(https[^"]+)"/\1/')
-    if [ -z "${ORT_ASSET_URL}" ]; then
-        echo "Could not auto-detect the latest onnxruntime-linux-x64-gpu tarball URL." >&2
-        echo "Check https://github.com/microsoft/onnxruntime/releases and set it manually." >&2
+    echo "Querying GitHub API for the latest onnxruntime release..."
+    ORT_API_RESPONSE=$(curl -sS -w '\nHTTP_STATUS:%{http_code}' https://api.github.com/repos/microsoft/onnxruntime/releases/latest)
+    ORT_HTTP_STATUS=$(echo "${ORT_API_RESPONSE}" | grep -o 'HTTP_STATUS:[0-9]*' | cut -d: -f2)
+    if [ "${ORT_HTTP_STATUS}" != "200" ]; then
+        echo "GitHub API request failed (HTTP ${ORT_HTTP_STATUS}), likely rate-limited. Response:" >&2
+        echo "${ORT_API_RESPONSE}" | head -20 >&2
         exit 1
     fi
-    echo "Downloading: ${ORT_ASSET_URL}"
-    wget -q "${ORT_ASSET_URL}" -O /tmp/onnxruntime-gpu.tgz
+    # Asset naming has changed across onnxruntime releases -- older ones
+    # ship a single CUDA-agnostic "onnxruntime-linux-x64-gpu-<ver>.tgz";
+    # newer ones (>=1.20ish) split by CUDA major version instead, e.g.
+    # "onnxruntime-linux-x64-gpu_cuda12-<ver>.tgz" /
+    # "..._cuda13-<ver>.tgz" (underscore before "cuda", not the old
+    # hyphen-then-digit pattern). Try cuda12 first (broadest driver
+    # compatibility -- CUDA 12 runs fine under the newer 580.x drivers
+    # Kaggle's T4/P100 images currently ship), then cuda13, then the old
+    # plain naming as a last resort for pinned older releases.
+    ORT_ASSET_URL=""
+    for pattern in \
+        'onnxruntime-linux-x64-gpu_cuda12-[0-9][^"]*\.tgz' \
+        'onnxruntime-linux-x64-gpu_cuda13-[0-9][^"]*\.tgz' \
+        'onnxruntime-linux-x64-gpu-[0-9][^"]*\.tgz'
+    do
+        ORT_ASSET_URL=$(echo "${ORT_API_RESPONSE}" \
+            | grep -o "\"browser_download_url\": *\"[^\"]*${pattern}\"" \
+            | head -1 | sed -E 's/.*"(https[^"]+)"/\1/')
+        [ -n "${ORT_ASSET_URL}" ] && break
+    done
+    if [ -z "${ORT_ASSET_URL}" ]; then
+        echo "GitHub API responded but no recognized onnxruntime-linux-x64-gpu*.tgz asset was found." >&2
+        echo "Actual linux-x64 asset names in this release:" >&2
+        echo "${ORT_API_RESPONSE}" | grep -o '"name": *"[^"]*linux-x64[^"]*"' >&2
+        echo "Check https://github.com/microsoft/onnxruntime/releases and set ORT_ASSET_URL logic manually." >&2
+        exit 1
+    fi
+    echo "Resolved URL: ${ORT_ASSET_URL}"
+    echo "Downloading (typically 150-300MB, progress shown below)..."
+    wget --progress=dot:giga "${ORT_ASSET_URL}" -O /tmp/onnxruntime-gpu.tgz
+    echo "Download complete, extracting..."
     rm -rf "${ORT_ROOT}" /tmp/onnxruntime-extracted
     mkdir -p /tmp/onnxruntime-extracted
     tar -xzf /tmp/onnxruntime-gpu.tgz -C /tmp/onnxruntime-extracted
-    mv /tmp/onnxruntime-extracted/onnxruntime-linux-x64-gpu-* "${ORT_ROOT}"
+    mv /tmp/onnxruntime-extracted/onnxruntime-linux-x64-gpu* "${ORT_ROOT}"
+    echo "ONNX Runtime ready at ${ORT_ROOT}"
 else
     echo "ONNX Runtime already present at ${ORT_ROOT}, skipping"
 fi
