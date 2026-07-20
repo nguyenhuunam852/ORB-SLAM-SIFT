@@ -23,6 +23,14 @@
 #   OUT_PREFIX      Output file prefix (default: /kaggle/working/lightglue_run)
 #   SKIP_BUILD      If set to 1, skip the whole build step and just run
 #                    (reuse a previous session's build/ dir)
+#   BUILD_JOBS      Parallel compile jobs for `make`/`cmake --build` (default:
+#                    4, not $(nproc)) -- this codebase's Eigen/Sophus/g2o-heavy
+#                    translation units (e.g. LoopClosing.cc, Optimizer.cc) can
+#                    each use 1GB+ RAM per job; on a memory-constrained host
+#                    (this project's own dev machine hit an OOM-killed VSCode
+#                    process building locally at -j8) a lower default is
+#                    safer. Kaggle's shared CPU/RAM makes this worth capping
+#                    there too. Raise it explicitly if you have RAM to spare.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,6 +42,7 @@ WORK_DIR="${SCRIPT_DIR}"
 # Set to 0 to build the plain CPU path instead (e.g. for a quick sanity
 # comparison run without touching CUDA at all).
 USE_CUDASIFT="${USE_CUDASIFT:-1}"
+BUILD_JOBS="${BUILD_JOBS:-4}"
 
 echo "=== [1/7] GPU + CUDA toolkit check ==="
 if command -v nvidia-smi >/dev/null 2>&1; then
@@ -77,7 +86,7 @@ if [ ! -f "${G2O_BUILD_ROOT}/lib/libg2o.so" ]; then
     cp -r /tmp/orbslam3_upstream/Thirdparty/g2o "${G2O_BUILD_ROOT}"
     mkdir -p "${G2O_BUILD_ROOT}/build"
     ( cd "${G2O_BUILD_ROOT}/build" && cmake -DCMAKE_BUILD_TYPE=Release .. > /tmp/g2o-cmake.log 2>&1 \
-        && make -j"$(nproc)" > /tmp/g2o-make.log 2>&1 ) \
+        && make -j"${BUILD_JOBS}" > /tmp/g2o-make.log 2>&1 ) \
         || { echo "g2o build failed, see /tmp/g2o-cmake.log / /tmp/g2o-make.log"; exit 1; }
 else
     echo "g2o already built at ${G2O_BUILD_ROOT}, skipping (set SKIP_BUILD=0 and rm -rf it to force)"
@@ -173,9 +182,9 @@ cmake -S "${WORK_DIR}" -B "${BUILD_DIR}" \
     -DONNXRUNTIME_ROOT="${ORT_ROOT}" \
     -DUSE_CUDASIFT="${CMAKE_USE_CUDASIFT}" \
     -DCUDASIFT_SRC_DIR="${CUDASIFT_SRC_DIR}"
-cmake --build "${BUILD_DIR}" --target orbslam3_sift_kitti_ate -j"$(nproc)"
+cmake --build "${BUILD_DIR}" --target orbslam3_sift_kitti_ate -j"${BUILD_JOBS}"
 if [ "${USE_CUDASIFT}" = "1" ]; then
-    cmake --build "${BUILD_DIR}" --target cudasift_probe -j"$(nproc)"
+    cmake --build "${BUILD_DIR}" --target cudasift_probe -j"${BUILD_JOBS}"
     echo "Built cudasift_probe -- STRONGLY recommended to run it first:"
     echo "  \"${BUILD_DIR}/cudasift_probe\" \"\${KITTI_SEQ_DIR}\" 200"
     echo "and confirm the printed octave/scale ranges before trusting a full benchmark run" \
