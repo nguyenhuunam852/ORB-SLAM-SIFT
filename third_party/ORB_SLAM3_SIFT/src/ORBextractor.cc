@@ -460,10 +460,16 @@ namespace ORB_SLAM3
         // work for this SIFT/KITTI combination, for reasons intrinsic to
         // the resulting descriptors' quality, not gate interaction.
         // Reverted to 0.04.
-        // TEMPORARY part 56: user asked to push even lower than the
-        // already-failed 0.02/0.01 (parts 51/55). Testing 0.005 to see if
-        // the monotonic worsening trend continues or reverses.
-        constexpr double kContrastThreshold = 0.005;
+        // TESTED part 56: user asked to push even lower than the
+        // already-failed 0.02/0.01 (parts 51/55), combined with need>=1.
+        // Result: 23.1% coverage (vs 0.02's 43.2%, vs need>=1-alone's
+        // 55-62%) -- the monotonic worsening trend continues, does not
+        // reverse. empty_window also got WORSE (60.3%, above even the
+        // 0.04 baseline), plausibly because at this extreme, sheer
+        // candidate-pool noise crowds out even the previously-reliable
+        // high-response candidates within cv::SIFT's own top-nfeatures
+        // response-ranked retention. Reverted to 0.04.
+        constexpr double kContrastThreshold = 0.04;
         // Part 52: raised from OpenCV's stock 10.0 (never tuned for this fork's
         // use case). SIFT's edgeThreshold is an UPPER bound on the eigenvalue
         // ratio test -- keypoints with a MORE edge-like (elongated) local

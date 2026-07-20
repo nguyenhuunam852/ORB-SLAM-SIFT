@@ -7,3 +7,8 @@ build-*/
 
 # Debug/analysis trajectory dumps written to the project root by ad hoc runs
 *_trajectory.txt
+
+# Scratch/temporary debugging outputs (logs, trajectories, one-off settings
+# copies) -- large, disposable, not project source. Already-tracked files
+# under scratchpad/ from earlier commits are unaffected by this entry.
+scratchpad/
