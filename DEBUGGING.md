@@ -811,6 +811,25 @@ back to 0.04 (confirmed via grep and rebuild); `need>=1` left as-is
 (still the open, user-decision-pending state from the prior
 sub-investigation, unaffected by this specific negative result).
 
+**Pushed one step further per explicit user request**: `kContrastThreshold`
+0.02 -> **0.005** (still combined with `need>=1`, per user's explicit
+instruction not to fall back to `need>=15` for this test). Result: **23.1%
+coverage** (165.4m of 715.2m, only 1 of 2 fragments produced any
+trajectory at all) -- worse than both 0.02's 43.2% and need>=1-alone's
+55-62%, confirming the monotonic worsening trend continues rather than
+reversing at more extreme values. fails=93, resets=58, both worse than
+baseline. Notably `empty_window` also got *worse* (60.3%, above even the
+unmodified 0.04 baseline's ~45-58%) despite far more raw candidates being
+generated -- plausibly because at this extreme, sheer candidate-pool
+noise volume crowds out even the previously-reliable high-response
+candidates within `cv::SIFT`'s own internal top-`nfeatures` response-based
+retention (a plausible, not directly verified, mechanism). **Reverted**
+`kContrastThreshold` back to 0.04 (confirmed via grep and rebuild). This
+closes the contrastThreshold-lowering line of inquiry decisively: tested
+at 0.02, 0.01, 0.005, alone and combined with both DistributeOctTree and
+need>=1 -- six total configurations, all worse than baseline, monotonic
+trend with no reversal at any tested extreme.
+
 ## Current status (2026-07-19, parts 49-53 -- fast hot-zone SIFT tuning +
 ## a real thread-safety bug found, but full determinism NOT achievable
 ## cheaply)
