@@ -515,8 +515,22 @@ vector<KeyFrame*> KeyFrameDatabase::DetectRelocalizationCandidates(Frame *F, Map
         if(it->first>minScoreToRetain)
         {
             KeyFrame* pKFi = it->second;
-            if(pKFi->GetMap() != pMap)
-                continue;
+            // Part 33: dropped the same-map-only restriction here. Measured
+            // across parts 29-32 (full-checkpoint stats): dbCandidates==0
+            // 74-94% of relocalization attempts, almost entirely because
+            // young/small active maps (most maps now, given the part
+            // 30-32 fail-fast restart cycle) simply don't have enough of
+            // their OWN keyframes yet to ever produce a same-map candidate.
+            // Meanwhile the Atlas accumulates hundreds of KFs across prior
+            // (abandoned) fragments that are never even considered. Allowing
+            // cross-map candidates here lets Relocalization() (Tracking.cc)
+            // attempt to jump back into an existing, more mature map via
+            // Atlas::ChangeMap() instead of always restarting from scratch --
+            // see the ChangeMap call added at the relocalization success
+            // path for the other half of this change. NOT yet measured; see
+            // DEBUGGING.md part 33 for the risk analysis and what to check
+            // first (does it crash / corrupt the map) before trusting any
+            // coverage number from this change.
             if(!spAlreadyAddedKF.count(pKFi))
             {
                 vpRelocCandidates.push_back(pKFi);

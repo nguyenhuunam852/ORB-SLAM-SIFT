@@ -14,37 +14,45 @@
 using namespace std;
 
 bool DUtils::Random::m_already_seeded = false;
+std::mutex DUtils::Random::s_randMutex;
 
 void DUtils::Random::SeedRand(){
+	std::lock_guard<std::mutex> lock(s_randMutex);
 	Timestamp time;
 	time.setToCurrentTime();
-	srand((unsigned)time.getFloatTime()); 
+	srand((unsigned)time.getFloatTime());
 }
 
 void DUtils::Random::SeedRandOnce()
 {
+  std::lock_guard<std::mutex> lock(s_randMutex);
   if(!m_already_seeded)
   {
-    DUtils::Random::SeedRand();
+    Timestamp time;
+    time.setToCurrentTime();
+    srand((unsigned)time.getFloatTime());
     m_already_seeded = true;
   }
 }
 
 void DUtils::Random::SeedRand(int seed)
 {
-	srand(seed); 
+	std::lock_guard<std::mutex> lock(s_randMutex);
+	srand(seed);
 }
 
 void DUtils::Random::SeedRandOnce(int seed)
 {
+  std::lock_guard<std::mutex> lock(s_randMutex);
   if(!m_already_seeded)
   {
-    DUtils::Random::SeedRand(seed);
+    srand(seed);
     m_already_seeded = true;
   }
 }
 
 int DUtils::Random::RandomInt(int min, int max){
+	std::lock_guard<std::mutex> lock(s_randMutex);
 	int d = max - min + 1;
 	return int(((double)rand()/((double)RAND_MAX + 1.0)) * d) + min;
 }

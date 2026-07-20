@@ -123,12 +123,53 @@ Sim3Solver::Sim3Solver(KeyFrame *pKF1, KeyFrame *pKF2, const vector<MapPoint *> 
 void Sim3Solver::SetRansacParameters(double probability, int minInliers, int maxIterations)
 {
     mRansacProb = probability;
-    mRansacMinInliers = minInliers;
-    mRansacMaxIts = maxIterations;    
+    mRansacMaxIts = maxIterations;
 
     N = mvpMapPoints1.size(); // number of correspondences
 
     mvbInliersi.resize(N);
+
+    // Part 36 fix: requiring more inliers than there are correspondences is
+    // mathematically impossible (inliers <= N always), yet the caller-passed
+    // minInliers (15 from LoopClosing.cc's merge/loop-closure path) routinely
+    // exceeded N -- confirmed via the [sim3-investigate] diagnostic below: 14/16
+    // sampled calls had N<15 (some as low as N=1-4). When minInliers>N,
+    // epsilon=minInliers/N>1 below, making 1-epsilon^3 negative and
+    // log(negative) evaluate to NaN -- (int)NaN is undefined behavior (observed
+    // as INT_MIN, i.e. -2147483648, on this platform/compiler) -- which then
+    // collapsed mRansacMaxIts to exactly 1 real RANSAC attempt via
+    // min(garbage,300)->max(1,...) instead of up to 300. Clamping minInliers to
+    // N avoids the NaN. See DEBUGGING.md part 36.
+    //
+    // Part 38 refinement: the naive min(minInliers,N) clamp alone measured
+    // WORSE on a full run -- part 37 got a new coverage high (1564.1m) but one
+    // 103-KF merged fragment had rmse=21.161m, breaking the user's explicit
+    // <20m budget for the first time all session (mean=8.579 vs median=2.908,
+    // max=134.932 -- the skew signature of a bad merge, not smooth drift). Root
+    // cause: for tiny N (e.g. N=3, the Sim3 minimal sample size), requiring
+    // "all N inliers" is nearly a rubber stamp -- every RANSAC draw picks the
+    // SAME 3 points when N==3, and a 3-point similarity fit trivially reports
+    // those 3 points as consistent with itself, so tiny-N candidates were
+    // paradoxically the MOST likely to spuriously "converge". Fix: refuse to
+    // even attempt Sim3Solver below an absolute floor (kMinAbsoluteInliers,
+    // matching this codebase's existing "needs >=6 points" convention from
+    // MLPnPsolver's minSet default/Tracking.cc's PnP call) -- below that floor
+    // there just isn't enough independent evidence to trust a similarity fit
+    // regardless of what fraction of it agrees.
+    constexpr int kMinAbsoluteInliers = 6;
+    if(N < kMinAbsoluteInliers)
+    {
+        // Not enough correspondences to trust any fit -- force a clean,
+        // deterministic failure (no NaN, no spurious small-sample "success")
+        // by giving RANSAC zero budget rather than letting the iteration
+        // formula run on a degenerate case.
+        mRansacMinInliers = N + 1; // unreachable, but epsilon is never computed with it below
+        mRansacMaxIts = 0;
+        mnIterations = 0;
+        return;
+    }
+
+    mRansacMinInliers = min(minInliers, N);
 
     // Adjust Parameters according to number of correspondences
     float epsilon = (float)mRansacMinInliers/N;
@@ -142,6 +183,17 @@ void Sim3Solver::SetRansacParameters(double probability, int minInliers, int max
         nIterations = ceil(log(1-mRansacProb)/log(1-pow(epsilon,3)));
 
     mRansacMaxIts = max(1,min(nIterations,mRansacMaxIts));
+
+    // [sim3-investigate] TEMPORARY diagnostic, see DEBUGGING.md part 36 --
+    // testing the hypothesis that N (correspondences surviving the
+    // constructor's isBad/GetIndexInKeyFrame filtering) frequently comes in
+    // below mRansacMinInliers (15), making epsilon>1, 1-epsilon^3 negative,
+    // and nIterations NaN -- collapsing mRansacMaxIts to effectively 1 real
+    // attempt and explaining the near-universal nInliers=0 Sim3Solver
+    // failures seen in [merge-investigate] logs all session (1310/1328 in
+    // one checkpoint, always exactly 0, never a partial count).
+    fprintf(stderr, "[sim3-investigate] N=%d minInliers=%d epsilon=%.3f nIterations=%d mRansacMaxIts=%d\n",
+            N, mRansacMinInliers, epsilon, nIterations, mRansacMaxIts);
 
     mnIterations = 0;
 }

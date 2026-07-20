@@ -202,6 +202,13 @@ add_executable(orbslam3_kitti_ate analyze/orbslam3_kitti_ate.cpp)
 target_include_directories(orbslam3_kitti_ate PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(orbslam3_kitti_ate PRIVATE orbslam3_ext)
 
+# Keypoint-location visualizer (analyze/orbslam3_visualize_keypoints.cpp,
+# see DEBUGGING.md part 56) -- draws every detected keypoint on a single
+# image, to directly compare WHERE SIFT vs ORB actually find features.
+add_executable(orbslam3_visualize_keypoints analyze/orbslam3_visualize_keypoints.cpp)
+target_include_directories(orbslam3_visualize_keypoints PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(orbslam3_visualize_keypoints PRIVATE orbslam3_ext)
+
 # SIFT-based fork of the vendored ORB-SLAM3, built from an entirely separate
 # copy (third_party/ORB_SLAM3_SIFT, `cp -r` of third_party/ORB_SLAM3) rather
 # than modifying the original in place -- per explicit request, so the
@@ -254,6 +261,10 @@ target_link_libraries(orbslam3_sift_ext PUBLIC
 add_executable(orbslam3_sift_kitti_ate analyze/orbslam3_kitti_ate.cpp)
 target_include_directories(orbslam3_sift_kitti_ate PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(orbslam3_sift_kitti_ate PRIVATE orbslam3_sift_ext)
+
+add_executable(orbslam3_sift_visualize_keypoints analyze/orbslam3_visualize_keypoints.cpp)
+target_include_directories(orbslam3_sift_visualize_keypoints PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(orbslam3_sift_visualize_keypoints PRIVATE orbslam3_sift_ext)
 
 # VLAD codebook trainer (see analyze/orbslam3_vlad_train.cpp) -- linked
 # against orbslam3_sift_ext (not orbslam3_ext) so the training-time

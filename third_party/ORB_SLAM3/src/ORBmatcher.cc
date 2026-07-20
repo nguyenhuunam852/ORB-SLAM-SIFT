@@ -20,6 +20,8 @@
 #include "ORBmatcher.h"
 
 #include<limits.h>
+#include<atomic>
+#include<cstdio>
 
 #include<opencv2/core/core.hpp>
 
@@ -28,6 +30,26 @@
 #include<stdint-gcc.h>
 
 using namespace std;
+
+namespace {
+    // [sbp-diag] TEMPORARY diagnostic, part 56 -- matched counterpart of the
+    // same instrumentation added to third_party/ORB_SLAM3_SIFT's
+    // ORBmatcher.cc, for a direct SIFT-vs-ORB comparison of exactly where
+    // in-frustum map points fail to match. See DEBUGGING.md.
+    std::atomic<long> g_sbpDiagTotal{0};
+    std::atomic<long> g_sbpDiagEmptyWindow{0};
+    std::atomic<long> g_sbpDiagDistReject{0};
+    std::atomic<long> g_sbpDiagRatioReject{0};
+    std::atomic<long> g_sbpDiagAccepted{0};
+    struct SbpDiagPrinter {
+        ~SbpDiagPrinter() {
+            fprintf(stderr, "[sbp-diag] total=%ld empty_window=%ld dist_reject=%ld ratio_reject=%ld accepted=%ld\n",
+                    g_sbpDiagTotal.load(), g_sbpDiagEmptyWindow.load(),
+                    g_sbpDiagDistReject.load(), g_sbpDiagRatioReject.load(),
+                    g_sbpDiagAccepted.load());
+        }
+    } g_sbpDiagPrinter;
+}
 
 namespace ORB_SLAM3
 {
@@ -70,6 +92,10 @@ namespace ORB_SLAM3
 
                 const vector<size_t> vIndices =
                         F.GetFeaturesInArea(pMP->mTrackProjX,pMP->mTrackProjY,r*F.mvScaleFactors[nPredictedLevel],nPredictedLevel-1,nPredictedLevel);
+
+                g_sbpDiagTotal++;
+                if(vIndices.empty())
+                    g_sbpDiagEmptyWindow++;
 
                 if(!vIndices.empty()){
                     const cv::Mat MPdescriptor = pMP->GetDescriptor();
@@ -122,10 +148,13 @@ namespace ORB_SLAM3
                     // Apply ratio to second match (only if best and second are in the same scale level)
                     if(bestDist<=TH_HIGH)
                     {
-                        if(bestLevel==bestLevel2 && bestDist>mfNNratio*bestDist2)
+                        if(bestLevel==bestLevel2 && bestDist>mfNNratio*bestDist2){
+                            g_sbpDiagRatioReject++;
                             continue;
+                        }
 
                         if(bestLevel!=bestLevel2 || bestDist<=mfNNratio*bestDist2){
+                            g_sbpDiagAccepted++;
                             F.mvpMapPoints[bestIdx]=pMP;
 
                             if(F.Nleft != -1 && F.mvLeftToRightMatch[bestIdx] != -1){ //Also match with the stereo observation at right camera
@@ -137,6 +166,10 @@ namespace ORB_SLAM3
                             nmatches++;
                             left++;
                         }
+                    }
+                    else
+                    {
+                        g_sbpDiagDistReject++;
                     }
                 }
             }

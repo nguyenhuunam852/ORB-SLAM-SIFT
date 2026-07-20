@@ -1,5 +1,2772 @@
 # Debugging log: homography fallback caused a permanent tracking lockup
 
+## Part 56 (2026-07-19, continued autonomously): chasing the 40.3% (ORB) vs
+## 10.0% (SIFT) SearchLocalPoints match-rate gap found at the end of part 55
+
+**Recap of where this picks up**: part 55's last data point (see below) was
+a freshly-added `nToMatch`/`matched` diagnostic on `SearchLocalPoints()`
+showing SIFT matches only 10.0% of geometrically-in-frustum local map
+points, and a same-session addition of the identical diagnostic to stock
+ORB's `SearchLocalPoints()` measured **ORB at 40.3%** (120401/298787) on the
+*identical* frames 1-1000 -- a clean, controlled, 4x gap on the exact same
+metric, same segment, same nFeatures=5000. This is the most concrete
+"smoking gun" of the whole session: raw keypoint yield (part 55, ~66% of
+ORB's) and outlier rate (7.9%, fine) had already been ruled out or found
+insufficient to explain the coverage gap on their own -- this 4x match-RATE
+gap, on points BOTH systems already agree are in-frustum, is a much more
+direct signal.
+
+**First hypothesis checked: the historical part-12 flat-level-window bug
+might not be fully patched everywhere.** `ORBmatcher.cc`'s
+`GetFeaturesInArea` flat-level-window bug (SIFT's (octave,layer) flat-level
+packing makes a literal `+-1`-flat-level window cover only a sliver of one
+real resolution level, unlike ORB's true per-level pyramid) was previously
+found and fixed at two call sites (local-map `SearchByProjection`, and the
+monocular branch of the motion-model overload). Grepped **every**
+`GetFeaturesInArea` call site in `ORBmatcher.cc` (14 total) and traced each:
+the `KeyFrame::GetFeaturesInArea` overload (6 call sites: lines 521, 634,
+1262, 1422, 1555, 1635) has no octave-range parameters at all -- searches
+all levels unconditionally, not affected by this bug class. Of the
+`Frame::GetFeaturesInArea` call sites, the monocular-relevant ones are
+already fixed: line 103 (local-map `SearchByProjection`), line 1764 (motion
+model's `else` branch -- confirmed via `bMono` that `bForward`/`bBackward`
+are always false for monocular, so this IS the branch always taken), and
+line 1979 (Relocalization's `SearchByProjection` overload -- also already
+fixed, with an inline comment explicitly flagging it as "one of the top
+suspects flagged for this exact bug pattern," confirming this fix was
+already made in direct response to the earlier session's own "next steps"
+note). The only remaining narrow-window call sites (lines 181, 1838, 1840,
+1842; `SearchForInitialization`'s line 710) are either `bRight=true`
+stereo/fisheye paths (dead code for monocular KITTI) or intentional
+octave-0-only windows for initialization. **Conclusion: this bug class is
+already exhaustively fixed for every monocular code path** (confirmed via
+git history -- commit `e1cdfc3 "Fix narrow flat-level window in
+SearchByProjection"` already did this comprehensive sweep in a prior
+session). The fresh 10.0% measurement was taken on code that **already
+includes this fix** -- so the historical bug, while real and worth having
+fixed, does NOT explain the still-low 10.0% rate. This lead is exhausted.
+
+**Next step taken: added match-rejection-reason diagnostics directly to
+`SearchByProjection(Frame&, vector<MapPoint*>&, ...)`** (the function
+backing `SearchLocalPoints()`), in both `ORB_SLAM3_SIFT` and stock
+`ORB_SLAM3`'s copies (kept them structurally identical for a fair
+comparison). Added `g_sbpDiagTotal`/`g_sbpDiagEmptyWindow`/
+`g_sbpDiagDistReject`/`g_sbpDiagRatioReject`/`g_sbpDiagAccepted` atomics
+(`std::atomic<long>`, thread-safe given multiple threads call into this),
+printed via a static destructor at process exit as
+`[sbp-diag] total=... empty_window=... dist_reject=... ratio_reject=...
+accepted=...`. This buckets every candidate map point in the monocular
+`mbTrackInView` branch into exactly one of: (a) `empty_window` -- the
+`GetFeaturesInArea` window found zero candidate keypoints at all, (b)
+`dist_reject` -- at least one candidate existed but the best descriptor
+distance exceeded `TH_HIGH`, (c) `ratio_reject` -- best distance passed
+`TH_HIGH` but failed the same-scale-level Lowe's-ratio test, or (d)
+`accepted` -- matched. This isolates WHERE in the pipeline (window
+geometry vs descriptor-distance calibration vs ratio-test) the 4x gap
+actually originates, rather than continuing to guess.
+
+**Results (both runs complete, identical frames 1-1000, nFeatures=5000
+both)**:
+
+| | total | empty_window | dist_reject | ratio_reject | accepted |
+|---|---|---|---|---|---|
+| SIFT | 300351 | 175015 (58.3%) | 95152 (31.7%) | 437 (0.1%) | 29747 (9.9%) |
+| ORB  | 307144 | 119280 (38.8%) | 59923 (19.5%) | 16700 (5.4%) | 111241 (36.2%) |
+
+Both `accepted` percentages closely match the previously-measured
+`SearchLocalPoints` match rates (9.9% vs the earlier 10.0%; 36.2% vs the
+earlier 40.3% -- small difference because this diagnostic's `total` counts
+every `mbTrackInView` candidate reaching the window-search stage, a
+slightly different base than `nToMatch`), confirming this instrumentation
+is measuring the same thing correctly.
+
+**The real finding is in the CONDITIONAL rate** (given the search window
+found at least one candidate keypoint at all, i.e. excluding
+`empty_window`): **SIFT rejects on descriptor distance 75.9% of the time
+when a candidate exists (only 23.7% accepted), vs ORB accepting 59.2% of
+the time under the same condition (only 31.9% dist-rejected).** This is
+NOT explained by the already-known raw-keypoint-density gap (part 55,
+SIFT~66% of ORB's yield) -- that gap plausibly explains most of the
+`empty_window` disparity (58.3% vs 38.8%, ratio 1.5x, matching the inverse
+density ratio 1/0.66=1.51x almost exactly) but does nothing to explain why
+a candidate that DOES exist in the window still gets rejected 3x more
+often for SIFT specifically. **This isolates the dominant mechanism to
+descriptor-distance/`TH_HIGH` calibration, not window geometry or
+keypoint sparsity.** Also notable: SIFT's `ratio_reject` is nearly zero
+(0.1%) vs ORB's 5.4% -- almost certainly because the part-12 window-widening
+fix (whole octave instead of +-1 flat level) means `bestLevel` and
+`bestLevel2` are rarely equal anymore for SIFT (candidates routinely land
+on different flat sub-layers within the octave), and the ratio test's own
+precondition (`bestLevel==bestLevel2`) is coded to only apply when they
+match -- so the ratio test is inadvertently bypassed most of the time for
+SIFT now. This is a side-effect worth remembering but is not itself hurting
+match rate (if anything it's slightly lenient); the dominant problem is
+`dist_reject`.
+
+**Checked whether `TH_HIGH` is even self-consistent with its own
+calibration data**: the calibration comment (`ORBmatcher.cc` ~line 40)
+records true-match squared-L2 **max=113387**, but `TH_HIGH` is set to
+**100557** (1.5x true-match p99=67038) -- i.e. `TH_HIGH` is *below* the
+maximum true-match distance observed in its own calibration sample, so by
+construction some genuine matches were always going to be rejected; the
+question is how large that fraction really is in practice (a single p99*1.5
+heuristic doesn't reveal the tail shape). The original calibration tool
+(`analyze/orbslam3_sift_calibrate.cpp`) only ever printed false-match
+percentiles up to p50, never p90/p99/max -- meaning the `TH_HIGH` choice
+was made without knowing how close the false-match distribution's tail
+comes to the true-match tail. **Patched the tool to also print false-match
+p90/p95/p99/max**, rebuilt, and reran on the same 600-frame/baseline-1/3/5
+sample.
+
+**Result -- and it rules out "just raise TH_HIGH"**: full false-match
+squared-L2 distribution: `min=127 p1=1207 p5=3074 p10=5124 p50=25974
+p90=59910 p95=68271 p99=82639 max=112636`. True-match: `p50=9142 p90=37049
+p95=48005 p99=66314 max=113387` (this rerun's own numbers, close to but not
+identical to the original calibration session's, as expected from sampling
+a different/overlapping frame range). **The true and false distributions
+overlap almost completely above ~60000** -- false-match's own p99 (82639)
+is comfortably above today's `TH_HIGH` (100557's neighbor, effectively both
+in the same ballpark), and false-match's **max (112636) is essentially
+equal to true-match's max (113387)**. This means: (a) raising `TH_HIGH`
+to "fix" the 75.9% conditional-dist_reject rate would let in a large
+fraction of genuine false matches, not just recover a few borderline true
+ones -- the two distributions simply aren't separable in that tail region
+by distance alone; (b) more importantly, **today's `TH_HIGH`=100557 is
+already above false-match's p99 (82639)**, meaning **more than 99% of
+RANSAC-outlier candidate pairs already pass the TH_HIGH filter** -- `TH_HIGH`
+was never doing much discriminating work in this region to begin with, exactly
+as its own header comment says ("a coarse sanity cutoff, not the primary
+discriminator -- the ratio test does the fine-grained work"). **The
+ratio test is supposed to be the real defense here** -- and part 55's
+sbp-diag numbers above already showed SIFT's ratio test barely ever fires
+(0.1% vs ORB's 5.4%).
+
+**Root cause identified and fixed**: the ratio test's own precondition,
+`bestLevel==bestLevel2`, checks *exact flat-level* equality. Part 12's
+earlier fix (this same session's predecessor) widened the `GetFeaturesInArea`
+search window from a narrow +-1-flat-level slice to an entire octave, to
+fix a *different*, already-solved problem (window too narrow, causing
+empty-window starvation) -- but never updated the ratio test's own
+same-level check to match. The practical effect: once the window spans a
+whole octave (multiple distinct flat sub-levels), `bestLevel` and
+`bestLevel2` almost always land on *different* flat sub-levels even when
+both candidates are legitimately in the same real resolution range the
+octave-wide window was designed to treat as equivalent -- so
+`bestLevel==bestLevel2` is almost never true, and the code's own logic
+(`if(bestLevel!=bestLevel2 || bestDist<=mfNNratio*bestDist2)`) then skips
+the ratio test and accepts on `TH_HIGH` alone -- which we just showed
+barely discriminates in this range. **Fixed** by changing the same-level
+check to a same-OCTAVE check (`bestLevel/nOctaveLayers ==
+bestLevel2/nOctaveLayers`, guarding for `bestLevel2==-1` when no second
+candidate exists), consistent with the octave-based window widening
+already used earlier in the same function. This is a mechanism-level fix
+targeting the actual root cause the data pointed to, not another blind
+threshold sweep (part 55 already exhausted that avenue on the detector
+side, twice, both worse).
+
+**Result: mechanism confirmed correct, fix reverted -- net negative for
+coverage.**
+
+| metric | baseline | same-octave ratio-test fix |
+|---|---|---|
+| fails | 67 | 58 |
+| resets | 33 | 32 |
+| coverage | 320m (44.7%) | 269.7m (37.7%) |
+| sbp-diag accepted (of total) | 9.9% | 9.25% |
+| sbp-diag ratio_reject (of total) | 0.1% | 0.7% |
+| outlier rate (afterPO_flaggedOutlier) | 7.9% | 6.8% |
+
+The diagnosis was mechanically verified correct: `ratio_reject` rose ~4x
+(437->1845) once the ratio test's scope check was widened from exact
+flat-level to same-octave, confirming it really was almost never firing
+before. But the **net effect on match quantity was still negative**
+(accepted-rate 9.9%->9.25%) and **coverage got worse, not better**
+(44.7%->37.7%) -- even though the post-hoc outlier rate improved slightly
+(7.9%->6.8%). **Interpretation**: once Lowe's ratio test is applied across
+an octave-wide candidate pool (many distinct flat sub-levels, i.e. many
+distinct real keypoints at meaningfully different sub-scales, all
+competing as "second-best"), it ends up rejecting more genuine true
+matches than false ones for this SIFT/KITTI combination -- a second-best
+candidate merely existing somewhere in that wide pool doesn't reliably
+signal real ambiguity the way it does for ORB's narrower, single-real-level
+window. **Reverted** the ratio-test scope change (back to exact
+`bestLevel==bestLevel2`, `TH_HIGH` untouched throughout this whole
+sub-investigation) -- documented in an inline comment at the revert site
+so this isn't re-attempted blind in a future session. Root-cause diagnosis
+(ratio test effectively dead for SIFT due to the part-12 window widening)
+stands and is confirmed real; this specific fix for it does not help the
+coverage-first goal and was not kept.
+
+**Status**: the `dist_reject`-dominates-conditional-on-nonempty-window
+finding (75.9% vs ORB's 31.9%) is still real and still the sharpest lead,
+but the two most obvious levers for it (raise `TH_HIGH` -- ruled out, the
+true/false distributions overlap too much in that range; re-enable the
+ratio test at octave granularity -- tried, net negative) are both now
+exhausted. `mfNNratio` checked and ruled out: identical values at every
+`ORBmatcher` construction site in both forks' `Tracking.cc` (0.9/0.7/0.9/
+0.8/0.75, byte-for-byte match) -- not the difference.
+
+### Part 56 continued: found what looks like the actual root cause -- a real unit mismatch in PredictScale()
+
+While checking `MapPoint::ComputeDistinctiveDescriptors()` (ruled out --
+the "least median distance" fused descriptor is, by construction, at least
+as central as any single raw observation, and `DescriptorDistance`'s
+squared-L2 formula is byte-identical between the live matcher and the
+calibration tool, confirmed by reading both), noticed `MapPoint::
+PredictScale()` computes `nScale = ceil(log(ratio)/pF->mfLogScaleFactor)`
+and returns it directly as `nPredictedLevel`, a **flat-level array index**
+(used to index `mvScaleFactors[]`, sized `nlevels=80`, and to compute
+`SearchByProjection`'s `octaveBase = nPredictedLevel/nOctaveLayers`
+window center).
+
+**Traced `mfLogScaleFactor`'s source**: `Frame::mfLogScaleFactor =
+log(mfScaleFactor)`, and `mfScaleFactor = mpORBextractorLeft->
+GetScaleFactor()`, which returned the raw constructor argument
+`scaleFactor` -- i.e. the settings file's `ORBextractor.scaleFactor: 1.2`.
+But this SIFT reimplementation's constructor comment already says
+`_scaleFactor` is "accepted for signature compatibility but not used" --
+and indeed, `mvScaleFactor[lvl] = pow(2.0f, lvl/nOctaveLayers)` (integer
+division; see the constructor, ~line 520 of `ORBextractor.cc`) is built
+from a **per-octave** ratio of exactly 2.0, i.e. a **per-flat-level** ratio
+of `2^(1/nOctaveLayers)` -- for this project's `nOctaveLayers=8`
+(`ORBextractor.nLevels: 8` in the settings file), that's `2^(1/8)~=1.0905`,
+**not** 1.2. `log(1.2)=0.182` vs the true `log(2)/8=0.0866` -- roughly
+**2.1x too large a denominator**, meaning `PredictScale()` was computing
+flat-level indices at less than half their correct value for any nonzero
+distance ratio. This directly and simultaneously explains: (1) why the
+*original* narrow-window bug (part 12) was so catastrophic (a window
+correctly proportioned in width was still centered on the wrong octave
+entirely); (2) why even *today's* whole-octave-wide window still shows
+58.3% `empty_window` (the window's centering, not just its width, was
+wrong -- often missing the true keypoint's real octave altogether); (3)
+why `dist_reject` is so high even when the window isn't empty (candidates
+present are frequently from the wrong-but-nearby octave the mis-centered
+window happened to catch, not genuine matches, so their distances are
+large).
+
+**Checked all consumers before changing the fix site**: `mfLogScaleFactor`
+is used only by the two `PredictScale()` overloads (`MapPoint.cc`).
+`mfScaleFactor` (raw, non-log) is also read once more, in
+`LocalMapping::CreateNewMapPoints()`'s `ratioFactor = 1.5f*
+mpCurrentKeyFrame->mfScaleFactor` -- a multiplicative tolerance band
+around `ratioOctave` (itself correctly built from the real
+`mvScaleFactors[]` array) in a new-map-point scale-consistency sanity
+check. Both consumers want the same thing: the *real* per-flat-level scale
+step, not the vestigial config value -- confirming the getter itself is
+the right place to fix, not either call site individually.
+
+**Fix applied**: `ORBextractor::GetScaleFactor()` now returns
+`pow(2.0f, 1.0f/nOctaveLayers)` instead of the raw unused constructor
+argument (`include/ORBextractor.h`), fixing both consumers at their
+shared source. This is a mechanism-level, root-cause fix grounded in
+directly-verified array-construction code, not a threshold guess.
+
+**Result on frames 1-1000: a real, clean, all-around win -- no quality
+tradeoff.**
+
+| metric | baseline | scale-fix | ORB (reference) |
+|---|---|---|---|
+| fails | 67 | **53** (-21%) | 152 |
+| resets | 33 | **29** (-12%) | 6 |
+| coverage | 320m (44.7%) | **379.9m (53.1%)** | 533.6m (74.6%) |
+| sbp-diag accepted-of-total | 9.9% | **16.7%** (+69% rel.) | 36.2% |
+| sbp-diag empty_window | 58.3% | **45.7%** | 38.8% |
+| dist_reject (conditional on non-empty) | 75.9% | **68.9%** | 31.9% |
+| outlier rate | 7.9% | **6.6%** (also improved) | -- |
+
+Every metric moved in the right direction simultaneously: fewer fails,
+fewer resets, meaningfully more coverage (+8.4 percentage points,
+recovering roughly a third of the gap to ORB's 74.6%), a much higher raw
+match-acceptance rate (9.9%->16.7%), `empty_window` closing more than half
+the gap to ORB's own rate (58.3%->45.7%, ORB is 38.8%), and even the
+post-hoc outlier rate improved slightly rather than trading quality for
+quantity. This is unambiguously a real fix, not another mixed/negative
+result like the ratio-test attempt above.
+
+**Second confirmation: a clean pre/post A/B on the primary hot zone
+(frames 4000-4540, GT path 586.2m, computed directly from `poses/00.txt`)
+-- mixed result on coverage, but the underlying mechanism improvement
+still confirms consistently.**
+
+| metric | pre-fix | post-fix |
+|---|---|---|
+| fails | 101 | 94 |
+| resets | 48 | 48 (identical) |
+| coverage | 87.9m (15.0%) | 53.3m (9.1%) |
+| sbp-diag accepted-of-total | 11.5% | **15.6%** |
+| sbp-diag empty_window | 52.3% | **44.7%** |
+| dist_reject (conditional) | 75.3% | **71.3%** |
+| outlier rate | 12.4% | **9.2%** |
+
+Ran both variants back-to-back on the identical 541-frame segment
+(temporarily reverted `GetScaleFactor()` to the old buggy `return
+scaleFactor;`, rebuilt, ran, then restored the fix and rebuilt again --
+confirmed via grep that the final kept state has the fix in place). Every
+`sbp-diag` quality metric improved in the same direction as the 1-1000
+result (higher accepted rate, lower empty_window, lower conditional
+dist_reject, lower outlier rate) -- **consistent evidence across two very
+different, independently-tested segments that the underlying matching
+mechanism genuinely got better**. But `fails` only improved marginally
+(101->94), `resets` came out perfectly identical (48=48), and `coverage`
+actually dropped (15.0%->9.1%) on this specific single-run comparison.
+
+**Interpretation**: this specific 541-frame hot zone was already
+established in part 53 as unusually noisy -- 6 same-or-similar-config
+repeat samples ranged 85-124 fails purely from thread-scheduling
+nondeterminism (the `DUtils::Random` mutex fix did not achieve full
+determinism; see part 53). Both 94 and 101 fall inside that already-known
+noise band, so a single-run fails/resets/coverage comparison on *this*
+segment specifically is not statistically decisive either way -- unlike
+the `sbp-diag` metrics, which measure the matching mechanism directly and
+are far less sensitive to exactly when a keyframe lands or when a
+background thread runs, and which agree cleanly with the 1-1000 result.
+Plausible explanation for the coverage regression despite better matching:
+resets landing at slightly different points in this specific hard
+stretch's path can cover very different real distances even with the same
+reset *count*, and this segment may also contain a genuinely hard
+obstacle (sharp turn, blur, lighting) that this fix doesn't address and
+that dominates outcomes here regardless of match-rate improvements
+elsewhere.
+
+**Decision: keep the fix.** It is a real, verified correctness fix (not a
+threshold guess) with consistent, mechanism-level evidence of improvement
+on two independent segments; the hot zone's own fails/resets/coverage
+noise floor is wide enough that this single comparison neither confirms
+nor refutes it at the coverage level, and reverting a demonstrably-correct
+fix because of one noisy segment's single-run outcome would be the wrong
+call. If more confidence on this specific segment is wanted later, repeat
+trials (matching part 53's methodology, 3+ runs) would be needed to
+average out the noise.
+
+### Part 56 continued: re-tested the window WIDTH now that centering is fixed -- made things worse, reverted
+
+With `GetScaleFactor()` fixed, `nPredictedLevel` is now correctly centered,
+so tested whether the full-octave-wide window (8 flat levels,
+`octaveBase..octaveBase+nOctaveLayers-1`) -- originally widened as a
+workaround for the *old* mis-centering bug -- could now be narrowed. Per
+ORB's own configured `scaleFactor=1.2`, the SIFT-equivalent window width
+is only ~2.1 flat levels; tried `nPredictedLevel-2..nPredictedLevel+2` (5
+flat levels, a reasoned middle ground with margin) in the local-map
+`SearchByProjection` overload only (the one `sbp-diag` instruments,
+isolate-and-attack discipline -- motion-model and Relocalization overloads
+left untouched).
+
+**Result on frames 1-1000: clearly worse, not better.**
+
+| metric | scale-fix (kept) | narrowed window (reverted) |
+|---|---|---|
+| fails | 53 | 66 |
+| resets | 29 | 32 |
+| coverage | 379.9m (53.1%) | 374.9m (52.4%) |
+| accepted-of-total | 16.7% | 11.6% |
+| empty_window | 45.7% | **59.4%** (worse than even the pre-scale-fix 58.3%) |
+| outlier rate | 6.6% | 5.4% (only metric that improved) |
+
+**Interpretation**: the full-octave width was never purely a workaround
+for the centering bug -- it's doing real, independent work compensating
+for SIFT's own lower raw keypoint yield (~66% of ORB's, part 55) and
+genuine real-world prediction noise (depth/viewpoint estimation error,
+not just quantization). Narrowing the window, even with correct
+centering, starves the search of candidates faster than the tighter
+scope's slightly-improved precision can make up for. **Reverted** back to
+the full-octave window; documented inline in `ORBmatcher.cc` so this isn't
+re-attempted blind. The `GetScaleFactor()` fix remains the confirmed,
+kept win; the window-width lever is now exhausted (both directions tried:
+too narrow originally broken -> too-narrow-again after centering fix ->
+full octave is the correct width for this dataset/detector combination).
+
+**Where this leaves the investigation**: the two clean, safe, well-reasoned
+mechanism-level levers this session found (`GetScaleFactor` unit mismatch,
+and re-testing window width) are now both resolved -- one kept as a real
+win, one tried and correctly reverted. Remaining `dist_reject` gap vs ORB
+(SIFT still ~69% conditional-on-nonempty-window vs ORB's 31.9%) is likely
+now dominated by SIFT's genuinely lower raw keypoint density on this
+dataset (part 55's already-established, already-hard-to-fix finding) --
+consistent with the user's worst-case framing being *partially* true: not
+"nothing can be fixed," but the easy, safe, mechanism-level fixes may now
+be exhausted, with what remains looking more like an inherent
+detector-yield gap than a further bug.
+
+### Part 56 continued: audited MapPoint::UpdateNormalAndDepth() (clean), retested nFeatures=7000 with the fix in place (no help, reverted)
+
+Per user's "test everything" license, checked whether
+`UpdateNormalAndDepth()` (feeds `mfMinDistance`/`mfMaxDistance`, the
+numerator of `PredictScale()`'s ratio) had a similar bug to
+`GetScaleFactor()`. **Clean**: it computes `mfMaxDistance =
+dist*pRefKF->mvScaleFactors[level]` and `mfMinDistance =
+mfMaxDistance/pRefKF->mvScaleFactors[nLevels-1]` directly from the real
+`mvScaleFactors[]` array (correctly built with true `2^octave` values),
+never touching the buggy `GetScaleFactor()`/`mfScaleFactor` path. No bug
+here.
+
+Retested `nFeatures` 5000->7000 (`scratchpad/KITTI00-02-sift-nf7000.yaml`)
+now that the centering fix is in place, on frames 1-1000, to see if it
+interacts more favorably than the pre-fix attempt did (parts 39-42, kept
+at 5000 after finding 10000 "real but computationally expensive, not
+purely free").
+
+| metric | nFeatures=5000 (kept) | nFeatures=7000 |
+|---|---|---|
+| fails | 53 | 55 |
+| resets | 29 | 33 |
+| coverage | 379.9m (53.1%) | 339.4m (47.5%) |
+| accepted-of-total | 16.7% | 16.7% (identical) |
+| empty_window | 45.7% | 45.6% (identical) |
+| outlier rate | 6.6% | 5.7% |
+
+**No help.** The `sbp-diag` *rate* metrics are essentially unchanged
+(more raw candidates scale the numerator and denominator together, not
+the underlying match quality), while fails/resets/coverage all got
+slightly worse, consistent with the earlier pre-fix finding that more
+features cost more (Sim3Solver/BA/merge complexity) without a
+proportionate benefit. **Not adopted** -- kept `nFeatures=5000`. This
+confirms the centering fix didn't change nFeatures' cost/benefit
+calculus; that lever remains not worth it.
+
+**Status**: with `UpdateNormalAndDepth` ruled clean and `nFeatures`
+reconfirmed not worth raising, the quick, targeted, mechanism-level levers
+available from short-segment testing appear exhausted. The natural next
+step is a longer validation run (bigger prefix, e.g. 1-2500, or a full
+untruncated sequence) to see the confirmed `GetScaleFactor` fix's
+cumulative real-world effect, rather than further short-segment parameter
+sweeps.
+
+### Part 56 continued: longer validation, frames 1-2500 (GT path 1885.1m), SIFT-with-fix vs stock ORB
+
+Extends part 54's progressive comparison table (which only went to 1500
+frames and did NOT have this session's `GetScaleFactor` fix applied).
+This new row DOES have the fix. Ran both back-to-back on the identical
+2500-frame segment.
+
+| frames | GT path | SIFT fails | SIFT resets | SIFT coverage | SIFT % | ORB fails | ORB resets | ORB coverage | ORB % |
+|---|---|---|---|---|---|---|---|---|---|
+| 1-500  | 359.4m  | 29  | -- | 213m   | 59.3% | 91  | -- | 217.6m | 60.5% |
+| 1-1000 | 715.2m  | 67  | 33 | 320m   | 44.7% | 152 | 6  | 533.6m | 74.6% |
+| 1-1500 | 1091.8m | 132 | -- | 423.2m | 38.8% | 153 | -- | 904.1m | 82.8% |
+| **1-2500 (fix applied)** | **1885.1m** | **214** | **114** | **775.2m** | **41.1%** | **307** | **10** | **1608.1m** | **85.3%** |
+
+sbp-diag on this segment: SIFT accepted=15.8%, empty_window=45.1%,
+dist_reject=38.9% (of total); ORB accepted=36.6%, empty_window=40.2%,
+dist_reject=18.2% -- consistent with the same qualitative gap measured on
+every shorter segment this part.
+
+**Honest read**: SIFT's coverage % at 2500 frames (41.1%) is *slightly
+higher* than the unfixed 1500-frame number (38.8%) -- a mild positive
+signal that the fix helps at longer lengths too, not just short segments
+-- but this is not a clean apples-to-apples comparison (no unfixed
+2500-frame run exists to compare against directly, and this system's
+established run-to-run noise, part 53, is wide enough that a 2.3-point
+swing isn't strong evidence on its own). **The gap to ORB remains large
+and does not close**: ORB still covers more than double SIFT's percentage
+(85.3% vs 41.1%), continuing the same widening-gap pattern part 54 first
+found, just from a new, slightly-improved baseline. One SIFT fragment
+(fragment 7, 409m) has RMSE=5.337m (within the 20m budget) but max
+error=22.075m (a single worst-point excursion above budget, RMSE is the
+qualifying metric per the user's stated criterion, so this fragment still
+qualifies, but it's a large excursion worth noting). ORB's fragment 2
+(1351.9m, the vast majority of ORB's covered distance) has RMSE=6.771m,
+also comfortably within budget.
+
+**Conclusion for this session's investigation**: the `GetScaleFactor` fix
+is real, mechanism-verified, and modestly helps at longer segment lengths
+too, but it does not close the fundamental gap to stock ORB on this
+dataset. Combined with the ruled-out window-width and nFeatures levers,
+and the already-established raw-keypoint-yield gap (part 55, SIFT ~66% of
+ORB's), the remaining gap looks increasingly like a genuine property of
+SIFT/DoG detection on KITTI's low-texture urban driving imagery rather
+than a further fixable bug -- consistent with what part 56's own
+mid-investigation "worst case" discussion with the user anticipated.
+Further gains from here would likely need either accepting a much higher
+`nFeatures` despite its cost (last tested at 7000, no help; 10000 tested
+earlier pre-fix, also not adopted), or a genuinely different
+investigation (e.g. visualizing actual detected keypoint locations on a
+hard frame to see qualitatively what ORB's detector finds that SIFT's
+doesn't), both flagged as lower-confidence next steps rather than another
+quick isolate-and-attack win.
+
+### Part 56 continued: settled the "is it a bug or a physical limit" question by directly visualizing keypoint locations
+
+Built a small standalone tool (`analyze/orbslam3_visualize_keypoints.cpp`,
+two CMake targets -- `orbslam3_visualize_keypoints` linked against stock
+`orbslam3_ext`, `orbslam3_sift_visualize_keypoints` linked against
+`orbslam3_sift_ext`, same shared-source-two-targets pattern as
+`orbslam3_kitti_ate`/`orbslam3_sift_kitti_ate`) that runs the real
+extractor on a single image and draws every detected keypoint as a
+circle. Ran both on KITTI frame **004435.png** -- identified as the
+lowest-keypoint-count frame in the primary hot zone (2420 keypoints,
+found by grepping `[raw-keypoints]` from `scalefix_hotzone.log` and
+sorting), i.e. the single hardest frame measured all session.
+
+**Result: ORB=4863 keypoints, SIFT=2420 keypoints on the identical
+image** (matches the ~66% yield gap from part 55 closely). Visually
+comparing the two keypoint maps (saved to `scratchpad/kp_orb_4435.png`/
+`scratchpad/kp_sift_4435.png`): **ORB densely covers essentially every
+surface in the frame, including the flat asphalt road itself** (a large,
+dense keypoint cluster along the bottom of the image where the road is).
+**SIFT's keypoints concentrate on genuinely high-contrast structure**
+(window edges, a traffic sign, car outline, tree/hedge texture, sidewalk
+tile-joint lines, building edges) **and are almost entirely absent on the
+road surface itself**. Away from the road (building facade, windows,
+sign, car, tree), SIFT and ORB target similar regions -- the gap is not
+uniform across the image, it's concentrated specifically on low-texture
+flat surfaces.
+
+**This directly and visually answers the question**: SIFT is not
+"missing" real corners that ORB correctly finds -- ORB's FAST-corner
+detector is picking up fine-grained intensity noise/texture on the
+asphalt (subtle cracks, aggregate texture, lighting variation) that
+triggers a corner response even though the underlying surface has little
+real 3D structure, while SIFT's DoG contrast-extremum requirement
+correctly declines to fire there. This is a genuine, structural
+difference in detector philosophy (corner-response vs. scale-space
+blob-extremum), **not a bug or a miscalibration** -- consistent with why
+lowering SIFT's contrast threshold (tried twice, part 51 and part 55)
+backfired: forcing SIFT to fire on the road's weak contrast just let
+through low-quality, likely less-repeatable points, exactly like ORB's
+road-surface keypoints, without the tracking benefit apparently making up
+for the drop in per-point reliability.
+
+**Conclusion**: the remaining SIFT-vs-ORB gap on this dataset is a real,
+inherent property of the two detectors' algorithms on KITTI's road-heavy
+driving imagery, not a further fixable bug. This closes the investigation
+thread that began with today's `GetScaleFactor` fix -- two real,
+verified, kept fixes were found and shipped this session (`DUtils::Random`
+thread-safety mutex from earlier in the session, and this part's
+`GetScaleFactor` unit-mismatch fix), the window-width and nFeatures
+levers were re-tested post-fix and correctly found not to help, and the
+remaining gap is now visually confirmed as algorithmic rather than a
+code defect.
+
+### Part 56 continued: "algorithmic, not a bug" doesn't mean "not fixable" -- spatially-fair keypoint selection via the previously-dead DistributeOctTree
+
+Per user's pushback ("SIFT should be much stronger since it extracts
+better points -- is there a way to make it work?"), re-examined whether
+"algorithmic difference" really meant "nothing left to try." Found that
+`operator()` calls `mSift->detectAndCompute()` and uses cv::SIFT's
+internal top-`nfeatures`-by-response retention directly -- meaning when
+the contrast threshold is lowered (as tried twice before, parts 51/55,
+both worse), the EXTRA weak candidates it admits still compete in a
+single GLOBAL response ranking with no spatial awareness, so they're
+disproportionately drawn from already-dense high-response regions
+(buildings) rather than the starved road region -- diluting quality
+everywhere without fixing the actual spatial imbalance. Also discovered
+`DistributeOctTree`/`ComputeKeyPointsOctTree` (the standard ORB-SLAM3
+octree-quadrant keypoint-distribution algorithm, which picks the
+best-response point PER SPATIAL CELL) exists in this file as **completely
+dead code** for SIFT -- inherited from the ORB->SIFT port but never wired
+into `operator()`, which bypasses it entirely.
+
+**Change**: (1) lowered the detection contrast threshold to 0.02
+(`kCandidateContrastThreshold`, both in the constructor and
+`SetDynamicDensity`) and requested UNLIMITED candidates from `cv::SIFT`
+(`nfeatures=0`, meaning "don't pre-cap by response at all"); (2) in
+`operator()`, when the raw candidate count exceeds the real `nfeatures`
+target, run it through `DistributeOctTree` (previously dead code, now
+wired in) to select the final set with spatial fairness instead of
+cv::SIFT's own global response ranking -- so a weak-but-unique road
+candidate can survive against a strong building candidate as long as
+they're in different spatial cells. Descriptor rows are recovered
+afterward via a temporary `class_id`-as-index trick (confirmed no other
+live consumer of that field in this codebase).
+
+**Quick visual sanity check** on the same hardest frame (004435.png,
+previously SIFT=2420 vs ORB=4863): **SIFT now detects 4857 keypoints**
+(nearly matching ORB's count on the identical image) -- and the road/
+sidewalk region, previously almost empty in the SIFT keypoint map, now
+shows meaningful coverage (`scratchpad/kp_sift_4435_v2.png` vs the
+original `kp_sift_4435.png`). Note: 4857 came in *under* the nfeatures=5000
+target for this particular frame, so `DistributeOctTree` didn't even need
+to cull anything here -- this jump is purely from the lower detection
+threshold + uncapped retention; the octree culling only engages on
+frames where the enlarged candidate pool exceeds 5000.
+
+**Result: clearly worse on every metric -- reverted.**
+
+| metric | GetScaleFactor fix (kept) | + octree spatial fix |
+|---|---|---|
+| fails | 53 | 72 |
+| resets | 29 | 40 |
+| coverage | 379.9m (53.1%) | 250.8m (35.1%) |
+| accepted-of-total | 16.7% | 15.1% |
+| empty_window | 45.7% | 46.2% (barely moved) |
+| outlier rate | 6.6% | 8.1% |
+
+Raw keypoint count on the hardest measured frame did jump from 2420 to
+4857 (vs ORB's 4863 -- nearly matched), and the road region visibly
+gained keypoint coverage in the visualization. But the real tracking
+evaluation got worse everywhere, and tellingly, `empty_window` barely
+moved despite far more raw candidates -- the new road-region points
+mostly didn't even help fill *existing* map points' search windows
+(those target already-triangulated 3D points, predominantly established
+from non-road structure), while their inherently weaker, lower-contrast
+descriptors measurably hurt match/outlier quality wherever they did get
+matched (outlier rate 6.6%->8.1%).
+
+**This is the third confirmed instance of the same failure mode** (parts
+51, 55, and this one): admitting lower-contrast SIFT candidates hurts
+more than any quantity increase helps, **regardless of whether they're
+spatially well-distributed or not**. This specifically rules out the
+"non-spatial global response ranking" hypothesis as the explanation for
+why threshold-lowering fails -- wiring in `DistributeOctTree` (previously
+dead code, now confirmed not to be the missing piece either) didn't
+rescue it. The real problem is intrinsic descriptor quality at low
+contrast, which no amount of spatial redistribution can fix. **Reverted**
+all of this part's changes (`kCandidateContrastThreshold`, the unlimited-
+candidates `cv::SIFT::create` calls in both the constructor and
+`SetDynamicDensity`, and the `DistributeOctTree` wiring in `operator()`)
+back to the original `kContrastThreshold=0.04`, response-ranked,
+nfeatures-capped behavior -- confirmed via grep and a clean rebuild.
+
+**Answer to the user's question** ("SIFT should be stronger since it
+extracts better points -- is there a way to make it work?"): the
+keypoint-visualization tool (`analyze/orbslam3_visualize_keypoints.cpp`,
+kept in the tree for future use) gave a definitive, evidence-based
+answer. SIFT's per-point descriptor quality claim is true in the
+classical-CV sense, but on this specific dataset the binding constraint
+is that SIFT's stricter contrast-extremum requirement finds very few
+points on flat, low-texture road surfaces that make up a large fraction
+of KITTI's driving scenes -- and every attempt to recover those points
+(lower threshold alone, twice; lower threshold + spatially-fair
+selection, once) made overall tracking measurably worse, because the
+points recoverable that way are inherently lower-quality, not just
+differently distributed. This is now a well-evidenced, thrice-confirmed
+conclusion rather than a guess: **the remaining gap is a genuine,
+structural property of SIFT/DoG detection on this class of imagery, not
+a fixable bug or a missing algorithmic piece.**
+
+### Part 56 continued: fourth attempt, CLAHE local-contrast enhancement -- also failed, closing this investigation line
+
+Per user's continued push ("có cách nào tăng độ mạnh trên mặt đường
+không" -- any way to boost feature strength on the road), tried a
+genuinely different-in-kind approach: instead of lowering SIFT's
+acceptance threshold (the three already-failed attempts), boost LOCAL
+image contrast via CLAHE (`cv::createCLAHE(2.0, {8,8})`) before
+detection, so genuinely-present-but-weak road texture (subtle
+cracks/aggregate) could clear the *original, unchanged* 0.04 threshold on
+its own merit rather than admitting borderline candidates. Applied to a
+separate `Mat`, not mutating the extractor's own `image` buffer.
+
+**Visual sanity check**: on the same hardest frame (004435.png), keypoint
+count jumped from 2420 to the full 5000 cap (`scratchpad/
+kp_sift_4435_clahe.png`) -- road/sidewalk coverage visibly improved, and
+the underlying enhanced image showed genuinely sharper texture (tile
+joints etc.), not just noise.
+
+**Real evaluation result on frames 1-1000: the fourth consecutive
+failure.**
+
+| metric | GetScaleFactor fix (kept) | + CLAHE |
+|---|---|---|
+| fails | 53 | 84 |
+| resets | 29 | 43 |
+| coverage | 379.9m (53.1%) | 212.9m (29.8%) |
+| accepted-of-total | 16.7% | 12.9% |
+| empty_window | 45.7% | 47.1% |
+| outlier rate | 6.6% | 7.0% |
+| worst fragment RMSE | <1m typical | 13.764m (still under the 20m budget, but a real outlier) |
+
+**Interpretation**: even genuine local-contrast enhancement (not just a
+looser acceptance bar) made things worse, and notably produced one
+fragment with much higher RMSE than typical -- consistent with a
+different, complementary explanation beyond "weak descriptors": points on
+a near-planar road surface give inherently poor triangulation geometry
+(shallow/degenerate depth estimation) even when 2D matching itself
+succeeds, and/or CLAHE's per-frame-adaptive local normalization hurts
+frame-to-frame descriptor repeatability for otherwise-good points (tile
+boundaries and local statistics can shift slightly frame to frame even
+for the same physical surface). **Reverted** (confirmed via grep and a
+clean rebuild -- `operator()` calls `mSift->detectAndCompute(image, ...)`
+on the raw image again, no CLAHE).
+
+**This closes the "recover SIFT's road-surface deficit" investigation
+line with strong, consistent evidence**: four independent, mechanistically
+distinct attempts (lower threshold alone x2, lower threshold + spatial
+fairness, local contrast enhancement) all failed the same way -- more
+road-region keypoints, by whatever means, net hurt real tracking
+performance on this dataset. This is no longer a single negative result
+that might be attributable to one bad parameter choice; it's a
+triangulated, four-for-four pattern strongly suggesting the SIFT-vs-ORB
+gap on KITTI's road-heavy driving imagery is not recoverable via
+feature-detection-level interventions with this pipeline. Further
+progress, if wanted, would need a fundamentally different architectural
+approach (e.g. a hybrid detector, or optical-flow-assisted tracking for
+low-texture regions instead of detect-and-match), not another
+detector-parameter or preprocessing tweak.
+
+### Part 56 continued: a different kind of lever -- loosening the TrackLocalMap acceptance gate instead of the detector
+
+User's own idea, after the four detector-level failures: instead of
+trying to create more/better matches upstream, what if the downstream
+*acceptance* gate (`TrackLocalMap()`'s `mnMatchesInliers<15` check,
+deciding whether to trust a frame's tracking as "OK" at all) is itself
+needlessly conservative? The gate doesn't create real matches -- it only
+decides whether to keep going with what `SearchLocalPoints` already
+found. Explicitly flagged the theoretical risk before testing: loosening
+this could accept degenerate/low-confidence poses that blow the user's
+own 20m ATE RMSE budget.
+
+**Tested progressively on frames 1-1000**: `need>=15` (default) ->
+`need>=3` -> `need>=1` (accept any nonzero inlier count, the most literal
+"no constraint").
+
+| gate | fails | resets | coverage | max fragment RMSE |
+|---|---|---|---|---|
+| need>=15 (default) | 53 | 29 | 379.9m (53.1%) | ~4m typical |
+| need>=3 | 47 | 27 | 362.1m (50.6%) | 1.546m (safe) |
+| need>=1, trial 1 | 50 | 27 | 441.6m (**61.7%**) | 0.283m (very clean) |
+| need>=1, trial 2 (repeat) | 56 | 32 | 393.9m (55.1%) | **9.636m, max=32.765m** |
+
+**The theoretical risk materialized on the repeat trial, not the first
+run.** Trial 1 looked like a clean, safe win (coverage +8.6pp, RMSE
+*better* than baseline). Trial 2 on the identical segment (this system's
+established thread-race nondeterminism, part 53) still showed elevated
+coverage over the `need>=15` baseline (55.1% vs 53.1%) but produced one
+fragment with RMSE=9.636m and a single-point max error of 32.765m --
+technically still passing on RMSE (the user's stated qualifying metric)
+but a real, large excursion the `need>=15` baseline never produced in
+any measured fragment this entire session. **This is exactly the
+"sometimes safe, sometimes not" cliff the pre-test warning predicted** --
+just not visible on a single run.
+
+**Hot-zone validation (frames 4000-4540, GT=586.2m) makes the picture
+more mixed still**:
+
+| | GetScaleFactor fix only | + need>=1 |
+|---|---|---|
+| fails | 94 | 84 |
+| resets | 48 | 46 |
+| coverage | 53.3m (9.1%) | 42.1m (**7.2%, worse**) |
+
+fails/resets both improved slightly, but coverage actually *dropped* on
+this session's hardest, most-tested segment, and only 1 of 2 fragments
+even produced a usable trajectory (the other had 0 keyframes).
+
+**Fourth data point -- longer 1-2500 validation (GT=1885.1m), the most
+statistically stable segment tested**: 10/10 fragments successfully
+aligned (no alignment failures, unlike every shorter test this
+sub-investigation ran), fails 214->168, resets 114->93, coverage
+775.2m(41.1%)->**931.8m(49.4%)**, and every fragment's RMSE stayed very
+safe (max 2.206m, nowhere near the trial-2 anomaly seen on the shorter
+segment).
+
+**Final synthesis across all four validation points**:
+
+| segment | need>=15 (baseline) | need>=1 | RMSE safety |
+|---|---|---|---|
+| 1-1000, trial 1 | 53.1% | 61.7% | clean (max 0.283m) |
+| 1-1000, trial 2 | 53.1% | 55.1% | one fragment 9.636m/max 32.765m -- still under budget, but a real excursion |
+| hot zone (4000-4540) | 9.1% | 7.2% (worse) | clean (max 4.533m) |
+| 1-2500 | 41.1% | **49.4%** | clean (max 2.206m) |
+
+**3 of 4 segments show real coverage improvement**, including the
+longest/most-stable test (1-2500: +8.3 percentage points, fails and
+resets both down substantially, 10/10 fragments cleanly aligned). Only
+the hot zone -- this session's established noisiest, hardest segment --
+showed a net loss, and only one of the four test *runs* (the 1-1000
+repeat trial) produced an RMSE excursion large enough to be a real
+concern, though it never actually breached the user's stated 20m budget.
+
+**Recommendation**: on balance, `need>=1` looks like a genuine, if
+imperfect, win -- particularly validated by the longer/more-stable
+1-2500 test. It is NOT risk-free (demonstrated real variance, one
+fragment came uncomfortably close to the budget's spirit even while
+technically passing it) and specifically underperforms on the hardest
+segment. This is a judgment call between "more coverage on average, with
+occasional larger (but still budget-compliant) errors" vs. "the
+originally-tuned 15-match bar, more consistent but leaving real coverage
+on the table." Reported to the user for a final decision rather than
+silently adopted, given the demonstrated risk profile differs
+qualitatively from the clean, unconditional GetScaleFactor win.
+
+### Part 56 continued: user's interaction hypothesis -- does need>=1 rescue the road-density recovery attempts? No.
+
+Sharp follow-up from the user: all four road-density recovery attempts
+(parts 51, 55, DistributeOctTree, CLAHE) were tested against the
+*strict* `need>=15` accept gate -- maybe that gate, not the weak
+candidates themselves, was what rejected the resulting tracking before
+it could pay off. Worth testing given `need>=1` alone just showed the
+system tolerates low match counts reasonably well via BA.
+
+**Tested**: `kContrastThreshold` 0.04->0.02 (part 51's original,
+simplest failed value) *combined with* `need>=1` (kept from the prior
+experiment), on frames 1-1000.
+
+| | need>=15+0.04 (orig. baseline) | need>=1+0.04 (trial 1) | need>=1+0.04 (trial 2) | need>=1+0.02 (this combo) |
+|---|---|---|---|---|
+| fails | 53 | 50 | 56 | 59 |
+| resets | 29 | 27 | 32 | 34 |
+| coverage | 53.1% | 61.7% | 55.1% | **43.2%** |
+| outlier rate | 6.6% | 6.4% | -- | 6.9% |
+
+**Result: worse than need>=1 alone (both trials) AND worse than the
+original baseline.** This cleanly refutes the interaction hypothesis --
+lowering the contrast threshold is independently harmful regardless of
+how permissive the downstream acceptance gate is. The four-way
+conclusion from earlier in part 56 stands on firmer footing now: the
+road-density recovery failures are intrinsic to the resulting
+descriptors' quality (weak local contrast -> unstable/noisy SIFT
+descriptors), not an artifact of an overly strict acceptance gate
+rejecting otherwise-salvageable tracking. **Reverted** `kContrastThreshold`
+back to 0.04 (confirmed via grep and rebuild); `need>=1` left as-is
+(still the open, user-decision-pending state from the prior
+sub-investigation, unaffected by this specific negative result).
+
+## Current status (2026-07-19, parts 49-53 -- fast hot-zone SIFT tuning +
+## a real thread-safety bug found, but full determinism NOT achievable
+## cheaply)
+
+Per user request, switched to fast iteration: instead of full 4541-frame
+seq00 runs (~20-40min each), used `orbslam3_kitti_ate`'s existing
+`start-frame`/`max-frames` CLI args to test on **frames 4000-4540 (541
+frames)** -- identified as the highest raw-failure-density stretch in the
+whole sequence (105-107 `Fail to track local map!` events, ~19.8%, vs
+~10.4% sequence-wide). Target set by user: get the raw fail rate under 10%
+(full-run baseline without today's SIFT tuning: 484/4541=10.66%, from part
+48's destroy=9 run -- already very close).
+
+### Part 48 (destroy-threshold) final verdict, both full runs now complete
+`part43_run1` (destroy=5): 1492.4m/14 fragments, 483/4541=10.64% fails, 255
+resets, ~56min runtime, RMSE clean (max 1.016m). `part44_run1` (destroy=9):
+1388.6m/20 fragments, 484/4541=10.66% fails, 250 resets, ~38-40min runtime,
+RMSE clean (max 2.291m). **Fail rate is virtually identical between the
+two** (confirms destroy-threshold only affects what happens after a track
+is already lost, not the underlying loss frequency). Coverage: destroy=5
+slightly higher (+7.5%, within this session's noise band). **Kept
+destroy=9** for its ~40% faster runtime given the coverage difference isn't
+clearly real.
+
+### Hot-zone SIFT-tuning experiments (parts 49-52) -- results now suspect, see part 53
+Ran in rapid succession on the primary 541-frame hot zone:
+- baseline (pre-today's-SIFT-changes): 107 fails
+- part 49: denser keyframe insertion (`kKeyFrameMaxFrames` = half of
+  `mMaxFrames`, decoupled from the shared `mMaxFrames` used elsewhere) --
+  not isolated on its own, folded into later combined tests.
+- part 50: retargeted an EXISTING but misfiring "dynamic density boost"
+  mechanism (`SetDynamicDensity`, 2x nFeatures + contrast threshold
+  0.04->0.02) from angular velocity (rotation/turns -- which part 45's
+  GT-pose correlation had already REFUTED as a failure cause) to
+  translation velocity (speed -- which part 45 confirmed correlates),
+  reusing the same calibrated threshold (0.087, true measured p90 from
+  part 47). Result: 102 fails (best single-run result of this batch).
+- part 51: same boost mechanism but ALWAYS ON (unconditional) instead of
+  velocity-gated -- **confirmed worse (120 fails) across 4 independent
+  samples** (primary zone + 3 other segments/a large 1500-frame sample, all
+  trended worse), not just noise. Reverted to velocity-gated.
+- part 52: `kEdgeThreshold` 10.0->20.0 (SIFT's edge-keypoint rejection
+  threshold, stock/untouched all session) combined with the part 50 boost
+  -- gave 107 fails, i.e. back to baseline, apparently cancelling the
+  boost's benefit. Reverted to stock 10.0.
+
+### Part 53: found a real thread-safety bug, but it's NOT the (whole) explanation
+**Repeat-testing the EXACT SAME config** (part 50's velocity-gated boost,
+edgeThreshold reverted) on the primary hot zone gave **102, then 111, then
+102** across three consecutive identical runs -- i.e. **most of the
+parts 49-52 comparisons above (differences of 5-18 fails) are likely
+noise, not real signal**, except part 51's always-on-boost result (120),
+which is large and consistent enough across 4 independent samples to
+trust.
+
+**Root cause found and partially fixed**: `DUtils::Random::RandomInt()`
+(and `RandomValue<T>()`) in `third_party/DBoW2/DUtils/Random.cpp/.h` use
+plain C `rand()`, which has a single global, non-thread-safe state.
+Sim3Solver/MLPnPsolver RANSAC calls happen from multiple concurrent
+threads (Tracking, LocalMapping, LoopClosing) -- concurrent unsynchronized
+`rand()` calls are undefined behavior, and this fork calls into
+RANSAC/relocalization *far* more often than stock ORB-SLAM3 (hundreds of
+times per run, vs. stock's near-zero given only 3 total resets), so the
+race gets exercised constantly here specifically. **Confirmed:
+`third_party/ORB_SLAM3` (original, untouched) has its own separate
+`Thirdparty/DBoW2` copy** (same underlying bug, but essentially never
+triggered given how rarely it loses tracking) -- this fix does not touch
+it. **Fix applied**: added a `std::mutex` guarding all `rand()` access
+points in `Random.h`/`Random.cpp` (`RandomInt`, `RandomValue<T>`, and the
+`SeedRand*` functions) -- kept, this is a genuine correctness fix
+regardless of the rest of this investigation's outcome, and does not
+change RANSAC's own sampling behavior (still draws many random subsets per
+call), only makes the draw *sequence* reproducible for given input instead
+of thread-scheduling-dependent.
+
+**But the mutex fix alone did NOT achieve full determinism**: two
+back-to-back identical runs still gave 124 vs 94 (worse spread than
+before). Tried adding `cv::setNumThreads(1)` (ruling out OpenCV-internal
+parallelism in SIFT extraction) on top -- also inconclusive: 85 vs 109 on
+two more identical runs, plus it halved CPU throughput. **Reverted
+`setNumThreads(1)`** (cost not justified without a clear payoff); **kept**
+the `DUtils::Random` mutex (real fix, no downside).
+
+**Conclusion**: the remaining nondeterminism is almost certainly rooted in
+this project's own multi-threaded architecture itself (Tracking/
+LocalMapping/LoopClosing racing on real wall-clock-timing decisions, e.g.
+"is local mapping idle", exact keyframe-insertion timing, when background
+loop-closing checks land relative to tracking frames) -- not practical to
+eliminate without full per-frame thread synchronization, which would
+defeat the purpose of having separate threads and would cost far more
+performance than it's worth. **Not pursuing further** -- from here,
+comparisons need repeat trials (2-3 runs minimum) to trust anything smaller
+than roughly a 15-20-fail swing on this 541-frame hot zone (the observed
+noise floor: 85-124 range across 6 same-or-similar-config samples).
+
+**Practical takeaway for the parts 49-52 SIFT experiments above**: only
+part 51's always-on-boost-is-worse finding should be trusted as-is (large,
+multi-sample-consistent effect). Part 50's velocity-gated boost (102) and
+part 52's edgeThreshold result (107) need repeat-trial reconfirmation
+before being trusted as real wins/losses -- queued as next steps.
+
+**Repeat-trial reconfirmation of part 50 (part 53 continued)**: 5 samples
+of the velocity-gated boost config on the primary hot zone: 102, 111, 102,
+114, 114 -- mean 108.6, essentially identical to the single baseline
+sample (107). **Conclusion: the velocity-gated density boost has NO
+measurable real effect here** -- the original "102" that motivated parts
+50-52 was a lucky low draw within the noise band, not a real win. Per
+user's direction, stopped shallow SIFT parameter tuning at this point.
+
+## Part 54: direct SIFT-vs-ORB comparison overturns the parts 45-53 premise
+
+User redirected: instead of more indirect SIFT parameter tuning, directly
+measure whether SIFT is actually worse than ORB at the thing that matters
+(cold-start tracking survival), using stock (untouched) ORB-SLAM3 as a
+live comparison, not just historical statistics.
+
+**Method**: `orbslam3_kitti_ate` (links against the untouched
+`third_party/ORB_SLAM3`, NOT the SIFT fork) shares the same
+`analyze/orbslam3_kitti_ate.cpp` source as the SIFT tool, including the
+`start-frame`/`max-frames` CLI args -- rebuilt it fresh (was stale).
+Confirmed `settings_sift/KITTI00-02-sift.yaml` works for it directly (the
+camera calibration + `ORBextractor.nFeatures/scaleFactor/nLevels/
+iniThFAST/minThFAST` params are descriptor-agnostic; extra SIFT-only keys
+are just ignored with harmless "optional parameter does not exist"
+warnings). Ran stock ORB-SLAM3 on the **exact same 541-frame cold-start hot
+zone** (start-frame=4000) used for every SIFT-fork hot-zone test this
+session.
+
+**Result: stock ORB got 124 fails on the first run, then 276 on a repeat**
+-- both well within or *above* the SIFT fork's established range on this
+same segment (85-124, mean~108.6 across 5 samples). RMSE was also
+notably worse than typical SIFT-fork fragments: 17.674m and 6.180m
+respectively (still under the 20m budget, but far from the sub-1m numbers
+typical of SIFT-fork fragments elsewhere), over much shorter paths
+(239.2m and 114.5m) than the SIFT-fork's usual hot-zone-adjacent full-run
+fragments.
+
+**This overturns the working premise of parts 45-53.** Stock ORB-SLAM3's
+famous "only 3 resets across the whole 4541-frame run" statistic comes
+from starting at frame 0 with a fresh map that has the *entire rest of the
+sequence* to mature into a large, hundreds-of-keyframes map before ever
+reaching a hard segment. When forced to cold-start AT frame 4000 (the same
+condition every SIFT-fork hot-zone test used), stock ORB is **not**
+meaningfully more robust than the fork -- if anything, this small sample
+suggests it may be worse. **The dominant factor is very likely map
+maturity/fragility itself, not descriptor choice (SIFT vs ORB)** -- a
+young, sparse map is fragile regardless of which feature type populates
+it. This directly supports the "domino effect" hypothesis floated earlier
+in the session (small maps are inherently more vulnerable to routine
+per-frame variance) over the "SIFT has worse frame-to-frame repeatability
+than ORB" hypothesis that parts 45-53 were built on.
+
+**Reframed conclusion**: this fork's much worse *full-run* statistic
+(240+ resets vs stock's 3) is best explained not by SIFT being a weaker
+descriptor, but by this fork spending far more of its total runtime in
+fragile/cold-start mode than stock ORB ever does -- which is exactly what
+the *earlier* parts of this session (30, 34/35/48 destroy-threshold,
+36-38 Sim3Solver fix, fail-fast recovery) were already working to fix, by
+making cold-start episodes shorter/cheaper and preventing small maps from
+being thrown away unnecessarily. Parts 45-53's pivot toward "fix SIFT
+itself" was a reasonable hypothesis given the evidence available at the
+time (search-radius th=1 being shared with stock was suggestive), but this
+direct head-to-head test says it was very likely the wrong lever. Not
+pursuing further SIFT-specific parameter tuning; returning attention to
+map-maturity/survival-time levers, now with this important caveat in mind
+for interpreting any future stock-vs-fork comparison.
+
+### Part 54 continued: progressive ORB-vs-SIFT comparison from the TRUE sequence start reveals a real, worsening, segment-length-dependent gap
+
+Per user request, ran BOTH stock ORB and the SIFT fork (matched settings,
+nFeatures=5000 both) on growing prefixes of the sequence starting at frame
+0 (the actual, non-artificial start both systems use in real operation) --
+`orb_seg1_<N>`/`sift_seg1_<N>` in scratchpad, `<N>` = 500/1000/1500.
+Computed true GT path length for each prefix directly from `poses/00.txt`
+to get real coverage %, not just raw meters.
+
+| frames | GT path | SIFT fails | SIFT coverage | SIFT % | ORB fails | ORB coverage | ORB % |
+|---|---|---|---|---|---|---|---|
+| 1-500  | 359.4m  | 29  | 213m   | 59.3% | 91  | 217.6m | 60.5% |
+| 1-1000 | 715.2m  | 67  | 320m   | 44.7% | 152 | 533.6m | 74.6% |
+| 1-1500 | 1091.8m | 132 | 423.2m | 38.8% | 153 | 904.1m | 82.8% |
+
+**At frame 500 the two are roughly even. By frame 1500, ORB covers over
+4x SIFT's percentage of the same growing path, and the gap is still
+widening.** SIFT actually has consistently *fewer raw* "Fail to track
+local map!" events than ORB at every length (29 vs 91, 67 vs 152, 132 vs
+153) -- yet ends up covering far less of the path. This is the same
+"raw fails vs formal resets" distinction below explains.
+
+**Important caveat**: these SIFT runs include every fork-specific change
+from this whole session (fail-fast timeout, destroy-threshold=9,
+velocity-adaptive search radius, RNG mutex, etc.); the ORB runs are
+completely unmodified stock `Tracking.cc`. So this compares "patched SIFT
+fork" against "unpatched stock ORB," not descriptor-only.
+
+**Also important**: the historical "stock ORB: 3 resets, 6.4-10.7m ATE
+over the full run" figure (cited in earlier parts of this session) was
+measured at `nFeatures=2000` via the GUI app (DEBUGGING.md part 21 notes
+`settings_sift/KITTI00-02-sift.yaml` started as a copy of a shared
+`KITTI00-02.yaml` with nFeatures raised 2000->3000, later further raised
+to 5000 over subsequent sessions) -- NOT at today's `nFeatures=5000`/this
+CLI tool combo. That figure is not directly comparable to today's segment
+tests; a fresh nFeatures=2000-for-both comparison is queued to check
+whether SIFT's per-match quality edge (7.9% outlier rate, measured
+earlier) shows up more clearly at lower feature density.
+
+### Part 55: hunting the real cause of the reset-frequency gap (isolate-and-attack, one variable at a time)
+
+**Key metric correction**: raw "Fail to track local map!" count is
+misleading -- it conflates (a) how often tracking *newly* breaks with (b)
+how many repeated failed-recovery attempts occur *within* one episode
+before it resolves (which scales with however long the recovery window
+is). The clean metric is **reset count** (`Reseting active map` = episode
+conclusions). On frames 1-1000: **ORB = 6 resets. Every SIFT-fork variant
+tested so far resets 3-6x more often**, regardless of which threshold was
+tuned:
+
+| config (frames 1-1000) | fails | resets | coverage | fragments |
+|---|---|---|---|---|
+| baseline (need>=15, timeout=0.1f, gate=35, destroy=9) | 67 | 33 | 320m (44.7%) | 6 |
+| timeout 0.1f->3.0f (matches stock's own value) | 285 | 18 | 286.6m (40.1%) | 4 |
+| need>=15->30 (matches stock's own value) | 101 | 36 | 340.1m (47.6%) | 6 |
+| post-reloc gate 35->50 (matches stock's own value) | 85 | 36 | 290.1m (40.6%) | 5 |
+| **stock ORB (for reference)** | 152 | **6** | 533.6m (74.6%) | 3 |
+
+**All three reversions to stock's own literal threshold values made
+coverage WORSE on this segment**, not better -- confirms parts 26-32's
+original tuning conclusions hold even at this shorter segment length, not
+just full-sequence. But none of them closed the reset-frequency gap either
+(best case 18 resets, still 3x stock's 6). **Diffed the entirety of
+Tracking.cc against stock** (`third_party/ORB_SLAM3` vs
+`third_party/ORB_SLAM3_SIFT`) -- confirmed these 4 numeric thresholds
+(timeout, destroy-threshold, need-inliers, post-reloc gate) are the
+*complete* set of logic-level differences in that file; all four are now
+individually tested against their stock values and rejected as the
+dominant cause.
+
+**Next candidate examined**: `ORBmatcher.cc`'s `TH_HIGH`/`TH_LOW`
+(100557.0f/46778.0f for SIFT's squared-L2 distance, vs stock's
+100/50 for ORB's Hamming distance -- necessarily different scales, not
+directly comparable) -- confirmed these were data-driven-calibrated (true
+match distance's own 95th/99th percentiles, per the inline comment), not
+an obvious guess/bug. Not yet fully diffed the rest of `ORBmatcher.cc`,
+`KeyFrameDatabase.cc`, `LocalMapping.cc`, or `Optimizer.cc` against stock
+-- queued as the next investigation surface. Also not yet tried: directly
+instrumenting and comparing how many frames each of ORB/SIFT spend in
+`NOT_INITIALIZED` state and how many distinct mono-init attempts each
+needs per successful init, to check whether the fork's re-init process
+itself (not just post-init survival) is less reliable than stock's under
+matched conditions.
+
+**Status for continuation**: the reset-frequency gap (SIFT resets 3-6x
+more often than stock ORB even after matching every Tracking.cc threshold
+to stock's own values) remains unexplained. Per user's standing
+instruction, treat this as a real, likely-fixable fork-specific issue, not
+an inherent SIFT weakness (matches quality is confirmed fine -- 7.9%
+outlier rate) -- continue the systematic diff-and-isolate hunt through the
+remaining un-diffed files before concluding otherwise.
+
+**Architectural diff sweep**: `LocalMapping.cc` diffs against stock are
+diagnostic-only (no logic changes). `KeyFrameDatabase.cc` diffs
+substantially (1033 lines) -- but that's the expected DBoW2->VLAD
+architectural swap (this fork's place-recognition mechanism), not
+obviously a bug by itself.
+
+**Hypothesis tested and REFUTED on this specific segment**: suspected
+VLAD's weaker candidate retrieval (dbCandidates=0 74-94% of the time,
+measured in earlier full-sequence analysis) might explain the reset gap.
+**Directly measured on frames 1-1000: dbCandidates=0 in 0/20 attempts
+(0%), and relocOK=1 in 10/28 attempts (35.7%)** -- both far healthier than
+the degraded-map-era full-sequence numbers. VLAD candidate retrieval is
+NOT starved here; this hypothesis does not explain the gap on this
+segment (it may still be relevant later in a full run, once maps are more
+fragmented, but is not the cause of the *early-segment* gap being studied
+here).
+
+**More precise finding**: of the 33 resets on this segment, only 18 go
+through the `RECENTLY_LOST` timeout path (a real recovery attempt that
+eventually gives up). **The other 15 (45%) go straight to `LOST` without
+ever attempting relocalization at all** -- this happens when
+`pCurrentMap->KeyFramesInMap()<=10` at the moment tracking breaks (see
+Tracking.cc's `else if(pCurrentMap->KeyFramesInMap()>10) mState =
+RECENTLY_LOST; else mState = LOST;`) -- i.e. these are maps that die
+*before they even reach 10 keyframes*, too young to ever get a
+relocalization chance. **This reframes the real open question**: not
+"why does relocalization fail" (it doesn't, on this segment) but **"why
+do freshly-initialized maps die so often before reaching 10 KFs in the
+first place"** -- back to raw per-frame tracking robustness immediately
+after `CreateInitialMapMonocular()`, not the recovery/relocalization
+machinery. Queued as the next investigation thread.
+
+**Quantified the young-map churn directly**: the 15 immediate-LOST resets
+died with KF counts of {2, 3, 4, 4, 4, 5, 5} -- averaging under 4
+keyframes, essentially dying moments after being born. **122 total
+"new map"/mono-init-related events occurred in just 1000 frames (roughly
+one new map attempt every 8 frames on average) vs only 33 formal
+`Reseting active map` events** -- most of that churn (122-33=89 events)
+is `CreateMapInAtlas()` fragment-preservations or repeated failed
+mono-init attempts, not full destructive resets, but the sheer volume
+confirms the "domino effect" hypothesis floated much earlier in this
+session (small/young maps are inherently fragile, and the system is
+constantly cycling through short-lived attempts) with hard numbers for the
+first time. **Not yet root-caused further**: still open whether (a)
+mono-init itself produces a weaker/smaller initial map for SIFT than for
+ORB under matched conditions (fewer initial map points, worse baseline),
+(b) the immediate post-init tracking (before 10 KFs accumulate) is more
+fragile for some SIFT-specific reason, or (c) something else entirely.
+
+### Session status summary (for continuation) -- extensive investigation today, root cause of the reset-frequency gap still open
+
+**What was tried and ruled out today** (all measured, not assumed):
+shallow SIFT parameter tuning (density boost velocity-gated: no real
+effect once repeat-trials accounted for noise; density boost always-on:
+confirmed worse; edgeThreshold 10->20: no effect/cancelled the boost);
+reverting 3 of the 4 fork-specific Tracking.cc thresholds to their
+literal stock values (RECENTLY_LOST timeout 0.1f->3.0f, post-reloc gate
+35->50: both measured WORSE on the 1-1000 segment; inlier-accept bar
+15->30: modest +6.3% improvement, kept as a minor win); the DUtils::Random
+thread-race (real bug, fixed with a mutex, kept, but did not achieve full
+determinism -- remaining variance is architectural, from the
+Tracking/LocalMapping/LoopClosing thread interplay itself); VLAD
+candidate-starvation as the explanation for the reset gap (directly
+measured on this segment: dbCandidates=0 only 0/20, relocOK 35.7% --
+both healthy, ruling this out for the *early*-segment gap specifically).
+
+**What was confirmed real**: stock ORB-SLAM3, given a fair matched-start
+comparison (both cold-starting at frame 0, nFeatures=5000 both), clearly
+outperforms the SIFT fork's coverage % of the true GT path once segments
+grow past ~500 frames (500: roughly even ~60%; 1000: ORB 74.6% vs SIFT
+44.7%; 1500: ORB 82.8% vs SIFT 38.8%, still widening). The SIFT fork
+resets 3-6x more often than stock ORB on the same segment regardless of
+which individual threshold is tuned. ~45% of the fork's resets are maps
+that die before reaching 10 keyframes (average <4 KFs at death) -- young
+maps are extremely fragile, with ~122 new-map-related events in just 1000
+frames.
+
+**What's still unknown**: the specific mechanism causing SIFT-fork maps
+to die so young so often, when: match quality is fine (7.9% outlier
+rate), relocalization candidate availability is fine on this segment
+(0% dbCandidates=0), and every individually-tunable Tracking.cc threshold
+has been matched to stock without closing the gap. **User's standing
+instruction**: continue treating this as a real, fixable fork-specific
+issue, not inherent SIFT inferiority.
+
+### Part 55 continued: direct raw-keypoint-count measurement -- real gap found, but the obvious fix (lower contrast threshold) makes it WORSE
+
+Added a matched `[raw-keypoints] id=%lu N=%d` diagnostic to BOTH
+`third_party/ORB_SLAM3_SIFT/src/Frame.cc` and `third_party/ORB_SLAM3/src/
+Frame.cc` (same line, right after `N = mvKeys.size()` in the monocular
+constructor) -- this had never been directly measured all session (all
+prior analysis was downstream match/tracking success, not raw detection
+yield). Ran both on identical frames 0-200 (`nFeatures=5000` both):
+
+| | mean | min | max |
+|---|---|---|---|
+| SIFT | 3860.7 | 2354 | 5751 |
+| ORB  | 5843.7 | 4916 | 16030 |
+
+**SIFT extracts only ~66% of ORB's mean keypoint count, and its worst
+frame (2354) drops to under half the nFeatures=5000 target, while ORB's
+worst frame (4916) stays close to/above its own target.** This is a real,
+concrete, well-evidenced gap -- the most direct evidence all session that
+SIFT's detector is genuinely yielding fewer usable keypoints than ORB's
+under matched settings, particularly in KITTI's harder (low-texture/
+blurred) frames.
+
+**The obvious fix -- lower `kBaseContrastThreshold` (0.04, the value
+`SetDynamicDensity` actually uses in normal/non-high-speed operation,
+overriding `ORBextractor.cc`'s constructor default per earlier findings)
+-- was tried at 0.01 and measured WORSE, not better**: mean keypoint count
+did rise (3860.7->4598.2, closer to ORB) but coverage collapsed (67
+fails/33 resets/320m/44.7% -> 105 fails/58 resets/103.3m/14.4%) and the
+WORST-frame count got even lower (1409, below the original 2354's own
+floor). This is the SAME failure mode as part 51's always-on density
+boost (which also lowered contrast threshold, to 0.02, and was also
+confirmed worse across 4 independent samples): **letting more
+borderline/weak keypoints through dilutes match quality rather than
+helping -- tried at two different threshold values (0.02 and 0.01), both
+made things worse.** Reverted to stock 0.04.
+
+**Honest conclusion on the SIFT-tuning avenue overall (parts 49-52, 55)**:
+every single SIFT-extraction-parameter variant tried this session --
+velocity-gated density boost, always-on density boost, edgeThreshold
+raised, base contrast threshold lowered (twice, at two different
+values) -- either did nothing measurable or made things actively worse.
+**None found a real win.** The raw-keypoint-count gap (SIFT 66% of ORB's
+yield) is real and confirmed, but simply loosening the detector's
+acceptance criteria is NOT the fix -- the extra keypoints let through are
+low-quality and hurt more than the count increase helps. The actual
+reason SIFT's detector yields fewer *good* keypoints than ORB's on these
+frames remains unexplained -- possibilities not yet investigated: SIFT's
+octave/scale-space structure inherently produces fewer stable extrema on
+this class of imagery regardless of the contrast threshold (a deeper
+property of DoG detection vs FAST-corner detection, not fixable via a
+threshold knob); the quadtree-based spatial distribution step (shared
+code between ORB and SIFT extraction, per earlier session history)
+interacting differently with SIFT's octave/layer structure; or something
+in how candidate keypoints get selected/ranked before the final
+nFeatures cutoff. This is a legitimate place to pause the SIFT-parameter
+rabbit hole -- further progress here likely needs either accepting
+nFeatures increases (tried earlier today at 6000-10000, real but
+computationally expensive due to Sim3Solver/merge cost scaling, not
+purely a "free" fix either) or a genuinely different investigation
+(e.g. visualizing/comparing actual detected keypoint locations between
+SIFT and ORB on the same hard frame) rather than more blind threshold
+sweeps, which have now been tried in essentially every direction (higher,
+lower, gated, ungated) without success.
+
+**One more data point before pausing this thread**: computed the actual
+`SearchLocalPoints()` match RATE (not just raw detection count) from
+existing SIFT logs -- out of local map points that ARE geometrically
+in-frustum (`nToMatch`, i.e. should be visible), only **10.0%
+(29620/297394 across 877 samples) actually get matched** to a keypoint in
+the current frame. This is a strikingly low hit rate for points the
+system already believes should be visible, and is a genuinely new,
+not-yet-compared-against-ORB data point -- no equivalent diagnostic was
+added to stock ORB for this specific ratio, so it's not yet known whether
+this is worse than ORB's own rate or a normal property of this kind of
+search. **Flagged as the most promising concrete next lead for a future
+session**: add the same `nToMatch`/`matched` diagnostic to stock ORB's
+`SearchLocalPoints()` call site and directly compare match RATES (not
+raw keypoint counts, which have already been shown to have a real but
+not-simply-fixable gap) between the two on identical frames -- this
+isolates whether the problem is in DETECTION (partially investigated,
+inconclusive/counterproductive fixes tried) or in MATCHING GIVEN
+detected keypoints (not yet investigated at all).
+
+## Session wrap-up (2026-07-19, end of this extended debugging session)
+
+**Confirmed, kept changes from this session** (destroy-threshold=9,
+fail-fast RECENTLY_LOST timeout=0.1f, post-reloc gate=35, monocular
+inlier-accept bar=15, `DUtils::Random` thread-safety mutex, velocity-gated
+search-radius widening at th>=5 when translation-velocity>0.087,
+cross-map relocalization via `Atlas::ChangeMap()`, Sim3Solver NaN-bug fix
+with an absolute inlier floor of 6, nFeatures=5000) -- these represent the
+session's real, measured wins earlier in the day (coverage roughly
+2.3-3.7x the session's starting ~498.6m baseline on various full-sequence
+measurements, though noise band is wide -- see parts 30-48 for the
+individually-validated pieces).
+
+**Not adopted** (tested and found neutral-to-harmful, reverted): SIFT
+density-boost tuning in all forms tried (velocity-gated: no real effect;
+always-on: confirmed worse; contrast threshold lowered further, twice:
+both worse), edgeThreshold raised (cancelled the boost's marginal
+benefit), RECENTLY_LOST timeout and post-reloc gate reverted to stock's
+own literal values (both measured worse for this fork specifically,
+despite being stock's own numbers -- confirms this fork's own tuning,
+not stock's, is locally optimal for whatever's different about it
+architecturally).
+
+**Root cause of the fork's higher reset frequency vs stock ORB**: NOT
+fully found. Ruled out: SIFT match quality (fine, 7.9% outlier rate),
+relocalization candidate starvation on early segments (fine, 0%
+dbCandidates=0), every individually-tunable Tracking.cc threshold
+(matched to stock, all measured neutral-or-worse). Confirmed real but not
+yet actionably fixed: SIFT's raw keypoint yield is ~66% of ORB's under
+matched settings (3860.7 vs 5843.7 mean/frame), and the `SearchLocalPoints`
+match rate is a low 10.0% -- both real, both unexplained at the
+"why" level, both worth a dedicated future investigation with more
+targeted diagnostics (visualizing actual keypoint locations, comparing
+match rates head-to-head against stock ORB) rather than more blind
+threshold sweeps.
+
+## Current status (2026-07-18, part 29 -- goal redefined by user, two
+## coverage-first changes made, NOT yet measured).
+
+### Part 27/28 repeat-trial result (resolves part 26's open question)
+The two `gate35_trial1`/`gate35_trial2` repeat runs queued at the end of part
+26 both finished: **497.7m** (9/10 fragments aligned, 1 alignment-failed) and
+**499.6m** (6/7 fragments aligned, 1 alignment-failed) -- within 0.4% of each
+other, both noticeably above the earlier single-run 478.7m gate35 data point
+(~4% higher). Conclusion: run-to-run variance at fixed settings is real but
+small (~4%, consistent with the unseeded-RANSAC-RNG finding from the
+2026-07-11 investigation trail), and it does NOT explain the 478.7m(gate35)
+->314.4m(gate30) gap (~34% relative), so that specific regression from
+loosening 35->30 is very likely a real effect, not noise. Gate stays at 35 in
+the code as the confirmed-best value from that specific experiment; superseded
+below by a much larger goal change.
+
+### Goal redefined by user (this session)
+User has explicitly deprioritized per-pose accuracy in favor of maximizing
+continuous path coverage: **target is 100% of the KITTI seq00 path** (current
+measured coverage is only ~497-500m of the sequence's ~3724m total path
+length, i.e. ~13%); accuracy tolerance is now **<20m ATE RMSE** (vs. the
+~0.03-0.4m currently measured per-fragment -- a >40x looser bar). User
+explicitly authorized aggressive code/threshold changes, including removing
+filters outright, to chase this. This changes the optimization target: the
+part 19-28 work was tuning gates by small increments to protect accuracy;
+that constraint is now mostly lifted, so the next moves trade accuracy for
+continuity much more aggressively than before.
+
+Framing for future sessions: literal 100% is an extremely ambitious bar for
+monocular SLAM on a real 3.7km driving sequence (fragmentation on
+never-revisited terrain is structurally very hard to fully eliminate) --
+report actual measured coverage honestly rather than claiming 100% if it
+isn't hit, but treat "push coverage as high as possible" as the real
+day-to-day objective under the new <20m RMSE budget.
+
+### Two changes made this part, NOT yet measured (need a full seq00 run)
+
+1. **`Tracking.cc` RECENTLY_LOST timeout, 3.0f -> 20.0f seconds** (non-IMU
+   monocular path, ~line 2046). Every time this timeout fires it forks a new
+   Atlas map fragment (`CreateMapInAtlas()`) or destroys the map outright
+   (`ResetActiveMap()` if <10 KFs) -- on never-revisited terrain a forked
+   fragment can never merge back, so this is the single mechanism that turns
+   a transient tracking dropout into *permanent* coverage loss. Per the
+   in-code comment, `mTimeStampLost` is deliberately never renewed on a bare
+   dead-reckoning success, so the extended window only matters for the case
+   where both dead-reckoning AND relocalization keep failing every frame --
+   giving ~6.7x more attempts before giving up.
+2. **`Tracking.cc` base monocular inlier bar, `mnMatchesInliers<30` ->
+   `<15`** (~line 3248, the `need>=30`/now `need>=15` diagnostic). Unlike the
+   post-reloc gate (still 35, only applies within `mMaxFrames` of a
+   relocalization), this bar gates *every* monocular frame's TrackLocalMap()
+   success, so it's the highest-frequency trigger in the whole
+   death->fragment->coverage-loss chain from parts 26-28. 15 is still well
+   above the geometric minimum for a constrained pose (4-6), just noisier.
+
+Rebuilt successfully (`orbslam3_sift_kitti_ate`, warnings only, all
+pre-existing `%d`/`long unsigned int` format-string warnings unrelated to
+this change).
+
+### Part 29 result (measured) -- coverage flat, root cause found
+
+Full seq00 run (`part29_run1`): **484.4m over 8 aligned fragments** (9 total,
+1 alignment-failed with only 2 KFs), 128 total KFs, 31 raw "Reseting active
+map" events, all per-fragment ATE RMSE comfortably under the 20m budget
+(0.054-0.370m). Compared to the ~498.6m gate35 baseline (avg of the two part
+27/28 repeat trials, 497.7m/499.6m): **flat, actually ~3% lower**, i.e. within
+the already-established ~4% run-to-run noise band -- not a real improvement,
+despite reset *events* dropping 3x (99/95->31).
+
+**Why, confirmed by full-checkpoint stats on this run's log** (not
+speculation):
+- Dead-reckoning (`TrackWithMotionModel` during RECENTLY_LOST) succeeded
+  **14/3380 checks (0.41%)**.
+- Relocalization succeeded **22/3380 checks (0.65%)**.
+- `dbCandidates==0` (the KeyFrame database returns literally zero candidates,
+  not just non-matching ones) on **74.3%** of relocalization attempts.
+- Only **17 distinct RECENTLY_LOST episodes** occurred in the whole
+  4541-frame run, each burning **~198 frames (~19.8s) on average** -- i.e.
+  nearly the entire 20s budget, almost every time -- before timing out.
+
+**Conclusion**: extending the RECENTLY_LOST timeout doesn't help because
+recovery essentially never succeeds once triggered, regardless of how long
+you wait -- most of the time there is no candidate keyframe to relocalize
+against at all. The reset-event count dropped only because each
+already-doomed episode now takes ~6.7x longer to fail, not because more
+episodes succeeded. This directly confirms/refines the "survivorship
+paradox" hypothesis from part 26/28: giving a dying map more time doesn't
+rescue it, it just delays the same outcome while burning frames that could
+have gone toward a fresh mono-init attempt (known fast: ~2.3 frames average
+once attempted, part 26 measurement).
+
+**Part 30 change**: reverted the RECENTLY_LOST timeout **20.0f -> 1.0f**
+(more aggressive than the original 3.0f) -- fail fast and get back to a new
+init attempt sooner rather than waiting out a near-certain failure. Kept the
+short (not zero) window since DR/reloc do occasionally succeed (36 total
+real successes in part 29's run). The `need>=15` inlier-bar change from part
+29 is kept as-is (not yet independently isolated from the timeout change --
+today's priority is speed over full ablation per user's explicit direction).
+
+### Part 30 result (measured) -- big win, fail-fast theory confirmed
+
+Full seq00 run (`part30_run1`): **836.6m over 11 aligned fragments** (12
+total, 1 alignment-failed with 2 KFs), 238 total KFs. This is **+67.8% vs
+the ~498.6m gate35 baseline** and **+72.7% vs part 29's 484.4m** -- a real,
+large improvement, not noise (previously-established noise band was ~4%).
+Two fragments are now much larger than anything seen in prior parts:
+fragment 2 (58 KFs, 233.4m, ATE rmse 0.976m) and fragment 7 (42 KFs, 165.0m,
+ATE rmse 0.392m) -- the fail-fast restart cycle is letting maps grow
+substantially larger before dying, not just dying faster. All 11 fragments'
+ATE stayed well under the 20m budget (worst: fragment 10, rmse 2.427m/max
+7.933m, still >8x margin).
+
+Recovery-mechanism stats this run (for comparison to part 29's, note much
+lower absolute attempt counts since each episode is now capped at ~1s):
+dead-reckoning succeeded 34/1168 (2.9%, vs 0.41% in part 29), relocalization
+succeeded 41/1168 (3.5%, vs 0.65%). Both rates are higher, not lower, despite
+~3x fewer total attempts -- consistent with real recoveries clustering in the
+first ~1s of a dropout (part 29's extra 19s of waiting was pure dead weight,
+confirmed again here). 112 distinct TIMEOUT episodes occurred (vs part 29's
+17), each now failing fast instead of stalling ~198 frames.
+
+Still only ~22.5% of the full ~3724m sequence -- far from the 100% target,
+but the single largest coverage jump of the whole session. Confirms: **the
+death/restart *cycle time* was the dominant lever, not raw thresholds.**
+
+**Part 31 next step**: push further in the same direction -- reduce the
+RECENTLY_LOST timeout again (1.0f -> 0.3f) to test whether even faster
+fail/restart cycling keeps helping, since success is now known to cluster
+very early in a dropout and 1.0f (~10 frames) may still be leaving some
+dead time on the table. `need>=15` stays unchanged (still not isolated, not
+a priority right now given the timeout lever is clearly the dominant one).
+If 0.3f stops helping or hurts, that will bound where the fail-fast benefit
+saturates and it'll be time to pivot to a structurally different lever (the
+KeyFramesInMap()<10 destructive-reset-vs-fragment branch, or the
+dbCandidates=0 rate directly).
+
+### Part 31 result (measured) -- still scaling, but accuracy budget starting to matter
+
+Full seq00 run (`part31_run1`, timeout=0.3f): **1278.3m over 12 aligned
+fragments** (13 total, 1 alignment-failed with 3 KFs), 291 total KFs. **+52.8%
+vs part 30's 836.6m (1.0f)**, **+156% vs the ~498.6m gate35 baseline**. The
+fail-fast trend is still scaling, not saturated. 226 raw reset events, 158
+distinct TIMEOUT episodes (both up from part 30, as expected from faster
+cycling). Recovery success rates keep climbing too: DR 50/535 (9.3%, vs 2.9%
+at 1.0f), reloc 58/535 (10.8%, vs 3.5% at 1.0f) -- fully consistent with the
+"recoveries cluster in the first fraction of a second" model from part 30.
+
+**New signal worth flagging**: per-fragment ATE is now visibly degrading for
+some fragments, not just staying flat -- fragment 6 (19 KFs, 124.6m) came in
+at **rmse 8.099m / max 17.292m** and fragment 8 (59 KFs, 264.1m) at **rmse
+10.496m / max 30.050m**. Both are still under the 20m RMSE budget (the
+metric the user set the bar on), but fragment 8 is now roughly halfway to
+it, and its max error (30.050m) already exceeds 20m even though its RMSE
+doesn't. This is the accuracy-for-continuity trade becoming visible, not
+hypothetical anymore -- likely because larger/faster-cycling fragments
+(59-60 KFs now, vs 11-45 before) accumulate more scale/drift error before
+their next death, and/or because more Sim3-based map merges are happening
+(the two biggest fragments both look like merge products). Not yet
+root-caused which of those it is.
+
+**Implication for next steps**: the fail-fast lever clearly still has room
+(0.3f beat 1.0f by a large margin), so push further (e.g. 0.1f), but this is
+the first run where continuing to push blindly could plausibly start
+crossing the 20m RMSE line on some future fragment -- watch the per-fragment
+RMSE, not just total coverage, on the next iteration and be ready to back
+off the timeout (not abandon the whole direction) if any fragment's RMSE
+actually exceeds 20m.
+
+### Part 32 result (measured) -- timeout lever saturated around 0.1-0.3f
+
+Full seq00 run (`part32_run1`, timeout=0.1f): **1285.4m over 15 aligned
+fragments** (all 15 aligned successfully, none failed this time), 289 total
+KFs. Essentially flat vs part 31's 1278.3m (+0.55%, well inside the ~4%
+noise band) -- **the timeout lever has saturated**, pushing 0.3f->0.1f
+bought nothing further. Reassuringly, this run's per-fragment RMSE was much
+better than part 31's (max 1.449m vs part 31's 10.496m), confirming part
+31's high-RMSE fragments were run-to-run variance in a specific merge event,
+not a monotonic accuracy cost of a shorter timeout. **Kept timeout at 0.1f**
+(tied with 0.3f, no reason to revert). 238 raw reset events but only 15
+fragments actually formed -- **~94% of resets are now the destructive
+`KeyFramesInMap()<10 -> ResetActiveMap()` path** (Tracking.cc ~line 2059),
+not `CreateMapInAtlas()`. Net progress vs the gate35 baseline so far: **+158%
+coverage (498.6m -> 1285.4m)**, still ~34.5% of the full ~3724m sequence.
+
+### Part 33 change (NOT yet measured, higher risk than parts 29-32)
+
+Pivoted to a new lever per the saturation above. Root cause behind the
+persistent dbCandidates=0 stat (74-94% across every run this session):
+`KeyFrameDatabase::DetectRelocalizationCandidates` (KeyFrameDatabase.cc
+~line 518) filtered candidates to `pKFi->GetMap() == pMap` (current map)
+only. Since parts 30-32's fail-fast cycling means most active maps are now
+young/tiny (median map has very few of its own KFs), their own-map candidate
+pool is nearly always empty -- meanwhile the Atlas has accumulated 289 KFs
+across 15 fragments in part 32 alone that Relocalization() never even
+considers.
+
+**Changes**: (1) removed the same-map filter in
+`DetectRelocalizationCandidates`, so it can return candidates from any map
+in the Atlas; (2) in `Tracking::Relocalization()`, track which candidate KF
+actually wins (`pRelocWinnerKF`), and if it belongs to a different map than
+`mpAtlas->GetCurrentMap()`, call `mpAtlas->ChangeMap(pRelocWinnerKF->GetMap())`
+(the same mechanism LoopClosing uses after a successful map merge) before
+returning success, plus clear `mpLastKeyFrame` (mirrors the existing
+cleanup after `CreateMapInAtlas()`/`Reset()` elsewhere in this file, since
+it would otherwise point into the map being abandoned).
+
+**This is meaningfully riskier than parts 29-32**: those were pure
+threshold tuning; this touches map-consistency invariants (mCurrentFrame's
+pose and mvpMapPoints get set from the winning KF's map during PnP, but
+`mpAtlas`'s active-map pointer previously never moved to match -- this
+change closes that gap using ORB-SLAM3's own existing `ChangeMap()`, not a
+new mechanism, but it has not been exercised from this code path before).
+Added a `[reloc-crossmap]` diagnostic to confirm when it actually fires.
+**Before trusting any coverage number from this run, first check the run
+completed cleanly (reached `Shutdown` / `[atlas-coverage]` in the log, no
+crash) --if it crashed or the trajectory looks obviously corrupt, revert
+this change first** rather than treating a crash-truncated coverage number
+as a real result.
+
+### Part 33 result (measured) -- no crash, but inconclusive; repeat trial queued
+
+Full seq00 run (`part33_run1`) completed cleanly (reached `Shutdown`/
+`[atlas-coverage]`, no crash) -- the `ChangeMap()` mechanism is safe to run,
+at minimum. **1026.2m over 11 aligned fragments** (13 total, 2
+alignment-failed), 242 total KFs -- **20.2% lower than part 32's 1285.4m**.
+All per-fragment RMSE stayed comfortably under the 20m budget (worst:
+fragment 1 at 5.145m/max 9.811m).
+
+**But the cross-map mechanism itself only fired once in the entire
+4541-frame run** (`[reloc-crossmap] id=1585 switching active map to winner
+KF's map (id=0)`) -- meaning this run is *de facto* almost the same
+configuration as part 32 (timeout=0.1f) plus one extra event, not a
+meaningfully different experiment. This is expected, not a bug: VLAD
+candidate retrieval is a coarse visual-similarity filter, but actually
+*winning* relocalization requires passing `SearchByBoW` (>=15 matches) AND
+PnP RANSAC (>=50 verified inliers) against that candidate -- a much
+stricter bar that a genuinely different, non-revisited location will almost
+never satisfy. Legitimate loop-closure-quality opportunities are inherently
+rare in this sequence (consistent with part 25's "~1 merge/run" finding).
+So the 20.2% coverage gap here is far more likely **run-to-run noise under
+the fail-fast regime** (more RANSAC draws / relocalization attempts per run
+now than in the gate35-era runs where the ~4% noise band was established --
+plausibly a wider noise band applies now) than a real regression caused by
+this change.
+
+**Not reverting yet** -- the change is confirmed safe (no crash, no RMSE
+violation) and did almost nothing this particular run, so there's no
+evidence it's harmful, just insufficient evidence either way. Queued a
+repeat trial (`part33_run2`, same code, no changes) to separate noise from
+a real effect, same methodology as the gate35 repeat trials in parts 27/28
+-- do not conclude keep-vs-revert from a single run given this session's
+established noise floor.
+
+**Part 33 repeat trial result and final verdict**: `part33_run2` (identical
+code/config) came in at **1267.3m over 14 fragments** (275 total KFs, 2
+`[reloc-crossmap]` firings), only **-1.4% vs part 32's 1285.4m** -- solidly
+inside noise. This confirms `part33_run1`'s 1026.2m was a low-side outlier,
+not evidence the cross-map change hurts. **Verdict: keep the part 33
+change** -- it's measured safe (2 clean full-sequence completions, no
+crash), never violates the RMSE budget, and is at worst neutral on
+coverage; discarding a harmless change on a single noisy data point would
+have been the wrong call. **Kept both KeyFrameDatabase.cc's dropped
+same-map filter and Tracking.cc's `ChangeMap()` call in the tree.**
+
+Side finding: run-to-run noise under the fail-fast (0.1f-timeout) regime
+looks meaningfully wider than the ~4% band established earlier in the
+session under the old gate35/no-fail-fast regime -- `part33_run1` alone was
+a ~20% low outlier. More restart cycles per run (more independent RANSAC/
+relocalization draws) plausibly widens the variance. Treat single-run
+deltas under ~20% as inconclusive going forward under this regime; lean on
+repeat trials for any conclusion that matters.
+
+## Current status (2026-07-19, part 34 -- next lever: the destructive
+## `KeyFramesInMap()<10` reset branch)
+
+Pivoting per the plan above. Across parts 32-33, raw "Reseting active map"
+events vastly outnumber final Atlas fragments (e.g. part 32: 238 resets, 15
+fragments; part 33 run1: 258 resets, 13 fragments) -- meaning the large
+majority of resets hit the destructive branch in `Tracking.cc`'s LOST-state
+handler (`if (pCurrentMap->KeyFramesInMap()<10) { ResetActiveMap(); }`,
+~line 2059) that throws the young map away completely, rather than
+`CreateMapInAtlas()` which preserves it as a scored (if small) fragment.
+Evidence this threshold has real headroom: part 32 had an 8-KF fragment
+(fragment 14) align successfully, and part 33 run2 also had an 8-KF
+fragment (fragment 14) align successfully -- both below the current <10
+destroy-threshold, meaning maps in that exact size range CAN produce valid
+scored coverage when given the chance, they're just being destroyed before
+ever getting it under the current threshold's boundary.
+
+### Part 34 result (measured) -- new best, trending positive
+
+Full seq00 run (`part34_run1`, destroy-threshold=5): **1455.3m over 13
+aligned fragments** (18 total, 5 alignment-failed -- all exactly 2 KFs),
+275 total KFs, 5 `[reloc-crossmap]` firings. **+13-15% vs the ~1267-1285m
+confirmed range from parts 32/33** -- a new single-run best, though still
+inside the session's established ~20% noise band so not yet confirmed as a
+real effect on its own. Notable: fragment 9 reached **68 KFs / 521.1m
+pathLen**, the largest single fragment of the entire session by a wide
+margin (previous largest was part 31's 233.4m) -- a good sign that maps are
+now surviving substantially longer, not just cycling faster.
+
+All per-fragment RMSE stayed under the 20m budget, but variance is
+climbing further: fragment 10 hit **rmse=8.773m/max=21.372m** (max now
+exceeds 20m, though RMSE -- the metric the budget is actually defined on --
+does not) and fragment 9 hit rmse=5.211m/max=17.140m. This is a real,
+continuing trend (part 31 first showed it, part 34 pushes it further), not
+a one-off -- larger/longer-surviving fragments accumulate more drift before
+their next death, so pushing fragment sizes up is trading some accuracy
+margin for coverage. Still well inside the RMSE budget, but worth watching
+as further changes are layered on.
+
+Minor unexplained curiosity, not chased further (doesn't affect the
+coverage metric either way): all 5 alignment-failed fragments are exactly
+2 KFs, i.e. below the new destroy-threshold of 5 -- meaning something
+outside the specific LOST-state handler edited this part also creates Atlas
+fragments (there are several other `ResetActiveMap()`/`CreateMapInAtlas()`
+call sites in `Tracking.cc`, e.g. ~lines 1810-1852, 2244, 2412-2423, not
+touched this session). Functionally irrelevant here since a 2-KF fragment
+contributes 0m either way (destroyed or preserved-but-failed-alignment),
+so not investigated further this iteration.
+
+Queued a repeat trial (`part34_run2`) to confirm this is a real
+improvement and not noise, same methodology as parts 27/28 and 33.
+
+**Part 34 repeat trial result**: `part34_run2` came in at **1143.4m over 15
+fragments** (269 total KFs, 2 crossmap firings), all RMSE well under budget
+(max rmse 4.974m). Average of the two threshold=5 runs: **(1455.3+1143.4)/2
+= 1299.35m** -- essentially back in line with the ~1267-1285m range from
+parts 32/33, not a clearly-confirmed improvement. Run1's 1455.3m was
+apparently a high-side outlier, same pattern as part 33's noise finding.
+
+**Root cause found for the inconsistent effect**: there is a **second,
+separate, unedited threshold check** in `Tracking::Track()` at ~line 2410
+(`if(mState==LOST) { if(pCurrentMap->KeyFramesInMap()<=10) { ResetActiveMap();
+return; } ... CreateMapInAtlas(); return; }`, under the comment "Reset if
+the camera get lost soon after initialization"). This is functionally the
+same destroy-vs-preserve decision as the one edited in part 34 (~line
+2113), but reached via a different code path (checked again near the end
+of `Track()`, likely for the "still LOST after this frame's tracking
+attempt" case, distinct from the state-transition-moment check edited
+earlier) -- and it was **still at the old `<=10` threshold**, unchanged by
+the part 34 edit. This is the most likely explanation for why part 34's
+effect was inconsistent: only part of the destroy/preserve decision space
+was actually addressed.
+
+**Part 35 change**: lowered this second threshold too, `<=10` -> `<5`
+(matching part 34's already-edited check, for consistency), so the
+destroy/preserve decision is now uniformly changed in both places source
+code reaches it.
+
+**Part 35 result (measured)**: **1480.3m over 20 aligned fragments** (37
+total, 17 alignment-failed -- mostly tiny 2-9 KF fragments that got
+preserved by the lowered threshold but still couldn't align, expected given
+the alignment-failure floor established earlier), 442 total KFs. New
+single-run best (previous: part 34's 1455.3m). All RMSE stayed under the
+20m budget (worst: 9.717m). **Caveat: the process crashed AFTER printing
+all results and reaching "Saving keyframe trajectory..."** --
+`cv::Exception ... "Can't fetch data from terminated TLS container."` in
+OpenCV's `getData()`, a thread-local-storage cleanup issue during shutdown,
+not mid-run corruption (all coverage data was already fully computed and
+logged before the crash). Plausibly related to this run having far more
+Atlas fragments alive at once (37, the most of any run this session) than
+usual, stressing the shutdown teardown path harder. Not chased further this
+session since it doesn't affect measurement validity, but flagged as a
+latent robustness issue if this tool is ever used in an automated pipeline
+that doesn't tolerate a non-zero/crash exit code.
+
+### Deep dive requested by user: why does 77% frame-tracking-success only
+### yield ~35% path coverage?
+
+State-time breakdown across part 32/34 runs (via `[track-local-map]` and
+`[recently-lost]` diagnostic line counts against the known 4541-frame
+total): **~77% of frames track successfully**, **~4.8%** are RECENTLY_LOST
+recovery attempts (mostly failing, consistent with parts 29-30's findings),
+and the remaining **~18%** are NOT_INITIALIZED/re-init gaps -- close to the
+theoretical floor already (~2-3 frame average re-init latency, part 26,
+times ~240 resets/run ≈ the observed ~800 frames).
+
+The 77%-tracked vs ~35%-path-covered gap is NOT primarily a tracking
+problem -- it's that successful tracking gets chopped into **13-15
+disconnected Atlas fragments per run**, each independently scored, and they
+essentially never reconnect: **Sim3Solver-based merge/loop-closure
+convergence is at ~1.4% (18/1328 BoW-passing candidates converged in one
+part 34 checkpoint)**, with a striking bimodal `nInliers` distribution --
+**1310/1328 failures were EXACTLY 0 inliers** (not "a few below the 15
+minimum," literally zero every time), while the 18 successes cleanly
+cleared 16-26. This bimodality (never a partial/near-miss count) is the
+signature of an early bail-out, not generic geometric noise.
+
+**Root-cause hypothesis (not yet confirmed on a real run)**: in
+`Sim3Solver::SetRansacParameters` (Sim3Solver.cc ~line 123), `epsilon =
+minInliers/N` where `N` is the number of correspondences that survived the
+constructor's filtering (isBad/`GetIndexInKeyFrame` validity checks -- can
+be meaningfully smaller than the raw `numBoWMatches` count that gated entry
+into this code path, since that gate is checked in LoopClosing.cc BEFORE
+Sim3Solver's own constructor does its own additional filtering). If N ends
+up below `mRansacMinInliers` (15) for a real fraction of candidates,
+`epsilon>1`, so `1-pow(epsilon,3)` goes negative and `log()` of that is NaN
+-> `nIterations` is NaN -> `mRansacMaxIts = max(1, min(NaN, 300))` most
+likely collapses to 1 (working through `std::min`/`std::max`'s NaN-comparison
+semantics, both false, defaulting to the first/lower-bound argument) --
+meaning RANSAC gets essentially **one single random 3-point sample** for
+the whole candidate instead of up to 300, which would very plausibly
+produce exactly-0-inliers results the vast majority of the time (one random
+draw succeeding is unlikely, and there's no budget left to try again).
+
+**Part 36 diagnostic (built, NOT yet run)**: added an `[sim3-investigate]`
+fprintf in `SetRansacParameters` printing `N`, `minInliers`, `epsilon`,
+`nIterations`, `mRansacMaxIts` on every call, to directly confirm or refute
+the N<minInliers/NaN hypothesis before touching any actual logic (same
+evidence-first discipline as every other change this session). Queued to
+run after `part35_run1` finishes (avoiding CPU contention from running two
+full-checkpoint processes at once). **If confirmed**: the fix is almost
+certainly in LoopClosing.cc, either raising the BoW-match gate so more
+margin survives Sim3Solver's stricter filtering, or in Sim3Solver.cc
+itself, clamping `epsilon` to `<=1` (or `nIterations` to a sane floor like
+the existing `mRansacMaxIts` cap) instead of letting it go through NaN.
+**Potential impact if fixed**: reconnecting even a modest fraction of the
+currently-forever-disjoint 13-15 fragments per run into fewer, longer
+trajectories would directly increase scored coverage without needing any
+more raw tracking success than what's already being achieved (77% frames
+already track fine) -- this could be the highest-leverage remaining lever
+given how much of the "already successfully tracked" 77% is currently
+being wasted on fragments that never reconnect.
+
+### Part 36/37 result (measured) -- fix confirmed mechanically correct, but surfaced a real new risk
+
+**Mechanical confirmation**: post-fix `nInliers` distribution changed from
+the pre-fix bimodal (always exactly 0, or a clean 16+) to a healthy spread
+across 0-15+ -- direct proof RANSAC is now running its real iteration
+budget instead of collapsing to 1 attempt. The fix is technically correct.
+
+**Full-run result (`part37_run1`)**: Sim3Solver convergence rate **20/1059
+= 1.89%**, up from the pre-fix 1.4% (18/1328) but only modestly, not
+transformatively. Total coverage **1564.1m over 25 aligned fragments** (43
+total, 469 KFs) -- a new single-run best (+5.7% vs part 35's 1480.3m).
+
+**But: fragment 29 (103 KFs, the largest fragment of the entire session by
+far, `pathLen=483.7m`) came in at `rmse=21.161m` -- the first RMSE budget
+violation (>20m) all session.** Its error distribution is the signature of
+a bad merge/loop-closure correction, not ordinary drift: `mean=8.579m` vs
+`median=2.908m` (heavily skewed by a subset of badly-wrong poses) and
+`max=134.932m` (far beyond what smooth accumulated drift over 483m of path
+would plausibly produce). **If this one fragment is excluded (since it
+violates the user's explicit accuracy budget), this run's valid coverage
+is only 1564.1-483.7=1080.4m -- actually BELOW the ~1150-1480m range from
+parts 32-35, not an improvement.** Most of the apparent coverage gain this
+run came from one fragment that shouldn't be trusted.
+
+**Likely mechanism**: the part 36 fix clamps `mRansacMinInliers =
+min(minInliers, N)`, which correctly prevents the NaN/INT_MIN crash, but
+for candidates with very small N (e.g. 3-9, common per the part 36
+diagnostic data), it also means convergence now only requires ~N inliers
+-- i.e., "all or nearly all" of a tiny, weakly-constrained correspondence
+set. A handful of points all agreeing is much less statistically
+convincing than 15+ points agreeing, so this plausibly makes it too easy
+to accept a spurious/wrong merge for small-N candidates -- trading the
+"never converges at all" bug for a "sometimes converges on too little
+evidence" risk.
+
+**Not yet fixed**: the natural next refinement is adding an absolute
+inlier floor beneath the `min(minInliers, N)` clamp (e.g.
+`max(6, min(minInliers, N))` or similar) -- keeps the NaN fix (still bounds
+minInliers below N, so epsilon<=1 always, as long as N>=6) while requiring
+genuine multi-point geometric agreement before accepting any merge,
+preventing degenerate near-zero-evidence "full matches." Queued as part
+38, not yet implemented or tested.
+
+**Honest verdict for the user**: the Sim3Solver bug fix is real and
+mechanically confirmed, but its net effect on trustworthy coverage this run
+was NOT clearly positive once the one budget-violating fragment is
+accounted for -- it likely traded "never merges" for "occasionally merges
+on too little evidence." Keep the core NaN fix (still strictly better than
+the guaranteed-broken original), add the inlier floor refinement next, and
+re-measure before declaring this the session's biggest win.
+
+### Part 38 change and a major noise-band update
+
+Implemented the inlier-floor refinement: added `kMinAbsoluteInliers = 6` in
+`Sim3Solver::SetRansacParameters` -- below that, Sim3Solver refuses to
+attempt a fit at all (clean, deterministic failure: `mRansacMaxIts = 0`)
+rather than let tiny-N candidates "converge" almost by construction (for
+N==3, every RANSAC draw picks the same 3 points, so a 3-point fit trivially
+reports itself as internally consistent -- tiny-N was paradoxically the
+*easiest* way to spuriously pass, not the hardest). This keeps the part 36
+NaN fix (still bounds minInliers<=N when N>=6, so epsilon<=1 always) while
+requiring genuine multi-point agreement. Rebuilt, launched as `part38_run1`.
+
+**Before that finished, `part36_run1` (the PRE-FIX diagnostic-only build,
+i.e. same broken Sim3Solver as parts 29-35) finished and delivered a
+surprise: 1853.6m over 20 fragments -- a new session-best, and higher than
+part 37's post-fix 1564.1m, with ALL fragment RMSE clean (max 1.237m, no
+budget violations at all)**. This coverage came from a single naturally-
+long-surviving 106-KF fragment (no merge involved -- consistent with the
+fail-fast/destroy-threshold mechanism from parts 30/34/35, not Sim3Solver).
+
+**This is an important calibration update**: run-to-run noise under the
+current settings is wider than previously estimated (~20%) -- the honest
+range observed across parts 32-37 is now roughly **1080m (part 37 minus its
+bad fragment) to 1854m (part 36)**, well over 50% spread. This means **the
+Sim3Solver fix's true net effect on coverage cannot be judged from single
+runs at all** -- part 37 "improving" on part 35 and part 36 "beating" part
+37 are both plausibly just noise, not evidence for or against the fix.
+Given the user's explicit direction to prioritize coverage now and defer
+accuracy refinement, the practical takeaway is: **the fail-fast +
+destroy-threshold levers (parts 30/34/35) remain the best-evidenced,
+highest-confidence wins of the session** -- clean 1800m+ coverage is
+achievable through them alone. The Sim3Solver fix is kept (it's a genuine
+correctness fix, and the inlier floor should reduce its bad-merge risk) but
+should not be credited with the big coverage numbers without a proper
+multi-run comparison, which the noise band now shown to require.
+
+**Part 38 result (measured)**: **1367.4m over 19 fragments** (41 total, 403
+KFs), **all RMSE clean** (max 1.532m, no budget violations) -- the
+`kMinAbsoluteInliers=6` floor worked as intended, no repeat of part 37's
+bad-merge fragment. Convergence dropped to 8/792=1.01% (down from part 37's
+1.89%), consistent with filtering out the spurious tiny-N "successes"
+rather than losing genuine ones. **Verdict: keep both the NaN fix and the
+inlier floor** -- confirmed safe, no accuracy regressions, real correctness
+improvement over the original broken code, even though its net coverage
+contribution remains hard to isolate from the session's wide noise band.
+
+### Part 39: nFeatures 5000 -> 10000
+
+Per user's explicit direction to prioritize coverage now, accuracy
+refinement later. Motivation: part 36's diagnostic data showed Sim3Solver
+candidates routinely starved for correspondences (N as low as 1-9,
+frequently below the new 6-point floor) -- more raw SIFT features per
+frame should directly increase how many correspondences survive into N,
+giving both tracking and merge attempts more to work with. Known cost: fps
+drops roughly linearly with nFeatures in this fork's earlier calibration
+(2000=6.73fps, 3000=6.38fps, 4000=~5.8fps) -- 10000 will make each full
+seq00 run meaningfully slower (~35-45min instead of ~20-30min, based on
+extrapolation, not yet measured). Pure settings change (`settings_sift/
+KITTI00-02-sift.yaml`), no rebuild needed. Launched as `part39_run1`.
+
+**Part 39 result**: **1681m over 16 fragments, all RMSE clean** (max
+1.130m). Sim3Solver convergence 27/1631=1.66%, somewhat higher than the
+~1-1.9% range from parts 37/38 -- plausibly benefiting from more available
+correspondences (N), consistent with part 36's correspondence-starvation
+finding. Within the established noise band but on the higher/clean side.
+**Kept nFeatures=10000** (no clear harm, plausible modest benefit, cost is
+runtime only).
+
+### Part 45: root-caused WHY tracking fails so often (not just its aftermath)
+
+User asked directly why tracking gets fragmented in the first place -- all
+work through part 44 addressed the *aftermath* of frequent tracking loss
+(fail fast, don't destroy small maps, fix merge math) without knowing *why*
+loss happens ~80x more often than stock ORB-SLAM3 (240+ resets/run vs 3).
+
+Wrote `scratchpad/analyze_death_pattern.py`: loads KITTI seq00's GT poses,
+computes per-frame rotation (deg) and translation (m) magnitude between
+consecutive frames, cross-references against every `Fail to track local
+map!` event's frame id across 3 recent logs (744 unique failure frames).
+**Result: failures do NOT correlate with rotation (7.7% of failures in the
+top-10%-rotation bucket, actually BELOW the 10% baseline -- refutes an old
+"hard turns" hypothesis from earlier in this project). They DO correlate
+with translation speed (18.1% of failures in the top-10%-speed bucket, vs
+10% baseline)** -- vehicles moving faster are noticeably more likely to
+lose tracking on that frame.
+
+Mechanism: faster motion -> larger inter-frame feature displacement in
+image space -> harder to match within a fixed search radius. Confirmed in
+`Tracking::SearchLocalPoints()` (~line 3646): `th` (matching search radius)
+is widened for every special case already coded (RGBD th=3, IMU th=2-10,
+post-reloc th=5, lost th=15) EXCEPT the default monocular OK-state case,
+which stays at the stock `th=1` unconditionally, regardless of how fast the
+camera is moving.
+
+### Part 46: velocity-adaptive search radius (user: high priority)
+
+Added `[velocity-investigate]` diagnostic logging `mVelocity.translation().norm()`
+(the existing constant-velocity motion model's per-frame estimate, in this
+SLAM's own internal scale) alongside `th`. Ran `part40_run1` to collect a
+sample: **550 velocity samples, p90=0.0538. Of the (small, 8-sample) set of
+failures with a recorded velocity, 37.5% were in the top-10%-velNorm
+bucket vs 10% baseline** -- an even stronger signal than the GT-based
+correlation (though from a much smaller failure sample, treat as
+corroborating, not independently conclusive).
+
+**Fix implemented**: in `SearchLocalPoints()`, added
+`constexpr float kHighVelThreshold = 0.05f; if(mbVelocity &&
+mVelocity.translation().norm() > kHighVelThreshold) th = std::max(th, 5);`
+-- threshold picked from the measured p90, not guessed. Mirrors the
+existing th=5 post-relocalization treatment (this fork already trusts th=5
+as a reasonable "harder matching situation" widening elsewhere). Rebuilt,
+launched as `part41_run1` (with nFeatures=10000 carried over from part 39).
+Not yet measured -- next step is comparing total coverage, RMSE budget
+compliance, and ideally the raw tracking failure RATE (not just coverage,
+which is noisy) against the pre-fix baseline to see if this directly
+reduces how often tracking breaks in the first place, which would be a
+more fundamental win than anything else this session since it addresses
+the root cause rather than managing its aftermath.
+
+**Part41_run1 was killed mid-run (frame 3593/4541, ~79%) -- OOM, not a
+code bug.** No exception/segfault/assertion text anywhere in the log (ruled
+out the part-35/36-style OpenCV TLS crash and any new crash in the
+velocity-fix code itself) -- the log just stops abruptly after a normal
+`Merge finished!` message, and the process was confirmed dead externally.
+Root cause: `part41_run1` was launched while `part40_run1` (the diagnostic
+run used to collect velocity data) was still running, and BOTH used
+`nFeatures=10000` (part 39's change, kept) simultaneously -- system had
+14GB RAM, already 1.5GB into a 4GB swap file under just `part40_run1`
+alone; running two `nFeatures=10000` processes at once pushed it over the
+edge and the OS killed one. **Lesson: do not run two `nFeatures=10000`
+processes concurrently** -- either serialize them, or drop nFeatures for
+any run that must be parallelized.
+
+**Second, unrelated problem found while waiting for `part40_run1` to
+finish solo**: it stalled for 48+ minutes without completing (vs the usual
+~20-40min for `nFeatures=10000`). Not actually frozen -- log kept growing
+-- but extremely slow, because by keyframe `cur=719` the Atlas had
+accumulated **23+ separate map fragments** (`candMapId` values 0-23 seen),
+and `LoopClosing`'s merge-candidate check runs BoW matching + Sim3Solver
+RANSAC + optimization against EVERY accumulated fragment for every
+candidate keyframe, with no cap analogous to `DetectRelocalizationCandidates`'s
+existing `kMaxRelocCandidates=20` guard (added in an earlier session
+specifically because an uncapped candidate search once stalled 20+
+minutes). **This is very likely a real, emergent cost of this session's
+own changes**: `nFeatures=10000` (part 39) puts more features into BoW
+matching (more candidates pass the `numBoWMatches>=20` gate), and the
+fail-fast/low-destroy-threshold changes (parts 30/34/35) deliberately
+preserve many more, smaller fragments than before -- multiplying how much
+merge-candidate work happens per keyframe. Killed `part40_run1` (already
+had the velocity data needed from it) rather than wait further -- this
+merge-candidate-count explosion is flagged as a real problem worth a cap
+(mirroring `kMaxRelocCandidates`) in a future part, but is not blocking
+right now since `part41_run2` (the actual priority) is a single fresh run
+that won't have had time to accumulate 23 fragments before it finishes.
+Re-launched `part41_run2` alone immediately.
+
+**Part41_run2 result (nFeatures=10000 + velocity fix v1, threshold=0.05f)**:
+**1713.3m over 20 fragments**, reset count **221** (within the ~150-260
+baseline range -- no clear improvement), velocity-widen engaged on
+**2026/3486 = 58.1%** of frames (intended ~10%). One fragment hit
+rmse=14.736m (still under budget but high).
+
+**Part 47: threshold recalibration.** Root cause of the 58.1%-vs-10%
+mismatch: the original `kHighVelThreshold=0.05f` was calibrated from an
+early 550-sample checkpoint (p90=0.0538), which was NOT representative --
+computing percentiles over the FULL 3486-sample `part41_run2` log gives
+**p50=0.0547** (the old threshold was sitting at the *median*, not p90)
+and **true p90=0.0867**. This directly explains the over-triggering: the
+fix was almost-always-on rather than a targeted fast-motion case. **Not
+yet known whether the underlying speed-correlation hypothesis (part 45) is
+wrong, or just that this specific fix was miscalibrated** -- reset count
+showing no improvement is consistent with either. Recalibrated
+`kHighVelThreshold` to the true measured p90 (**0.087f**), rebuilt.
+`part42_run1` (nFeatures=5000, velocity fix v1/old threshold, per user's
+request to test 5000 before 6000/7000) was already running and left to
+finish as a still-useful data point; the NEXT run after it will use the
+corrected threshold to properly test the recalibrated fix.
+
+## Current status (2026-07-18, part 26 -- Front 2 revisited: found and
+## partially fixed a real, high-impact post-relocalization gate; pushed it
+## too far once, learned coverage is noisier than expected, work IN
+## PROGRESS as of this writing -- see "resume point" at the very end of
+## this entry).
+##
+## Per explicit request, pivoted back to Front 2 (front-end robustness /
+## coverage) after part 24/25's merge work. Measured real re-init latency
+## first (before assuming anything): frames between a map death and the
+## next successful mono-init average only **2.3 frames** (110 samples) --
+## NOT "thousands of frames" as older memory (pre-Session-15
+## `SearchForInitialization` fix) suggested. That old finding is stale;
+## re-init speed is not the bottleneck. The real cost is many rapid
+## death/reinit cycles, not one long stuck gap.
+##
+## **Root-caused a major remaining death cause**: correlated KF-count-at-
+## death with the immediate preceding diagnostic line and found `Tracking.cc`'s
+## post-relocalization strict gate (`mnMatchesInliers<50` while
+## `mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames`) still firing
+## constantly -- **170 times in one checkpoint, 120 of which (70.6%) had
+## mnMatchesInliers in [30,49]**, i.e. would have survived under the
+## *normal* monocular `need>=30` bar and been killed *solely* by this extra
+## post-relocalization margin. This is the SAME gate flagged in Session 15
+## as "23% of failures" and partially addressed by part 18's RECENTLY_LOST-
+## bypass reorder -- but that reorder only helps when `mState==RECENTLY_LOST`
+## at the exact check; the far more common case (mState==OK, just relocalized
+## within the last `mMaxFrames`) was untouched until now.
+##
+## **Threshold experiment, in order, each measured on a full seq00
+## checkpoint (nFeatures=5000, all part 19-25 merge fixes in place)**:
+##
+## | gate value | total scored path (coverage) | gate FAILs remaining |
+## |---|---|---|
+## | 50 (baseline, unmodified) | 543.6 m | 170 |
+## | 35 | 478.7 m | 97 |
+## | 30 (matches normal bar exactly, makes the branch a no-op) | **314.4 m** | 86 |
+##
+## **Coverage went DOWN monotonically as the gate was loosened further**,
+## the opposite of the mechanical prediction. Not yet root-caused --
+## leading theory is a "survivorship paradox" (keeping a barely-alive map
+## going a few more frames on a weak pose may walk it into a harder failure
+## shortly after, instead of resetting promptly for a fresh, possibly
+## easier restart) -- but given this session already saw one single-run
+## comparison get reversed by nondeterminism, **do not trust this 3-point
+## trend without repeat trials**. **Reverted to 35** (best result of the
+## three measured) as the safe middle ground pending confirmation.
+##
+## **Separately measured whether "need>=30" is even a sensible bar for SIFT
+## specifically** (user question: stock ORB-SLAM3's thresholds were tuned
+## for ORB, not SIFT) -- important clarification: `mnMatchesInliers` is
+## counted AFTER `PoseOptimization`'s own chi2 outlier rejection, i.e. it's
+## already a verified-inlier count, not a raw match count, so its required
+## size is a fairly descriptor-agnostic statistical/geometric question (how
+## many confirmed correspondences does a stable pose estimate need), not an
+## ORB-vs-SIFT question per se. What IS descriptor/fork-specific is the
+## raw-to-verified attrition rate. Measured directly from existing
+## `[track-local-map-detail]` logs (1872 samples, one full checkpoint):
+## **outlier rate ~7.9%, verified-inlier survival ~92.1%** -- clean, reliable
+## matching. This means `need>=30` is NOT overly strict for descriptor-
+## quality reasons (SIFT matches here are trustworthy); lowering the floor
+## further (e.g. to 20, discussed but not implemented) would not be
+## justified by outlier-rate evidence and would just accept less-constrained
+## pose estimates. The real lever for candidate scarcity remains growing the
+## raw candidate pool (nFeatures, nNumCovisibles), not lowering the
+## verified-inlier bar.
+##
+## Code state as of this writing: `Tracking.cc`'s post-reloc gate is back
+## to `mnMatchesInliers<35` (see its inline comment for the full 50->35->30
+## ->35 history). `LoopClosing.cc` additionally has (from part 25, kept):
+## `nNumCandidates` 3->10 in the `DetectNBestCandidates` call, and
+## `nNumCovisibles` 10->20 in both `DetectCommonRegionsFromBoW` and
+## `FindMatchesByProjection` -- both zero-correctness-risk widening changes,
+## unrelated to the gate-value question above.
+##
+## **RESUME POINT for next session**: two repeat trials at gate=35 were
+## launched in parallel (`gate35_trial1`/`gate35_trial2` output prefixes,
+## same nFeatures=5000 + all current thresholds, no other changes) to get a
+## statistically defensible coverage baseline before drawing any conclusion
+## about whether 35 is really better than 30 (or than other values). As of
+## this note they were still running (both processes healthy, ~99% CPU,
+## just slow from sharing 8 cores -- do not mistake this for a hang; check
+## the *actual* `orbslam3_sift_kitti_ate` PIDs, not any wrapping bash/nohup
+## PID, when checking CPU%). **Next session should**: (1) check whether
+## those two runs finished and completed cleanly; (2) compare their
+## coverage numbers to each other and to the 478.7m single-run gate35
+## result above to gauge run-to-run variance at fixed settings; (3) only
+## then decide whether the 30-vs-35 coverage regression was a real effect
+## or noise, and whether to keep pushing this specific gate lower or
+## consider it settled at 35 and move to the next front-end death cause
+## (re-run the KF-at-death + immediate-cause correlation from this part,
+## fresh, since the distribution has shifted after this fix).
+
+## Current status (2026-07-18, part 25 -- nFeatures trend continues to
+## 5000, plus two new zero-correctness-risk levers). At nFeatures=5000
+## (same 5-threshold chain as part 24, `nNumCandidates`/`nNumCovisibles`
+## still at stock 3/10 for this specific run): **6 map fragments/114 KFs
+## total -- the lowest fragment count of the entire session** -- and 1 more
+## successful merge (fragment 4, 36 KFs, 197.9m, 0.454m ATE RMSE = 0.23%
+## relative error, healthy). Timing: 2000=6.73fps, 3000=6.38fps,
+## 4000=~5.8fps, 5000 not yet precisely timed standalone.
+##
+## User observation: 1 merge/run is still low relative to how many
+## fragments visibly overlap in the recurring x~[56,90] z~[104,450]
+## corridor each run (typically 3-4). Confirmed by direct log inspection
+## (part 24's fragment-1/map-1 case): candidates ARE repeatedly reaching
+## the top-3 VLAD shortlist and losing out to whichever other candidate's
+## RANSAC happened to converge that specific frame -- not being
+## structurally excluded. This means the bottleneck at this point is
+## partly just **breadth of attempts**, not (only) correspondence density.
+##
+## **Two new changes, both deliberately zero-correctness-risk** (neither
+## touches any statistical/geometric acceptance threshold -- they only
+## widen how much gets attempted, so they can't by themselves make a false
+## merge more likely to pass, unlike every part 19-23 change):
+## 1. `KeyFrameDatabase::DetectNBestCandidates`'s call in
+##    `NewDetectCommonRegions()`: nNumCandidates 3->10 (LoopClosing.cc).
+##    More Sim3Solver attempts per frame -- cost lands on LoopClosing's own
+##    background thread, not the tracking hot path.
+## 2. `nNumCovisibles` 10->20, in both `DetectCommonRegionsFromBoW` and
+##    `FindMatchesByProjection` (two separate local declarations in
+##    LoopClosing.cc, kept in sync) -- pools more covisible keyframes'
+##    map points into each candidate's correspondence set, same
+##    "grow the pool" spirit as the nFeatures increases but targeting
+##    breadth-per-candidate instead of density-per-frame.
+##
+## Explicitly deferred (higher risk, not yet needed): lowering
+## `nBoWInliers=15` (Sim3Solver's own RANSAC minimum-inlier parameter) --
+## this is the last major untouched threshold and the primary remaining
+## defense against a false-positive merge; only consider it if the two
+## changes above plus continued nFeatures increases still aren't enough.
+##
+## Running now: nFeatures=5000 + nNumCandidates=10 + nNumCovisibles=20
+## combined, full seq00 checkpoint, same `[merge-investigate]` instrumentation
+## plus `grep -c "\*Merge detected"` (the correct signal, see part 24) for
+## merge count. Compare fragment count, merge count, and per-fragment ATE
+## (especially any newly-merged fragment) against this part's 5000-alone
+## baseline (6 fragments, 1 merge) once it finishes.
+
+## Current status (2026-07-18, part 24 -- FIRST SUCCESSFUL MERGE, after
+## parts 19-23's threshold chain + nFeatures increases). Full seq00
+## checkpoint at nFeatures=4000, with all five merge-chain thresholds
+## lowered (nProjMatches=20, nProjOptMatches=24, nSim3Inliers=6, the
+## internal `Optimizer::OptimizeSim3` bailout=6, and
+## `DetectCommonRegionsFromLastKF`'s own nProjMatches=15): candidate
+## cur=382 (map 8) vs cand=266 (map 6) passed every single gate in one
+## `NewDetectCommonRegions()` call --
+## numBoWMatches=187(>=20)->Sim3Solver CONVERGED(29 inliers)->
+## numProjMatches=28(>=20)->numOptMatches=8(>=6)->numProjOptMatches=24(>=24,
+## exactly at the bar)->nNumKFs=3(>=3, exactly at the bar, 3 of 8 covisibles
+## independently confirmed via the now-lowered `DetectCommonRegionsFromLastKF`
+## bar) -- and `MergeLocal()` actually executed: log shows `*Merge detected`
+## -> `Change to map with id: 6` -> `Merge finished!`, with tracking
+## immediately after on the merged map showing `mapKFs=41` (up from
+## whatever map 8 had alone).
+##
+## **Note the earlier false negative this session**: initially searched
+## logs for the literal string `"[Merge]:"` (the cout lines inside
+## `MergeLocal`/`MergeLocal2` around LoopClosing.cc:1557-1558) and concluded
+## "0 merges" across several runs before this one. That search pattern was
+## incomplete -- the actual unconditional signal is
+## `Verbose::PrintMess("*Merge detected", VERBOSITY_QUIET)` /
+## `"Merge finished!"` (both print regardless of the CLI tool's
+## `VERBOSITY_QUIET` threshold, since QUIET is themessage's own level, not
+## filtered by it) -- these are the strings to grep for, not `"[Merge]:"`.
+## **Re-audited all 8 prior saved logs this session with the corrected
+## `"*Merge detected"` grep -- confirmed genuinely 0 merges in every one of
+## them.** The earlier "0 merges" conclusions were right, just for the
+## wrong/incomplete reason (a search pattern that happened to also return 0
+## on logs that truly had 0 merges). This run (nFeatures=4000) is the
+## first real merge of the session.
+##
+## **Sanity check on merge correctness** (the real safety net against a
+## false-positive merge corrupting the map): the resulting merged fragment
+## in this run's final ATE table is fragment 7 (42 KFs, 200.3m path,
+## 0.545m ATE RMSE = **0.27% relative error**) -- within the same healthy
+## 0.07%-0.44% range as every other (unmerged) fragment in this run, not
+## degraded. This one data point is consistent with a correct merge, not
+## proof -- worth deliberately checking again on the next successful merge
+## (compare the merged fragment's per-KF trajectory continuity/smoothness
+## across the seam, not just the aggregate ATE number, which could mask a
+## localized jump).
+##
+## Final result this run: 9 fragments/166 KFs total (down from double-digit
+## fragment counts in every prior run this session), exactly 1 merge event
+## (`grep -c "\*Merge detected"` = 1).
+##
+## **Next steps**: (1) re-audit parts 19-23's logs (still on disk in the
+## scratchpad at time of writing) for missed `"*Merge detected"` events
+## using the corrected grep pattern. (2) Run nFeatures=5000 (queued/running
+## as of this writing) and see if the merge rate increases further with
+## more real points, continuing the proportional trend. (3) Decide whether
+## `nBoWInliers=15` (Sim3Solver's own RANSAC minimum-inlier parameter,
+## deliberately untouched all session as the primary defense against false-
+## positive merges) still needs lowering, or whether nFeatures alone is
+## enough now that a real merge has been observed without touching it --
+## re-evaluate only after (2)'s result and a deliberate correctness check
+## per the sanity-check note above, not before.
+
+## Current status (2026-07-18, part 21 -- nFeatures 2000->3000 for the SIFT
+## fork validated real, proportional improvement at every gate in the merge
+## chain, confirming part 20's diagnosis, but still zero completed merges).
+##
+## Implemented the user's proposal 2 from part 20 (not proposal 1 -- see
+## reasoning there): new SIFT-fork-only settings file
+## `settings_sift/KITTI00-02-sift.yaml` (copy of the shared
+## `KITTI00-02.yaml`, `ORBextractor.nFeatures` 2000->3000; does not touch
+## the original `third_party/ORB_SLAM3`'s settings). No C++ rebuild needed
+## (runtime YAML). Full seq00 checkpoint, same `[merge-investigate]`/
+## `[optsim3]` instrumentation:
+##
+## | gate | before (part 20, nFeatures=2000) | after (nFeatures=3000) |
+## |---|---|---|
+## | Sim3Solver convergence | 17/373 = 4.6% | **15/119 = 12.6%** |
+## | numProjMatches>=20 pass | 3/17 | 7/15 |
+## | numOptMatches>=10 pass | 0/3 | **2/7 -- first time ever >0** |
+## | numProjOptMatches>=32 pass | (never reached) | 0/2, observed 19-20 |
+## | optsim3 bailout `nCorrespondences` | 6-11 | 12-17 (grew) |
+## | optsim3 bailout survivors (need>=10) | 0,0,7 | 0,7,0,7,8 (closer) |
+## | actual completed merges | 0 | **still 0** |
+##
+## **Every single gate improved, proportionally, in the direction the part
+## 20 diagnosis predicted** -- more real points per keyframe genuinely grows
+## the correspondence pool at every downstream stage, not just the first
+## one. This is a second independent confirmation (after the threshold-
+## scaling result) that "too few real matched points" was the correct root-
+## cause diagnosis, not a strict-descriptor false-rejection problem.
+## Fragment count/accuracy stayed healthy (13 fragments/185 KFs, per-
+## fragment relative error 0.07%-1.05%, no sign of degraded tracking from
+## the extra feature-extraction cost) -- fragments 1/2/6/7/8/11 again
+## overlap in the same x~[56,80] z~[106,454] corridor as every prior run.
+##
+## **Still zero completed merges** -- the funnel's bottleneck moved one gate
+## further down to `numProjOptMatches>=32` (observed 19-20, ~60% of the
+## bar) with only 2 samples reaching it. `nNumKFs` (final covisible-
+## consistency gate) still never reached.
+##
+## **Not yet decided**: whether to (a) bump `nFeatures` further (the trend
+## is real and proportional, may just need more headroom), or (b) apply the
+## same evidence-based proportional pull-down to `nProjOptMatches` now that
+## real post-boost data exists for it (19-20 observed vs. 32 required -- a
+## smaller, better-justified nudge than part 20's original 0.4x guess would
+## be, though still only 2 samples). Runtime cost of nFeatures=3000 was not
+## precisely measured against nFeatures=2000 in this session (both full
+## checkpoints took on the order of 10 minutes; SIFT is markedly more
+## expensive per-feature than ORB so this should be watched, not assumed
+## free, before pushing nFeatures much higher).
+##
+## User also asked about three further loosenings (2026-07-18): (1) skip
+## the "scale consistency" filter -- checked the code (`LoopClosing.cc`
+## ~line 141-154): it's already gated behind
+## `mpCurrentKF->GetMap()->IsInertial() && mpMergeMatchedKF->GetMap()->
+## IsInertial()`, so for this project's plain `System::MONOCULAR` (no IMU)
+## it never runs at all -- nothing to change, already a non-issue for this
+## pipeline. (2) loosen `TH_HIGH` to its ceiling for merge/loop, and (3)
+## lower the `<10` optsim3 bailout further -- both explicitly deferred
+## pending this nFeatures result, per the reasoning in part 20 (stacking
+## multiple relaxed safety nets at once risks false-positive merges, which
+## corrupt the map worse than staying fragmented, and makes it impossible
+## to attribute cause if something goes wrong). Now that nFeatures=3000's
+## real, positive, proportional effect is confirmed, revisit (2)/(3) only
+## if still needed after the nFeatures/nProjOptMatches decision above, and
+## still one variable at a time with before/after ATE checked each time (a
+## false merge should show up as degraded ATE on the merged fragment).
+
+## Current status (2026-07-18, part 20 -- the merge chain's actual floor:
+## not enough real map points, not a strict-descriptor false-reject
+## problem). Scaled down `nProjMatches`(50->20)/`nProjOptMatches`(80->32)/
+## `nSim3Inliers`(20->10) per part 19. Result: 3/14 Sim3Solver-converged
+## candidates now pass `numProjMatches` (up from 0/17 before), but all 3
+## still fail at `Optimizer::OptimizeSim3`'s **hard-coded, non-parameterized**
+## `if(nCorrespondences-nBad<10) return 0;` bailout (found by instrumenting
+## it directly -- this is a 4th absolute threshold in the chain, not exposed
+## to the caller). Data from the 3 real bailout cases:
+##
+## | kf1 | kf2 | nCorrespondences (edges actually built) | nBad (chi2-rejected) | survivors |
+## |---|---|---|---|---|
+## | 392 | 283 | 8 | 8 | **0/8 (100% rejected)** |
+## | 392 | 286 | 6 | 6 | **0/6 (100% rejected)** |
+## | 395 | 287 | 11 | 4 | 7/11 (64%, just 3 short of 10) |
+##
+## Two of three cases had **every single correspondence** rejected by the
+## chi2 outlier test, not "a few short of the bar" -- and `nCorrespondences`
+## itself (6-11) is far below the `numProjMatches` that fed it (20-31,
+## reported by the caller), meaning a further ~50-70% of matches are lost
+## between `SearchByProjection` and usable optimizer edges (bad map points /
+## negative depth filtering) -- a 5th attrition point not yet separately
+## instrumented.
+##
+## **This changes the diagnosis**: a 100%-rejection Sim3 fit is not "some
+## correct matches got thrown out by an overly strict chi2/descriptor
+## threshold" -- it's "the coarse Sim3 estimate itself (from Sim3Solver,
+## which converged on as few as ~15-20 raw BoW inliers for a full 7-DOF
+## rotation+translation+scale fit) is too imprecise for *anything* to agree
+## with it." Threshold-loosening (this session's approach so far) cannot fix
+## an underdetermined estimation problem -- it just relocates the same
+## starvation to the next gate down the chain, which is exactly the pattern
+## observed three times now (numProjMatches -> numOptMatches -> here).
+##
+## **User-proposed next steps (2026-07-18, end of session), evaluated
+## against this data**:
+## 1. *Widen the descriptor-distance filter (e.g. 1.5x `TH_HIGH`) for the
+##    merge/loop path specifically.* Plausible but **this data doesn't
+##    clearly support it as the primary lever** -- the bottleneck observed
+##    here looks like too few real corresponding 3D points existing in the
+##    pooled candidate set, not correct matches being rejected on distance
+##    grounds. Loosening `TH_HIGH` risks adding *more false matches* into an
+##    already precision-starved RANSAC/optimization chain, which could make
+##    the 100%-rejection pattern worse, not better. Would need direct
+##    evidence (e.g. logging rejected-by-distance candidate pairs and
+##    checking if they're geometrically plausible) before implementing, not
+##    just an assumption that it will help.
+## 2. *Increase SIFT feature budget (nFeatures 2000->3000) and/or revisit the
+##    grid/cell keypoint-distribution filter to capture smaller blobs.*
+##    **Better supported by this data** -- more points per keyframe directly
+##    grows the pool at every single stage of this chain (BoW match count,
+##    Sim3Solver's RANSAC sample size, OptimizeSim3's edge count), attacking
+##    the actual observed floor (samples of 6-11 points feeding a 7-DOF fit)
+##    rather than relaxing a filter around an already-too-small pool. Needs
+##    its own separate settings file/constant for the SIFT fork only (not
+##    touching `third_party/ORB_SLAM3`'s original 2000, and not the shared
+##    `KITTI00-02.yaml` used by both) since this is fork-specific tuning:
+##    higher nFeatures also raises SIFT's already-heavier per-feature compute
+##    cost (SIFT is markedly more expensive than ORB per keypoint), so
+##    measure runtime impact alongside the merge-success measurement, not
+##    just accuracy.
+##
+## **Next session should start with**: implement and measure option 2
+## first (nFeatures bump, dedicated SIFT-only settings), since it targets
+## the confirmed bottleneck directly; re-run the full checkpoint with the
+## same `[merge-investigate]`/`[optsim3]` instrumentation (still in the tree,
+## not yet cleaned up) to see whether `nCorrespondences` at the optsim3 gate
+## grows and survivor counts clear the (still-lowered) `<10` bar. Only
+## revisit option 1 (descriptor threshold) afterward, and only with direct
+## before/after distance-distribution evidence, not as a first move.
+
+## Current status (2026-07-18, part 19 -- Front 1 (merge) instrumented and
+## root-caused with a clean, decisive funnel; Front 2 (recovery) shelved as
+## structurally limited, see part 18).
+##
+## Added `[merge-investigate]` diagnostics through the whole merge candidate
+## pipeline: `NewDetectCommonRegions()` (candidate KF ids + map ids from
+## `DetectNBestCandidates`), and every gate inside `DetectCommonRegionsFromBoW`
+## (added an optional `tag` param, `"LOOP"`/`"MERGE"`, to distinguish the two
+## call sites without duplicating the function) -- BoW match count, Sim3Solver
+## convergence, numProjMatches, all the way through. Full seq00 checkpoint run
+## (18 fragments/328 KFs this time -- fragments 2/10/11/13 again spatially
+## overlap in the same x~[56,90] z~[104,450] corridor as parts 17/18's
+## fragments 1/6/8 and 1/8/11, now confirmed 3 separate runs in a row).
+##
+## **Clean funnel across all 161 candidate-search calls that got a merge
+## candidate at all (159/161 did -- VLAD scoring itself is not the
+## bottleneck)**:
+##
+## | gate | evaluated | passed |
+## |---|---|---|
+## | numBoWMatches>=20 | 477 | 373 (78%) |
+## | Sim3Solver RANSAC convergence | 373 | **17 (4.6%)** |
+## | numProjMatches>=50 | 17 | **0 (0%)** -- observed range 10-32 |
+##
+## **Merge never once got past `numProjMatches>=50` in this entire run.**
+## Every one of the 17 candidates that survived the already-brutal 4.6%
+## Sim3Solver convergence rate then failed the reprojection-match count,
+## landing at roughly 20-60% of the required 50 (values: 10, 11, 13, 16,
+## 16, 18, 18, 21, 21, 21, 22, 23, 23, 24, 27, 31, 32).
+##
+## This is the same class of problem as part 15/18's `TrackLocalMap`
+## need>=30 and `Relocalization`'s need>=50 bars: **fixed absolute match-
+## count thresholds inherited unchanged from stock ORB-SLAM3, calibrated
+## for that codebase's typically large/mature maps, applied unchanged to
+## this fork's much smaller fragments** (11-45 KFs each here, vs. stock
+## ORB-SLAM3 maps that routinely have hundreds). Because Sim3Solver already
+## requires real RANSAC-verified geometric consistency (>=15 inliers) before
+## a candidate ever reaches the `numProjMatches` gate, the 17 survivors here
+## are very likely genuine spatial overlaps, not noise -- consistent with
+## the independently-confirmed fragment-bbox overlap (2/10/11/13) from the
+## same run.
+##
+## **Not yet done**: lowering `nProjMatches` (and probably `nProjOptMatches
+## =80`, likely oversized for the same reason, though no data on it yet
+## since nothing has reached that gate) is the obvious next lever, but
+## **do not just guess a number** -- these thresholds exist specifically to
+## reject false-positive merges, which corrupt the map far worse than
+## staying fragmented, so the replacement value needs the same evidence-
+## based treatment as everything else this session:
+## 1. First confirm the 17 CONVERGED candidates are genuinely the same
+##    physical place as the current KF (cross-reference cur/cand KF ids
+##    against each fragment's keyframe-pose range, same technique as part
+##    16's bbox check) rather than assuming Sim3Solver convergence alone
+##    proves it.
+## 2. If confirmed, pick a threshold with real margin below the observed
+##    true-positive range (10-32) but ideally checked against what
+##    false/rejected Sim3Solver-FAIL-ing candidates would have scored here
+##    too, to see if there's a real separation to exploit or if a lowered
+##    bar risks admitting false positives that never got Sim3Solver-tested
+##    at this stage.
+## 3. Rebuild, rerun the full checkpoint, and verify with the fragment-
+##    count/coverage table (same methodology as parts 15/18) that fragments
+##    2/10/11/13 (or their equivalents in a fresh run) actually merge into
+##    fewer, longer trajectories -- not just that `numProjMatches` gate
+##    starts passing.
+##
+## Front 2 (recovery-mechanism effectiveness) is shelved per part 18's
+## finding that in-map relocalization is structurally starved for young
+## maps and a real fix would require replicating Sim3-based cross-map
+## alignment inside the tracking-time recovery path -- essentially this
+## same merge machinery, just invoked synchronously instead of by the
+## background LoopClosing thread. Revisit only after the merge threshold
+## work above is validated; if merge starts working reliably in the
+## background thread, the tracking-time urgency to also fix recovery drops
+## since fragments will get reconnected shortly after anyway.
+
+## Current status (2026-07-18, part 18 -- Front 2 (fragmentation-frequency)
+## work: one real fix applied, one hypothesis chain built and then
+## correctly refuted step by step with live data instead of guessed).
+##
+## **Fix applied and validated**: `Tracking::TrackLocalMap()` had the
+## stricter post-relocalization gate (`mnMatchesInliers>=50` while
+## `mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames`) checked BEFORE the
+## `RECENTLY_LOST` recovery bypass (`mnMatchesInliers>10 && mState==
+## RECENTLY_LOST`) -- already quantified in Session 15 as 23% of this
+## fork's tracking failures but never fixed. Reordered so the bypass is
+## checked first (comment added in-place explaining why; no threshold
+## values changed, just the check order). Rebuilt `orbslam3_sift_kitti_ate`
+## clean, ran a full seq00 checkpoint:
+##
+## | | before (part 15) | after (this fix) |
+## |---|---|---|
+## | map fragments | 10 | 14 |
+## | total keyframes | 246 | 270 |
+## | scored fragments | 9 | 13 |
+## | combined scored path length | 615.8 m | **837.1 m** |
+## | per-fragment relative error range | 0.05%-1.08% | 0.08%-1.15% |
+##
+## Net: more fragments, but genuinely more real coverage (+36% scored
+## path length) at unchanged excellent per-fragment accuracy -- a real,
+## low-risk improvement, kept. Not the hoped-for "fewer, longer-lived
+## maps" outcome though, so fragmentation-frequency itself is still
+## unsolved. Fragments 1 (x[60.5,71.9] z[106.0,244.3]), 8
+## (x[56.1,68.9] z[255.9,450.7]) and 11 (x[63.6,72.0] z[223.9,245.1])
+## again spatially overlap in this run -- same finding as part 17's
+## fragments 1/6/8, confirming the map-merge front from part 17 is still
+## real and independent of this fragmentation-frequency work.
+##
+## **Investigated whether the `KeyFramesInMap()>10` RECENTLY_LOST-
+## eligibility gate (the originally-planned "loosen this" lever) is
+## actually the dominant fragmentation cause -- built a live KF-count-at-
+## death histogram from the checkpoint log** (added `mapKFs=` to the
+## existing `[track-local-map]` diagnostic, correlated against every
+## `Reseting current map`/`Creation of new map with id` event): of 102
+## fragment-ending events, **63 (62%) die at exactly 2 keyframes** (the
+## very first tracking attempt after `CreateInitialMapMonocular()`, before
+## a 3rd keyframe is ever inserted), 86% die at <=9 KFs, and only ~13%
+## ever get anywhere near the `>10` gate. This initially looked like it
+## made the `>10` gate largely irrelevant and pointed at something far
+## upstream instead.
+##
+## **First hypothesis (weak-baseline init) tested directly against data
+## and REFUTED, not assumed**: `MonocularInitialization()` computes
+## `meanDisparityPx` (mean pixel disparity between the two init frames, a
+## parallax/baseline-quality proxy) but explicitly does not gate
+## acceptance on it (see the existing code comment: "logged, not yet
+## gated on"). Hypothesis was that near-zero-baseline accepted pairs
+## produce weak maps that die instantly. Correlated `meanDisparityPx`
+## against survival-to-KF-count across all 104 mono-init events: KF=2
+## deaths averaged 19.9px disparity, KF>10 survivors averaged 23.5px --
+## no meaningful separation, and several high-disparity (40-83px) inits
+## still died instantly while one low-disparity (7.8px) init survived to
+## KF=14. **Disparity alone does not predict survival -- do not implement
+## an init-disparity gate on this basis, the data doesn't support it.**
+##
+## **Second false lead, caught before it cost more time**: initially
+## concluded `RECENTLY_LOST` was "essentially never entered" because
+## `Verbose::PrintMess("Lost for a short time", ...)` and every other
+## `RECENTLY_LOST`/`LOST`-transition `Verbose::PrintMess` call never
+## appeared anywhere in the checkpoint log. **This was a false negative,
+## not evidence**: `System.cc:238` calls
+## `Verbose::SetTh(Verbose::VERBOSITY_QUIET)`, which silences every
+## `Verbose::PrintMess` call (`VERBOSITY_NORMAL=1 > VERBOSITY_QUIET=0`) for
+## this CLI tool -- only plain `cout<<`/`fprintf(stderr,...)` lines are
+## ever visible in these logs. **Any future session reasoning about
+## Tracking.cc's state machine from this tool's logs must use
+## `fprintf(stderr,...)` diagnostics, never trust the presence/absence of
+## a `Verbose::PrintMess` string.**
+##
+## Re-reading `Track()` with that corrected, found there are actually TWO
+## separate, differently-gated places `mState` gets set to `RECENTLY_LOST`
+## on failure, not one:
+## - Branch 1 (~line 1961-1978): the FIRST pose-estimate stage
+##   (`TrackReferenceKeyFrame`/`TrackWithMotionModel`) fails outright --
+##   gated on `KeyFramesInMap()>10` (else goes straight to `LOST`, no
+##   grace period at all). This is the gate originally planned to loosen.
+## - Branch 2 (~line 2168-2184): the first stage SUCCEEDS but the
+##   subsequent `TrackLocalMap()` fails -- sets `RECENTLY_LOST`
+##   **unconditionally, with no KF-count gate whatsoever**.
+##
+## Confirmed via the log (the `[track-local-map] id=X mnMatchesInliers=Y
+## mapKFs=2` diagnostic line appears immediately before each streak of
+## `Fail to track local map!` lines) that **the observed KF=2 deaths go
+## through Branch 2, not Branch 1** -- meaning these young maps DO get a
+## grace period. The `cout<<"Fail to track local map!"` line is also
+## printed on every subsequent `RECENTLY_LOST` frame even when
+## `TrackLocalMap()` itself is never reached (it fires whenever `bOK` is
+## false after the block, including when the first stage already failed
+## that frame) -- so a streak of ~20-30 of these lines per death event is
+## consistent with ~3 seconds (the hardcoded `3.0f` timeout at line ~2032)
+## of per-frame dead-reckoning (`TrackWithMotionModel` reusing stale
+## `mVelocity`) + `Relocalization()` attempts, all failing, before the
+## timeout flips to `LOST` and the map is destroyed.
+##
+## **Current leading hypothesis for the next session (NOT yet directly
+## confirmed -- needs fprintf instrumentation, not Verbose::PrintMess,
+## per the false-negative lesson above)**: most young/sparse maps DO
+## receive the ~3-second `RECENTLY_LOST` grace period, but the recovery
+## mechanisms available during it (dead-reckoning off a 2-9 KF map's
+## thin point cloud; `Relocalization()` against a keyframe database that
+## barely has this map's own few keyframes in it yet) are close to
+## structurally incapable of succeeding for a map this young -- so the
+## grace period is being granted but is nearly always wasted. If true,
+## the fix is not "grant more grace periods" (most already get one) but
+## either making recovery actually work for young maps, or preventing so
+## many `TrackLocalMap()` failures on freshly-initialized maps in the
+## first place (still unexplained -- disparity was ruled out above, cause
+## unknown).
+##
+## **Next session should start with**: add `fprintf(stderr,...)`
+## instrumentation (NOT `Verbose::PrintMess`) inside the `RECENTLY_LOST`
+## branch (~line 1983-2038) logging, per frame while in that state: which
+## of `TrackWithMotionModel`/`Relocalization` was attempted, whether it
+## succeeded, and for `Relocalization()` specifically the VLAD candidate
+## count and match yield at each stage -- to confirm or refute the
+## "recovery structurally can't work yet" hypothesis directly, the same
+## way the disparity hypothesis was tested and refuted above rather than
+## assumed. A short targeted run (`[start-frame]`/`[max-frames]` around
+## one of the KF=2 death examples already in the saved log) is enough --
+## does not need a full-sequence checkpoint.
+
+## Current status (2026-07-18, part 17 -- answers part 16's open question
+## with real data): added ground-truth bounding-box reporting to
+## `EvaluateTrajectory()` (gtBBox=x[...] z[...], plus start/end points) and
+## re-ran the full seq00 checkpoint specifically to check whether the 10
+## map fragments physically overlap (a real map-merge opportunity) or are
+## purely sequential (nothing for place-recognition-based merge to find).
+## **Confirmed: it's a real, mixed picture, not a guess.**
+##
+## Note: fragment count/sizes differ slightly from part 15's run (10
+## fragments both times, but 246 total KFs here vs 192 there, and
+## per-fragment KF counts differ) -- expected run-to-run nondeterminism
+## from RANSAC/threading, already a known property of this vendored
+## ORB-SLAM3 (see [[project_orbslam3_vendoring]] memory). The overlap
+## finding below is about physical layout, not exact reproducibility of
+## fragment boundaries.
+##
+## **Fragments 1, 6, and 8 genuinely occupy the same real-world zone**:
+## - Fragment 1: x[61.0,71.9] z[108.1,244.7] -- 39 KFs, 0.131m RMSE
+## - Fragment 6: x[59.3,72.5] z[223.1,410.0] -- 47 KFs, 0.181m RMSE
+## - Fragment 8: x[61.6,87.5] z[219.7,245.5] -- 20 KFs, 0.243m RMSE
+##
+## Pairwise bounding-box overlap confirmed by direct arithmetic: all three
+## share a common region of roughly x in [61.6, 71.9], z in [223.1, 244.7]
+## -- the vehicle genuinely revisited this intersection/area at least
+## three separate times, each time triggering a fresh, disconnected map
+## fragment instead of being recognized as "back here again" and merged
+## into one of the earlier ones. **This is concrete, verified evidence
+## that fixing map-merge would produce a real improvement for at least
+## this part of the sequence**, not a hopeful assumption -- exactly the
+## kind of case `NewDetectCommonRegions()` is designed to catch.
+##
+## The other six fragments (0, 2, 3, 4, 5, 7) sit in distinct,
+## non-overlapping x/z regions -- consistent with sequential new road,
+## where classical place-recognition merge has nothing to exploit and the
+## real fix would be reducing fragmentation frequency itself (fewer,
+## longer-lived maps), not improving merge detection.
+##
+## **Net conclusion, both parts 16's open questions now answered with
+## data**: (1) overlap DOES exist for at least fragments 1/6/8 -- merge-
+## fixing is a real, verified-useful lever, not a maybe; (2) the coverage
+## ceiling caveat from part 16 still stands independently -- even perfectly
+## merging 1/6/8 together only reconnects 3 of 10 fragments, leaving the
+## other 7 (and the untracked gaps between all of them) as a separate,
+## still-unaddressed problem.
+##
+## **Next session should start with**: instrument `NewDetectCommonRegions()`
+## directly during a run covering this specific x[60,88]/z[108,410] zone
+## (re-run with diagnostic prints on VLAD candidate scores and geometric
+## verification pass/fail, similar in spirit to the removed
+## `[merge-investigate]`/`[reloc-investigate]` probes from 2026-07-17) to
+## see exactly why fragments 1/6/8 -- despite genuinely revisiting the same
+## place, and despite fragment 1 (39 KFs) and fragment 6 (47 KFs) both
+## being well past the documented 12-keyframe candidate-search gate -- never
+## triggered a merge. This is now a concrete, reproducible, verified-real
+## case to debug against, not a theoretical one.
+
+## Current status (2026-07-18, part 16 -- projected outcome of fixing
+## merge, and an important caveat not to skip): before assuming "fix
+## map-merge" (part 15's next step) is a guaranteed path to a good
+## full-sequence ATE, two things need checking first, since the answer
+## genuinely depends on them:
+##
+## 1. **Do the 10 fragments spatially overlap, or are they purely
+## sequential?** Map-merging in ORB-SLAM3 (`NewDetectCommonRegions()`) is
+## place-recognition-based -- it only reconnects a fragment to an *earlier*
+## one if the vehicle revisits a location the earlier fragment already
+## mapped. If each fragment instead covers genuinely new road as the drive
+## continues (likely, if a fragment dies and the next one starts moments
+## later at a nearby-but-not-yet-mapped position), there is nothing for
+## merge to detect -- fixing it would not help, and the actual needed fix
+## would be *preventing fragmentation in the first place* (fewer, longer-
+## lived maps), a different and less predictable problem. KITTI seq00 is
+## known to have some genuine loop closures (part of why the original
+## ORB-SLAM3 benefits from loop closure on this sequence at all), so at
+## least some fragment pairs plausibly do overlap -- but this has NOT been
+## checked directly yet. **Next session should check the 10 fragments'
+## keyframe pose ranges against the ground-truth path (already have the
+## per-fragment KeyFrame lists via `Map::GetAllKeyFrames()` from part 13's
+## work) to see which, if any, pairs genuinely revisit the same physical
+## location** before investing further effort in the merge-candidate-search
+## path specifically.
+##
+## 2. **Coverage ceiling, even with perfect merging**: the 9 scored
+## fragments cover only **615.8m of combined path length**, against the
+## full sequence's roughly 3722m ground-truth path (per part 12's earlier
+## reported figure for the probed region) -- i.e. even flawless merging of
+## every existing fragment recovers at most ~16-20% of the total driven
+## distance. The rest of the sequence currently has zero tracked keyframes
+## at all (consistent with part 7/8's finding of multi-thousand-frame
+## silent re-initialization stretches). So "fix merge" is necessary but not
+## sufficient on its own for a full-sequence ATE checkpoint -- the
+## re-initialization-latency problem from parts 7-8 (still unresolved,
+## never revisited after parts 9-13's matching-focused fixes) needs
+## addressing too, independent of whichever fragments do or don't overlap.
+
+## Current status (2026-07-18, part 15 -- full checkpoint result, resolves
+## part 14's interim note): the full, continuous, no-`[start-frame]` seq00
+## run finished. **Every scored fragment shows excellent local accuracy --
+## the segmented `[start-frame]` spot-checks' ~20% relative-error finding
+## does NOT hold for continuous tracking, confirming that was an artifact
+## of cold-starting mid-sequence with no prior map, exactly as flagged in
+## part 14's caveat.**
+##
+## 10 map fragments, 192 total keyframes:
+##
+## | fragment | KFs | path len | ATE RMSE | % of path |
+## |---|---|---|---|---|
+## | 0 | 21 | 56.4 m | 0.055 m | 0.10% |
+## | 1 | 34 | 137.9 m | 0.162 m | 0.12% |
+## | 2 | 18 | 67.4 m | 0.168 m | 0.25% |
+## | 3 | 18 | 36.7 m | 0.397 m | 1.08% |
+## | 4 | 16 | 39.4 m | 0.052 m | 0.13% |
+## | 5 | 26 | 98.3 m | 0.180 m | 0.18% |
+## | 6 | 22 | 78.2 m | 0.129 m | 0.17% |
+## | 7 | 19 | 72.8 m | 0.035 m | 0.05% |
+## | 8 | 16 | 28.7 m | 0.159 m | 0.55% |
+## | 9 | 2 | -- | -- | (too few to score) |
+##
+## Every single scored fragment (9 of 10) lands between **0.05% and 1.08%
+## relative error** -- comparable to or better than the true original
+## ORB+DBoW2 baseline's own ~0.2-0.3% (6.4-10.7m over ~3722m). Combined
+## scored path length: 615.8m across the 9 fragments, with genuinely good
+## local tracking throughout, not just in one lucky stretch.
+##
+## **This closes out the "is tracking accuracy actually a problem" question
+## for this session: no, it isn't.** Parts 4-13's fixes (BA-sigma
+## weighting, re-widened `SearchForInitialization`, three widened
+## `SearchByProjection` overloads) produce genuinely accurate tracking
+## throughout the sequence. The 500-1500 "~20% error" finding from part 14
+## was a real result, but only for the artificial cold-start-mid-sequence
+## scenario the `[start-frame]` tool produces for diagnostics -- not
+## representative of how this fork behaves when actually run continuously
+## from the start, which is the only scenario that matters for a real ATE
+## checkpoint.
+##
+## **The sole remaining problem, now precisely characterized**: 10
+## disconnected map fragments across one sequence, never reconnected by
+## map-merging, so no single global trajectory exists for a real end-to-end
+## ATE number against the full ~3722m sequence -- even though the
+## underlying tracking within each fragment is demonstrably good. This is
+## now a map-merge/fragmentation problem exclusively, not a tracking-
+## accuracy problem, and should be the sole focus of the next session.
+##
+## **Next session should start with**: root-cause why
+## `NewDetectCommonRegions()`'s merge path (root-caused on 2026-07-17,
+## gated on the *current* map reaching 12 keyframes before candidate search
+## even runs) isn't reconnecting these 10 fragments, given several of them
+## (e.g. fragment 1 at 34 KFs, fragment 5 at 26 KFs) are well past that
+## 12-keyframe bar and existed simultaneously in the Atlas alongside later
+## fragments. Concretely: instrument `NewDetectCommonRegions()` directly
+## (candidate count found, VLAD similarity scores, geometric verification
+## pass/fail) during a continuous run to see whether merge candidates are
+## found and rejected, or never searched for at all. This is a
+## fundamentally different question from anything investigated in parts
+## 4-13 (all of which were about matching/tracking quality, now resolved)
+## and is likely the last remaining lever before this fork can produce a
+## real, full-sequence ATE checkpoint.
+
+## Current status (2026-07-18, part 14, interim note -- full checkpoint
+## still running as this is written): after part 13's new per-fragment
+## evaluator came online, spot-checked several 500-frame windows via the
+## `[start-frame] [max-frames]` combo (each such run starts tracking fresh
+## at that frame -- diagnostic only, does NOT reflect what a continuous
+## run's map state would actually be at that point, since it has no prior
+## map to carry forward):
+##
+## | frames | best fragment | keyframes | path | ATE RMSE | % of path |
+## |---|---|---|---|---|---|
+## | 0-500 | fragment 2 | 41 | 145.6 m | 0.261 m | 0.18% |
+## | 0-500 | fragment 0 | 13 | 46.2 m | 0.034 m | 0.07% |
+## | 0-500 | fragment 1 | 13 | 36.0 m | 0.124 m | 0.34% |
+## | 500-1000 | fragment 0 | 18 | 93.0 m | 19.072 m | **20.50%** |
+## | 500-1000 | fragment 1 | 13 | 45.5 m | 1.716 m | 3.77% |
+## | 1000-1500 | fragment 0 | 21 | 54.0 m | 10.984 m | **20.35%** |
+## | 1500-2000 | (stuck) | 2 | -- | -- | -- (never got past 2 KFs) |
+##
+## Frames 0-500 are excellent (sub-1% relative error, per part 13). Frames
+## 500-1500 show a consistent ~20% relative error -- not noise, a real,
+## repeated degradation, though from only two fresh-init snapshots so not
+## yet root-caused. Frames 1500-2000 (fresh-init) never escape a 2-keyframe
+## map within the 500-frame window -- consistent with part 7/8's earlier
+## finding that re-initialization around this stretch of the sequence can
+## take on the order of thousands of frames.
+##
+## Full, continuous, no-`[start-frame]` seq00 checkpoint launched with all
+## of today's fixes (parts 4-13) and the new per-fragment evaluator, to get
+## the real (non-fresh-init-snapshot) picture -- this is the authoritative
+## test the `[start-frame]` spot-checks above can't provide, since a
+## continuous run carries its actual map state through these same frame
+## ranges instead of restarting from scratch at each boundary. Still
+## running as of this note; full results to follow in the next status
+## block.
+
+## Current status (2026-07-18, part 13 -- reframes the whole investigation):
+## per explicit direction (grep for more narrow-window bugs; build a
+## keyframe-coverage validator so misleading ATE numbers like part 12's
+## 0.129m artifact can't happen again), found the actual explanation for
+## why this session kept measuring "no scorable ATE" despite real,
+## verified fixes: **the evaluation tool itself was silently discarding
+## almost all real tracking data, and per-fragment accuracy is genuinely
+## excellent.**
+##
+## **Grep for more narrow-window bugs** (priority 1): found one more,
+## fixed the same way as parts 9/12 -- `ORBmatcher::SearchByProjection
+## (Frame&, KeyFrame*, sAlreadyFound, th, ORBdist)`, the overload backing
+## `Relocalization()` (one of the two functions flagged as a top suspect),
+## had the identical `[nPredictedLevel-1, nPredictedLevel+1]` narrow window.
+## Fixed. Also checked `LocalMapping::SearchInNeighbors()`'s underlying
+## `Fuse()`: it uses `KeyFrame::GetFeaturesInArea()`'s spatial-only overload
+## (no minLevel/maxLevel parameters at all, confirmed by reading its
+## implementation) -- not vulnerable to this bug category, nothing to fix
+## there.
+##
+## **The real discovery**, found while investigating why `frame1_500`
+## (frames 0-500, the "easy" part of the sequence before the documented
+## hard region) still produced "Alignment failed -- too few matched points
+## (3)" despite showing a long, healthy, continuous stretch of keyframe
+## insertion in the logs (id 60 through 434+, hundreds of frames, regular
+## 3-8 frame cadence, no failures): `Atlas::GetAllKeyFrames()` -- read
+## directly in `Atlas.cc` -- is implemented as `return
+## mpCurrentMap->GetAllKeyFrames();`. **It only ever returns the CURRENT
+## map's keyframes.** Since `System::SaveKeyFrameTrajectoryTUM()` (and
+## therefore this whole session's entire evaluation methodology, all day)
+## goes through this call, **every map fragment except the very last one at
+## shutdown time was silently discarded from every ATE measurement taken
+## today** -- whether the fragment ended via a destructive
+## `ResetActiveMap()` or the non-destructive `CreateMapInAtlas()` path
+## (which doesn't print anything grep-able, so today's "reset counts" also
+## undercounted total fragmentation events -- they only counted destructive
+## resets).
+##
+## Added `SLAM.GetAtlas()->GetAllMaps()` enumeration to
+## `orbslam3_kitti_ate.cpp` (`[atlas-coverage]` diagnostic) and confirmed
+## directly: the `frame1_500` run had **4 map fragments totaling 71-78
+## keyframes** at shutdown, and the current-map-only export was giving just
+## 2-4 of them to the evaluator -- over 90% of actually-tracked data was
+## invisible to every ATE number reported today, including the earlier
+## misleading 0.129m one (part 12), which now makes complete sense: it
+## scored whatever tiny fragment happened to be "current" at shutdown,
+## which is essentially arbitrary.
+##
+## **Refactored the evaluation tool properly** rather than patching around
+## it: extracted `EvaluateTrajectory()` (match-by-timestamp + 2D Umeyama
+## align + ATE) into a reusable function, and now call it **once per Atlas
+## map fragment** (each fragment is its own arbitrary monocular scale/
+## coordinate frame -- they can't be concatenated into one trajectory, each
+## needs its own independent alignment against the matching ground-truth
+## stretch). Also fixed a second bug in the old evaluation code while doing
+## this: `pathLength` was computed from the *entire* probed region's ground
+## truth, not just the matched segment -- exactly what made the 0.129m
+## artifact's "0.00% of path" line meaningless. Now computed from only the
+## matched ground-truth points, in trajectory order. New `[max-frames]` CLI
+## arg added too, for fast targeted checks on a specific frame range instead
+## of always running to the end of the sequence.
+##
+## **Result on `frame1_500` (frames 0-500, all of today's fixes in the
+## tree)** -- real, legitimate numbers this time, no degenerate artifacts:
+##
+## | fragment | keyframes | path length | ATE RMSE | ATE RMSE / path |
+## |---|---|---|---|---|
+## | 0 | 13 | 46.2 m | 0.034 m | 0.07% |
+## | 1 | 13 | 36.0 m | 0.124 m | 0.34% |
+## | 2 | 41 | 145.6 m | 0.261 m | 0.18% |
+## | 3 | 4 | (too few to score) | -- | -- |
+##
+## **This is a dramatically better per-distance accuracy than the true
+## original ORB+DBoW2 baseline's 6.4-10.7m ATE over its whole run** -- e.g.
+## fragment 2's 0.261m over 145.6m is roughly 0.18% relative error, vs. the
+## baseline's ~6.4-10.7m over the full ~3722m sequence (~0.2-0.3%) --
+## genuinely comparable or better on a like-for-like (error-per-distance)
+## basis, not just a smaller absolute number from a shorter segment.
+##
+## **This reframes the entire session**: parts 4-12's real, hard-won
+## fixes (BA-sigma weighting, re-widened `SearchForInitialization`, both
+## `SearchByProjection` overloads, now `Relocalization`'s too) were never
+## failing to produce good tracking -- they were producing good tracking
+## that a blind-spot in the evaluation tooling made invisible. The
+## remaining problem is not "this fork can't track accurately" (it can,
+## demonstrably, per-fragment) -- it is specifically **fragmentation**: why
+## maps keep splitting into disconnected pieces, and why
+## `NewDetectCommonRegions()`'s merge path (root-caused back on 2026-07-17,
+## gated on the *current* map reaching 12 keyframes before candidate search
+## even runs) never reconnects them back into one continuous trajectory.
+##
+## **Next session should start with**: (1) run the full, no-`[start-frame]`
+## seq00 checkpoint with the new per-fragment evaluator and see the real
+## distribution of fragment sizes/accuracy across the whole sequence, not
+## just frames 0-500 -- this is the actual, meaningful "checkpoint" this
+## investigation has been missing all along; (2) revisit map-merging
+## specifically now that the accuracy question is answered -- e.g. actually
+## implement the `mnLastRelocFrameId`-gate relaxation flagged in part 11
+## (23% of failures), or the 12-keyframe merge-gate relaxation flagged back
+## on 2026-07-17, now with much higher confidence that reconnecting
+## fragments (rather than improving matching further) is the highest-
+## leverage remaining lever; (3) the priority-2 "coverage validator" idea
+## that motivated this discovery is now implemented in spirit (per-fragment
+## scoring with real path lengths rather than one misleadable global
+## number) -- a stricter automatic pass/fail gate (e.g. reject fragments
+## below some KF-count or path-length floor) could still be added to
+## `EvaluateTrajectory()` if a fully automated checkpoint script is wanted
+## later, but manual inspection of the per-fragment table is sufficient for
+## now.
+
 ## Current status (2026-07-18, part 12): per explicit direction to dig
 ## deeper into why `TwoViewReconstruction` and Local Mapping's point-
 ## creation flow don't sustain map survival, found and fixed a real,

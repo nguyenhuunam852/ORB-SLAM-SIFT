@@ -363,6 +363,10 @@ bool LoopClosing::NewDetectCommonRegions()
 
     //cout << "LoopClousure: Checking KF: " << mpCurrentKF->mnId << endl;
 
+    // [merge-investigate] TEMPORARY diagnostic, see DEBUGGING.md part 18/19.
+    fprintf(stderr, "[merge-investigate] id=%lu mapId=%lu mapKFs=%zu -- past the 12-KF gate, checking candidates\n",
+            mpCurrentKF->mnId, mpLastMap->GetId(), mpLastMap->GetAllKeyFrames().size());
+
     //Check the last candidates with geometric validation
     // Loop candidates
     bool bLoopDetectedInKF = false;
@@ -488,13 +492,28 @@ bool LoopClosing::NewDetectCommonRegions()
 #ifdef REGISTER_TIMES
         std::chrono::steady_clock::time_point time_StartQuery = std::chrono::steady_clock::now();
 #endif
-        mpKeyFrameDB->DetectNBestCandidates(mpCurrentKF, vpLoopBowCand, vpMergeBowCand,3);
+        // Widened 3->10 (part 25, DEBUGGING.md): does NOT loosen any
+        // acceptance threshold (BoW/Sim3Solver/etc. all unchanged) -- just
+        // gives more candidate attempts per query, since real merge
+        // candidates were observed repeatedly making the top-3 (e.g. map 1
+        // vs map 6/8, part 24) and losing to whichever other candidate the
+        // RANSAC happened to converge on first that frame, not because they
+        // were structurally rejected. More Sim3Solver invocations per
+        // frame (LoopClosing's own background thread, not the tracking
+        // hot path) is the only real cost.
+        mpKeyFrameDB->DetectNBestCandidates(mpCurrentKF, vpLoopBowCand, vpMergeBowCand,10);
 #ifdef REGISTER_TIMES
         std::chrono::steady_clock::time_point time_EndQuery = std::chrono::steady_clock::now();
 
         double timeDataQuery = std::chrono::duration_cast<std::chrono::duration<double,std::milli> >(time_EndQuery - time_StartQuery).count();
         vdDataQuery_ms.push_back(timeDataQuery);
 #endif
+        // [merge-investigate] TEMPORARY diagnostic, see DEBUGGING.md part 18/19.
+        fprintf(stderr, "[merge-investigate] id=%lu mapId=%lu nLoopCand=%zu nMergeCand=%zu",
+                mpCurrentKF->mnId, mpLastMap->GetId(), vpLoopBowCand.size(), vpMergeBowCand.size());
+        for (KeyFrame *pMC : vpMergeBowCand)
+            fprintf(stderr, " mergeCand[id=%lu mapId=%lu]", pMC->mnId, pMC->GetMap()->GetId());
+        fprintf(stderr, "\n");
     }
 
 #ifdef REGISTER_TIMES
@@ -504,12 +523,12 @@ bool LoopClosing::NewDetectCommonRegions()
     //Loop candidates
     if(!bLoopDetectedInKF && !vpLoopBowCand.empty())
     {
-        mbLoopDetected = DetectCommonRegionsFromBoW(vpLoopBowCand, mpLoopMatchedKF, mpLoopLastCurrentKF, mg2oLoopSlw, mnLoopNumCoincidences, mvpLoopMPs, mvpLoopMatchedMPs);
+        mbLoopDetected = DetectCommonRegionsFromBoW(vpLoopBowCand, mpLoopMatchedKF, mpLoopLastCurrentKF, mg2oLoopSlw, mnLoopNumCoincidences, mvpLoopMPs, mvpLoopMatchedMPs, "LOOP");
     }
     // Merge candidates
     if(!bMergeDetectedInKF && !vpMergeBowCand.empty())
     {
-        mbMergeDetected = DetectCommonRegionsFromBoW(vpMergeBowCand, mpMergeMatchedKF, mpMergeLastCurrentKF, mg2oMergeSlw, mnMergeNumCoincidences, mvpMergeMPs, mvpMergeMatchedMPs);
+        mbMergeDetected = DetectCommonRegionsFromBoW(vpMergeBowCand, mpMergeMatchedKF, mpMergeLastCurrentKF, mg2oMergeSlw, mnMergeNumCoincidences, mvpMergeMPs, mvpMergeMatchedMPs, "MERGE");
     }
 
 #ifdef REGISTER_TIMES
@@ -576,17 +595,45 @@ bool LoopClosing::DetectAndReffineSim3FromLastKF(KeyFrame* pCurrentKF, KeyFrame*
 }
 
 bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, KeyFrame* &pMatchedKF2, KeyFrame* &pLastCurrentKF, g2o::Sim3 &g2oScw,
-                                             int &nNumCoincidences, std::vector<MapPoint*> &vpMPs, std::vector<MapPoint*> &vpMatchedMPs)
+                                             int &nNumCoincidences, std::vector<MapPoint*> &vpMPs, std::vector<MapPoint*> &vpMatchedMPs,
+                                             const char* tag)
 {
     int nBoWMatches = 20;
     int nBoWInliers = 15;
-    int nSim3Inliers = 20;
-    int nProjMatches = 50;
-    int nProjOptMatches = 80;
+    // nSim3Inliers/nProjMatches/nProjOptMatches scaled down from stock
+    // ORB-SLAM3's 20/50/80 -- see DEBUGGING.md part 19: instrumented the
+    // full merge funnel on this fork's typically 11-45 KF fragments (vs.
+    // stock's much larger/longer-lived maps) and found merge NEVER once
+    // passed numProjMatches>=50 across a whole seq00 checkpoint; the 17
+    // candidates that did survive real Sim3Solver RANSAC convergence
+    // (already the primary geometric filter against false positives)
+    // landed at numProjMatches=10-32, mean ~20 (~40% of the stock bar).
+    // Scaled nProjMatches/nProjOptMatches by that same ~0.4x ratio, and
+    // nSim3Inliers down proportionally too since it can never exceed
+    // whatever numProjMatches actually finds. Deliberately NOT lowering
+    // nBoWMatches/nBoWInliers -- those gate entry into Sim3Solver's RANSAC,
+    // which is the actual defense against false-positive merges; the
+    // thresholds being loosened here only gate how much of an
+    // already-geometrically-verified match to require.
+    // nSim3Inliers pulled 10->6 alongside Optimizer::OptimizeSim3's own
+    // internal bailout (same value, same reasoning) -- see part 22.
+    int nSim3Inliers = 6;
+    int nProjMatches = 20;
+    // Pulled down further, 32->24, after part 21's nFeatures=3000 checkpoint
+    // showed real candidates landing at numProjOptMatches=19-20 (~60% of the
+    // old 32 bar) -- this value now grounded in that measurement, not the
+    // original blind 0.4x guess. Paired with a further nFeatures 3000->4000
+    // bump (settings_sift/KITTI00-02-sift.yaml) per explicit request to
+    // move both at once -- see DEBUGGING.md part 22 for the combined result.
+    int nProjOptMatches = 24;
 
     set<KeyFrame*> spConnectedKeyFrames = mpCurrentKF->GetConnectedKeyFrames();
 
-    int nNumCovisibles = 10;
+    // Widened 10->20 (part 25) alongside nNumCandidates -- pools more
+    // covisible keyframes' map points into each candidate's correspondence
+    // set, same "grow the pool, don't loosen acceptance" spirit as the
+    // nNumCandidates change. See DEBUGGING.md part 25.
+    int nNumCovisibles = 20;
 
     ORBmatcher matcherBoW(0.9, true);
     ORBmatcher matcher(0.75, true);
@@ -688,6 +735,11 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
 
         //pMostBoWMatchesKF = vpCovKFi[pMostBoWMatchesKF];
 
+        // [merge-investigate] TEMPORARY diagnostic, see DEBUGGING.md part 18/19.
+        fprintf(stderr, "[merge-investigate][%s] cur=%lu cand=%lu candMapId=%lu numBoWMatches=%d (need>=%d) %s\n",
+                tag, mpCurrentKF->mnId, pKFi->mnId, pKFi->GetMap()->GetId(), numBoWMatches, nBoWMatches,
+                numBoWMatches >= nBoWMatches ? "PASS" : "FAIL-bow");
+
         if(numBoWMatches >= nBoWMatches) // TODO pick a good threshold
         {
             // Geometric validation
@@ -708,6 +760,10 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                 mTcm = solver.iterate(20,bNoMore, vbInliers, nInliers, bConverge);
                 //Verbose::PrintMess("BoW guess: Solver achieve " + to_string(nInliers) + " geometrical inliers among " + to_string(nBoWInliers) + " BoW matches", Verbose::VERBOSITY_DEBUG);
             }
+
+            // [merge-investigate] TEMPORARY diagnostic, see DEBUGGING.md part 18/19.
+            fprintf(stderr, "[merge-investigate][%s] cur=%lu cand=%lu Sim3Solver %s (nInliers=%d)\n",
+                    tag, mpCurrentKF->mnId, pKFi->mnId, bConverge ? "CONVERGED" : "FAIL-sim3solver", nInliers);
 
             if(bConverge)
             {
@@ -755,6 +811,11 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                 int numProjMatches = matcher.SearchByProjection(mpCurrentKF, mScw, vpMapPoints, vpKeyFrames, vpMatchedMP, vpMatchedKF, 8, 1.5);
                 //cout <<"BoW: " << numProjMatches << " matches between " << vpMapPoints.size() << " points with coarse Sim3" << endl;
 
+                // [merge-investigate] TEMPORARY diagnostic, see DEBUGGING.md part 18/19.
+                fprintf(stderr, "[merge-investigate][%s] cur=%lu cand=%lu numProjMatches=%d (need>=%d) %s\n",
+                        tag, mpCurrentKF->mnId, pKFi->mnId, numProjMatches, nProjMatches,
+                        numProjMatches >= nProjMatches ? "PASS" : "FAIL-projmatches");
+
                 if(numProjMatches >= nProjMatches)
                 {
                     // Optimize Sim3 transformation with every matches
@@ -766,6 +827,11 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
 
                     int numOptMatches = Optimizer::OptimizeSim3(mpCurrentKF, pKFi, vpMatchedMP, gScm, 10, mbFixScale, mHessian7x7, true);
 
+                    // [merge-investigate] TEMPORARY diagnostic, see DEBUGGING.md part 18/19.
+                    fprintf(stderr, "[merge-investigate][%s] cur=%lu cand=%lu numOptMatches=%d (need>=%d) %s\n",
+                            tag, mpCurrentKF->mnId, pKFi->mnId, numOptMatches, nSim3Inliers,
+                            numOptMatches >= nSim3Inliers ? "PASS" : "FAIL-optmatches");
+
                     if(numOptMatches >= nSim3Inliers)
                     {
                         g2o::Sim3 gSmw(pMostBoWMatchesKF->GetRotation().cast<double>(),pMostBoWMatchesKF->GetTranslation().cast<double>(),1.0);
@@ -775,6 +841,11 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                         vector<MapPoint*> vpMatchedMP;
                         vpMatchedMP.resize(mpCurrentKF->GetMapPointMatches().size(), static_cast<MapPoint*>(NULL));
                         int numProjOptMatches = matcher.SearchByProjection(mpCurrentKF, mScw, vpMapPoints, vpMatchedMP, 5, 1.0);
+
+                        // [merge-investigate] TEMPORARY diagnostic, see DEBUGGING.md part 18/19.
+                        fprintf(stderr, "[merge-investigate][%s] cur=%lu cand=%lu numProjOptMatches=%d (need>=%d) %s\n",
+                                tag, mpCurrentKF->mnId, pKFi->mnId, numProjOptMatches, nProjOptMatches,
+                                numProjOptMatches >= nProjOptMatches ? "PASS" : "FAIL-projoptmatches");
 
                         if(numProjOptMatches >= nProjOptMatches)
                         {
@@ -846,6 +917,11 @@ bool LoopClosing::DetectCommonRegionsFromBoW(std::vector<KeyFrame*> &vpBowCand, 
                                 vnMatchesStage[index] = nNumKFs;
                             }
 
+                            // [merge-investigate] TEMPORARY diagnostic, see DEBUGGING.md part 18/19.
+                            fprintf(stderr, "[merge-investigate][%s] cur=%lu cand=%lu nNumKFs=%d (need>=3, checked against %zu covisibles) %s\n",
+                                    tag, mpCurrentKF->mnId, pKFi->mnId, nNumKFs, vpCurrentCovKFs.size(),
+                                    nNumKFs >= 3 ? "PASS" : "FAIL-covisibleconsistency");
+
                             if(nBestMatchesReproj < numProjOptMatches)
                             {
                                 nBestMatchesReproj = numProjOptMatches;
@@ -901,7 +977,19 @@ bool LoopClosing::DetectCommonRegionsFromLastKF(KeyFrame* pCurrentKF, KeyFrame* 
     set<MapPoint*> spAlreadyMatchedMPs(vpMatchedMPs.begin(), vpMatchedMPs.end());
     nNumProjMatches = FindMatchesByProjection(pCurrentKF, pMatchedKF, gScw, spAlreadyMatchedMPs, vpMPs, vpMatchedMPs);
 
-    int nProjMatches = 30;
+    // 5th absolute threshold found in the merge chain, separate from
+    // DetectCommonRegionsFromBoW's own nProjMatches -- this one gates the
+    // final nNumKFs>=3 covisible-consistency check. Pulled 30->15 (part 23)
+    // after a full seq00 checkpoint reached this gate for the first time
+    // ever and found nNumKFs=0/7 and 0/9 (not close -- every single
+    // covisible neighbor failed this bar). See DEBUGGING.md part 23.
+    int nProjMatches = 15;
+
+    // [merge-investigate] TEMPORARY diagnostic, see DEBUGGING.md part 23.
+    fprintf(stderr, "[merge-investigate][lastkf] cur=%lu matched=%lu nNumProjMatches=%d (need>=%d) %s\n",
+            pCurrentKF->mnId, pMatchedKF->mnId, nNumProjMatches, nProjMatches,
+            nNumProjMatches >= nProjMatches ? "PASS" : "FAIL-lastkfprojmatches");
+
     if(nNumProjMatches >= nProjMatches)
     {
         return true;
@@ -914,7 +1002,9 @@ int LoopClosing::FindMatchesByProjection(KeyFrame* pCurrentKF, KeyFrame* pMatche
                                          set<MapPoint*> &spMatchedMPinOrigin, vector<MapPoint*> &vpMapPoints,
                                          vector<MapPoint*> &vpMatchedMapPoints)
 {
-    int nNumCovisibles = 10;
+    // Widened 10->20 alongside DetectCommonRegionsFromBoW's copy -- see
+    // part 25 comment there.
+    int nNumCovisibles = 20;
     vector<KeyFrame*> vpCovKFm = pMatchedKFw->GetBestCovisibilityKeyFrames(nNumCovisibles);
     int nInitialCov = vpCovKFm.size();
     vpCovKFm.push_back(pMatchedKFw);

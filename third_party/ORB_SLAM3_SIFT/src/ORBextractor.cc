@@ -434,9 +434,86 @@ namespace ORB_SLAM3
         constexpr int kMinOctave = -1;      // matches OpenCV SIFT's hardcoded firstOctave=-1
         constexpr int kMaxOctaveSpan = 10;  // generous margin over the ~7 octaves KITTI's
                                              // ~1241x376 images actually produce (verified: [-1,5])
-        constexpr double kContrastThreshold = 0.04;
+        // Part 50: briefly considered lowering this default directly, but it's
+        // effectively dead as a base default -- Tracking.cc's dynamic-density
+        // mechanism (SetDynamicDensity(), see its call sites) reconfigures the
+        // live cv::SIFT object's contrast threshold on every high/low-velocity
+        // state transition, always overriding whatever this constructor sets
+        // initially. The real, effective lever is Tracking.cc's own
+        // kBaseContrastThreshold/kBoostedContrastThreshold constants -- see
+        // that file for the actual part 50 change (retargeting this existing
+        // boost mechanism from angular velocity, which part 45 showed does
+        // NOT correlate with failures, to translation velocity, which does).
+        // TESTED part 56 continued (see DEBUGGING.md): user's insight --
+        // all four earlier road-density recovery attempts (parts 51, 55,
+        // DistributeOctTree, CLAHE) were tested against the STRICT
+        // need>=15 TrackLocalMap accept gate, raising the question of
+        // whether that gate (not the weak candidates themselves) was the
+        // real cause of those failures. Retested 0.04->0.02 IN COMBINATION
+        // with need>=1 (which alone gave 55-62% coverage on frames
+        // 1-1000). Result: 43.2% coverage -- WORSE than need>=1 alone
+        // (both trials) AND worse than the original need>=15/0.04
+        // baseline (53.1%). This refutes the interaction hypothesis: the
+        // contrast-threshold lowering is independently harmful regardless
+        // of how permissive the downstream acceptance gate is -- confirms
+        // the earlier four-way conclusion that this lever just doesn't
+        // work for this SIFT/KITTI combination, for reasons intrinsic to
+        // the resulting descriptors' quality, not gate interaction.
+        // Reverted to 0.04.
+        // TEMPORARY part 56: user asked to push even lower than the
+        // already-failed 0.02/0.01 (parts 51/55). Testing 0.005 to see if
+        // the monotonic worsening trend continues or reverses.
+        constexpr double kContrastThreshold = 0.005;
+        // Part 52: raised from OpenCV's stock 10.0 (never tuned for this fork's
+        // use case). SIFT's edgeThreshold is an UPPER bound on the eigenvalue
+        // ratio test -- keypoints with a MORE edge-like (elongated) local
+        // structure than this are discarded, so a HIGHER value is more
+        // permissive and keeps MORE keypoints, not fewer. Driving footage is
+        // dominated by edge-heavy structure (lane markings, curbs, road/sky
+        // and road/building boundaries) that stock SIFT's conservative default
+        // may be discarding as "too edge-like to localize well," directly
+        // reducing the surviving-feature count this session's evidence (part 45)
+        // points to as the likely root cause of this fork's high tracking-loss
+        // rate. Unlike kContrastThreshold, this one is NOT overridden by
+        // Tracking.cc's dynamic-density mechanism (SetDynamicDensity only
+        // reconfigures nfeatures/contrastThreshold, edgeThreshold stays fixed
+        // at whatever this constructor sets) -- so this edit takes effect
+        // unconditionally, every frame. Doubled as a first testable step.
+        // Part 52 measured: 10.0->20.0 combined with the velocity-gated density
+        // boost (part 50) gave 107 fails on the primary hot zone -- back to the
+        // pure baseline, WORSE than the boost alone (102). Raising edgeThreshold
+        // apparently cancels out the boost's benefit rather than being neutral
+        // or additive. Reverted to stock 10.0. See DEBUGGING.md part 52.
         constexpr double kEdgeThreshold = 10.0;
         constexpr double kSigma = 1.6;
+
+        // TESTED part 56 (see DEBUGGING.md): tried lowering the detection
+        // contrast threshold to 0.02 + requesting unlimited candidates from
+        // cv::SIFT + selecting the final nfeatures via DistributeOctTree
+        // (spatially-fair, best-response-per-cell) instead of cv::SIFT's
+        // own global response ranking -- motivated by directly visualizing
+        // keypoint locations and seeing SIFT (unlike ORB) detects almost
+        // nothing on the flat asphalt road. Raw keypoint count on the
+        // hardest measured frame did jump close to ORB's (2420->4857,
+        // ORB=4863) and the road region visibly gained coverage. But the
+        // real tracking evaluation on frames 1-1000 was WORSE on every
+        // metric: fails 53->72, resets 29->40, coverage 53.1%->35.1%,
+        // accepted-rate 16.7%->15.1%, outlier rate 6.6%->8.1%, and
+        // empty_window barely moved (45.7%->46.2%) despite far more raw
+        // candidates -- meaning the new road-region points mostly didn't
+        // even help fill existing map points' search windows (those
+        // windows target EXISTING 3D points, mostly established from
+        // non-road structure already) while their weaker, lower-contrast
+        // descriptors measurably hurt match/outlier quality wherever they
+        // did get matched. This is the THIRD confirmed instance of the same
+        // failure mode (parts 51, 55, and this one): admitting lower-
+        // contrast candidates hurts more than any quantity increase helps,
+        // regardless of whether they're spatially well-distributed or not
+        // -- ruling out "non-spatial response ranking" as the explanation
+        // for why threshold-lowering fails; the real problem is descriptor
+        // quality at low contrast, which spatial fairness cannot fix.
+        // Reverted -- kept the original response-ranked, nfeatures-capped,
+        // kContrastThreshold=0.04 behavior.
 
         // Flat scale-array index for a decoded (octave, layer) pair, always
         // in [0, kMaxOctaveSpan*nOctaveLayers). layer is clamped to
@@ -1149,7 +1226,36 @@ namespace ORB_SLAM3
 
         _keypoints.clear();
         Mat descriptors;
+
+        // TESTED part 56 (see DEBUGGING.md): tried CLAHE-preprocessing the
+        // image before detection (cv::createCLAHE(2.0, {8,8})) to boost
+        // local contrast so genuinely-present-but-weak road texture could
+        // clear the ORIGINAL unchanged 0.04 threshold on its own merit,
+        // rather than lowering the threshold itself (the three already-
+        // failed attempts: parts 51, 55, and the DistributeOctTree test).
+        // Raw keypoint count on the hardest measured frame did jump to the
+        // full 5000 cap (from 2420), and road coverage visibly improved.
+        // But the real evaluation on frames 1-1000 was the FOURTH
+        // consecutive failure: fails 53->84, resets 29->43, coverage
+        // 53.1%->29.8%, accepted-rate 16.7%->12.9%, plus a concerning
+        // 13.764m-RMSE fragment (still under the 20m budget, but far
+        // worse than this session's typical sub-1m fragments) -- likely
+        // because near-planar road-surface points give poor triangulation
+        // geometry even when 2D matching succeeds, and/or CLAHE's
+        // per-frame-adaptive normalization hurts frame-to-frame descriptor
+        // repeatability for otherwise-good points. Reverted.
         mSift->detectAndCompute(image, cv::noArray(), _keypoints, descriptors);
+
+        // TESTED part 56 (see DEBUGGING.md): tried wiring DistributeOctTree
+        // in here (previously dead code for SIFT) to re-select the final
+        // nfeatures target with spatial fairness instead of cv::SIFT's own
+        // global response ranking, combined with a lower detection
+        // threshold to admit road-region candidates in the first place.
+        // Measured worse on every metric (fails 53->72, coverage
+        // 53.1%->35.1%, outlier rate 6.6%->8.1%) -- reverted. See the
+        // constructor's kContrastThreshold-area comment for the full
+        // writeup of why (descriptor quality at low contrast, not spatial
+        // ranking, is the real problem).
 
         // Remap every keypoint's packed SIFT octave/layer into the flat
         // scale-array index every downstream consumer (ORBmatcher,

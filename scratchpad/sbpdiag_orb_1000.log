@@ -1,0 +1,2124 @@
+[config] capped to 1000 frames (diagnostic max-frames)
+[config] 1000 images loaded from /run/media/nam/D1/Master/Computer Vision/Dataset/KITTI/dataset/sequences/00
+
+ORB-SLAM3 Copyright (C) 2017-2020 Carlos Campos, Richard Elvira, Juan J. Gómez, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
+ORB-SLAM2 Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
+This program comes with ABSOLUTELY NO WARRANTY;
+This is free software, and you are welcome to redistribute it
+under certain conditions. See LICENSE.txt.
+
+Input sensor was set to: Monocular
+Loading settings from settings_sift/KITTI00-02-sift.yaml
+Camera1.k3 optional parameter does not exist...
+	-Loaded camera 1
+Camera.newHeight optional parameter does not exist...
+Camera.newWidth optional parameter does not exist...
+	-Loaded image info
+	-Loaded ORB settings
+Viewer.imageViewScale optional parameter does not exist...
+	-Loaded viewer settings
+System.LoadAtlasFromFile optional parameter does not exist...
+System.SaveAtlasToFile optional parameter does not exist...
+	-Loaded Atlas settings
+System.thFarPoints optional parameter does not exist...
+	-Loaded misc parameters
+----------------------------------
+SLAM settings: 
+	-Camera 1 parameters (Pinhole): [ 718.856 718.856 607.193 185.216 ]
+	-Camera 1 distortion parameters: [  0 0 0 0 ]
+	-Original image size: [ 1241 , 376 ]
+	-Current image size: [ 1241 , 376 ]
+	-Sequence FPS: 10
+	-Features per image: 5000
+	-ORB scale factor: 1.2
+	-ORB number of scales: 8
+	-Initial FAST threshold: 20
+	-Min FAST threshold: 7
+
+
+Loading ORB Vocabulary. This could take a while...
+Vocabulary loaded!
+
+Initialization of Atlas from scratch 
+Creation of new map with id: 0
+Creation of new map with last KF id: 0
+Seq. Name: 
+There are 1 cameras in the atlas
+Camera 0 is pinhole
+[config] tracking 1000 frames (unthrottled, no real-time pacing)...
+[raw-keypoints] id=0 N=14862
+[stats] frame 0 / 1000
+[raw-keypoints] id=1 N=14947
+First KF:0; Map init KF:0
+New Map created with 1368 points
+[raw-keypoints] id=2 N=15667
+[search-local-points] id=2 localMapSize=1368 nToMatch=950 th=1 matched=733
+[raw-keypoints] id=3 N=15842
+[search-local-points] id=3 localMapSize=1778 nToMatch=758 th=1 matched=366
+[raw-keypoints] id=4 N=15671
+[search-local-points] id=4 localMapSize=1807 nToMatch=788 th=1 matched=269
+[raw-keypoints] id=5 N=15722
+[search-local-points] id=5 localMapSize=1807 nToMatch=796 th=1 matched=249
+[raw-keypoints] id=6 N=15832
+[search-local-points] id=6 localMapSize=1380 nToMatch=669 th=1 matched=246
+[raw-keypoints] id=7 N=16030
+[search-local-points] id=7 localMapSize=1380 nToMatch=670 th=1 matched=230
+[raw-keypoints] id=8 N=15248
+[search-local-points] id=8 localMapSize=2705 nToMatch=1864 th=1 matched=871
+[raw-keypoints] id=9 N=14506
+[search-local-points] id=9 localMapSize=2705 nToMatch=1352 th=1 matched=491
+[raw-keypoints] id=10 N=13900
+[search-local-points] id=10 localMapSize=2966 nToMatch=1359 th=1 matched=494
+[raw-keypoints] id=11 N=13643
+[search-local-points] id=11 localMapSize=2957 nToMatch=1161 th=1 matched=429
+[raw-keypoints] id=12 N=5006
+[search-local-points] id=12 localMapSize=2957 nToMatch=1061 th=1 matched=295
+[raw-keypoints] id=13 N=5003
+[search-local-points] id=13 localMapSize=2957 nToMatch=1050 th=1 matched=303
+[raw-keypoints] id=14 N=5006
+[search-local-points] id=14 localMapSize=2957 nToMatch=916 th=1 matched=305
+[raw-keypoints] id=15 N=5003
+[search-local-points] id=15 localMapSize=2142 nToMatch=587 th=1 matched=235
+[raw-keypoints] id=16 N=5007
+[search-local-points] id=16 localMapSize=2142 nToMatch=579 th=1 matched=204
+[raw-keypoints] id=17 N=5006
+[search-local-points] id=17 localMapSize=2142 nToMatch=565 th=1 matched=185
+[raw-keypoints] id=18 N=5006
+[search-local-points] id=18 localMapSize=2142 nToMatch=547 th=1 matched=171
+[raw-keypoints] id=19 N=5003
+[search-local-points] id=19 localMapSize=2837 nToMatch=981 th=1 matched=295
+[raw-keypoints] id=20 N=5006
+[search-local-points] id=20 localMapSize=2837 nToMatch=849 th=1 matched=214
+[raw-keypoints] id=21 N=5003
+[search-local-points] id=21 localMapSize=2837 nToMatch=780 th=1 matched=177
+[raw-keypoints] id=22 N=5004
+[search-local-points] id=22 localMapSize=2837 nToMatch=700 th=1 matched=151
+[raw-keypoints] id=23 N=5007
+[search-local-points] id=23 localMapSize=3049 nToMatch=711 th=1 matched=113
+[raw-keypoints] id=24 N=5005
+TRACK_REF_KF: Less than 15 matches!!
+Fail to track local map!
+SYSTEM-> Reseting active map in monocular case
+LM: Active map reset recieved
+LM: Active map reset, waiting...
+LM: Reseting current map in Local Mapping...
+LM: End reseting Local Mapping...
+LM: Reset free the mutex
+LM: Active map reset, Done!!!
+mnFirstFrameId = 1
+mnInitialFrameId = 0
+23 Frames set to lost
+[raw-keypoints] id=25 N=14201
+[raw-keypoints] id=26 N=13739
+First KF:4; Map init KF:0
+New Map created with 774 points
+[raw-keypoints] id=27 N=5002
+[search-local-points] id=27 localMapSize=774 nToMatch=623 th=1 matched=235
+[raw-keypoints] id=28 N=5007
+[search-local-points] id=28 localMapSize=1565 nToMatch=1058 th=1 matched=330
+[raw-keypoints] id=29 N=5005
+[search-local-points] id=29 localMapSize=1565 nToMatch=794 th=1 matched=173
+[raw-keypoints] id=30 N=5002
+[search-local-points] id=30 localMapSize=1565 nToMatch=614 th=1 matched=158
+[raw-keypoints] id=31 N=5009
+[search-local-points] id=31 localMapSize=1588 nToMatch=529 th=1 matched=108
+[raw-keypoints] id=32 N=5003
+[search-local-points] id=32 localMapSize=1588 nToMatch=444 th=1 matched=87
+[raw-keypoints] id=33 N=5003
+[search-local-points] id=33 localMapSize=641 nToMatch=231 th=1 matched=48
+Fail to track local map!
+[raw-keypoints] id=34 N=5006
+Relocalized!!
+[search-local-points] id=34 localMapSize=1044 nToMatch=272 th=15 matched=152
+[raw-keypoints] id=35 N=5007
+TRACK_REF_KF: Less than 15 matches!!
+Fail to track local map!
+SYSTEM-> Reseting active map in monocular case
+LM: Active map reset recieved
+LM: Active map reset, waiting...
+LM: Reseting current map in Local Mapping...
+LM: End reseting Local Mapping...
+LM: Reset free the mutex
+LM: Active map reset, Done!!!
+mnFirstFrameId = 26
+mnInitialFrameId = 24
+32 Frames set to lost
+[raw-keypoints] id=36 N=13149
+[raw-keypoints] id=37 N=13114
+First KF:7; Map init KF:4
+New Map created with 905 points
+[raw-keypoints] id=38 N=5008
+[search-local-points] id=38 localMapSize=905 nToMatch=769 th=1 matched=290
+[raw-keypoints] id=39 N=5005
+[search-local-points] id=39 localMapSize=905 nToMatch=602 th=1 matched=185
+[raw-keypoints] id=40 N=5004
+[search-local-points] id=40 localMapSize=1588 nToMatch=1058 th=1 matched=238
+[raw-keypoints] id=41 N=5005
+[search-local-points] id=41 localMapSize=1588 nToMatch=875 th=1 matched=184
+[raw-keypoints] id=42 N=5002
+[search-local-points] id=42 localMapSize=1624 nToMatch=701 th=1 matched=150
+[raw-keypoints] id=43 N=5003
+[search-local-points] id=43 localMapSize=1624 nToMatch=563 th=1 matched=126
+[raw-keypoints] id=44 N=5002
+[search-local-points] id=44 localMapSize=710 nToMatch=330 th=1 matched=90
+[raw-keypoints] id=45 N=5003
+[search-local-points] id=45 localMapSize=710 nToMatch=306 th=1 matched=78
+[raw-keypoints] id=46 N=5005
+TRACK_REF_KF: Less than 15 matches!!
+Fail to track local map!
+SYSTEM-> Reseting active map in monocular case
+LM: Active map reset recieved
+LM: Active map reset, waiting...
+LM: Reseting current map in Local Mapping...
+LM: End reseting Local Mapping...
+LM: Reset free the mutex
+LM: Active map reset, Done!!!
+mnFirstFrameId = 37
+mnInitialFrameId = 35
+41 Frames set to lost
+[raw-keypoints] id=47 N=12644
+[raw-keypoints] id=48 N=12797
+First KF:10; Map init KF:7
+New Map created with 824 points
+[raw-keypoints] id=49 N=5005
+[search-local-points] id=49 localMapSize=824 nToMatch=689 th=1 matched=243
+[raw-keypoints] id=50 N=5006
+[search-local-points] id=50 localMapSize=1682 nToMatch=1150 th=1 matched=358
+[raw-keypoints] id=51 N=5003
+[search-local-points] id=51 localMapSize=1682 nToMatch=859 th=1 matched=234
+[raw-keypoints] id=52 N=5006
+[search-local-points] id=52 localMapSize=1739 nToMatch=819 th=1 matched=187
+[raw-keypoints] id=53 N=5005
+[search-local-points] id=53 localMapSize=1738 nToMatch=559 th=1 matched=96
+[raw-keypoints] id=54 N=5008
+[search-local-points] id=54 localMapSize=1086 nToMatch=711 th=1 matched=312
+[raw-keypoints] id=55 N=5007
+[search-local-points] id=55 localMapSize=1152 nToMatch=541 th=1 matched=213
+[raw-keypoints] id=56 N=5006
+[search-local-points] id=56 localMapSize=1145 nToMatch=483 th=1 matched=147
+[raw-keypoints] id=57 N=5003
+[search-local-points] id=57 localMapSize=1145 nToMatch=429 th=1 matched=113
+[raw-keypoints] id=58 N=5007
+[search-local-points] id=58 localMapSize=649 nToMatch=251 th=1 matched=67
+[raw-keypoints] id=59 N=5007
+[search-local-points] id=59 localMapSize=1002 nToMatch=506 th=1 matched=259
+[raw-keypoints] id=60 N=5010
+[search-local-points] id=60 localMapSize=1010 nToMatch=359 th=1 matched=157
+[raw-keypoints] id=61 N=5004
+[search-local-points] id=61 localMapSize=1005 nToMatch=327 th=1 matched=131
+[raw-keypoints] id=62 N=5004
+[search-local-points] id=62 localMapSize=1005 nToMatch=299 th=1 matched=117
+[raw-keypoints] id=63 N=5006
+[search-local-points] id=63 localMapSize=1005 nToMatch=292 th=1 matched=135
+[raw-keypoints] id=64 N=5005
+[search-local-points] id=64 localMapSize=827 nToMatch=216 th=1 matched=116
+[raw-keypoints] id=65 N=5003
+[search-local-points] id=65 localMapSize=962 nToMatch=340 th=1 matched=173
+[raw-keypoints] id=66 N=5004
+[search-local-points] id=66 localMapSize=1073 nToMatch=359 th=1 matched=184
+[raw-keypoints] id=67 N=5001
+[search-local-points] id=67 localMapSize=1055 nToMatch=320 th=1 matched=144
+[raw-keypoints] id=68 N=5005
+[search-local-points] id=68 localMapSize=1055 nToMatch=292 th=1 matched=148
+[raw-keypoints] id=69 N=5006
+[search-local-points] id=69 localMapSize=1050 nToMatch=274 th=1 matched=142
+[raw-keypoints] id=70 N=5005
+[search-local-points] id=70 localMapSize=1050 nToMatch=264 th=1 matched=128
+[raw-keypoints] id=71 N=5002
+[search-local-points] id=71 localMapSize=946 nToMatch=261 th=1 matched=142
+[raw-keypoints] id=72 N=5002
+[search-local-points] id=72 localMapSize=1143 nToMatch=409 th=1 matched=222
+[raw-keypoints] id=73 N=5007
+[search-local-points] id=73 localMapSize=1174 nToMatch=347 th=1 matched=180
+[raw-keypoints] id=74 N=5004
+[search-local-points] id=74 localMapSize=1174 nToMatch=313 th=1 matched=145
+[raw-keypoints] id=75 N=5004
+[search-local-points] id=75 localMapSize=1175 nToMatch=343 th=1 matched=158
+[raw-keypoints] id=76 N=5006
+[search-local-points] id=76 localMapSize=1175 nToMatch=318 th=1 matched=149
+[raw-keypoints] id=77 N=5009
+[search-local-points] id=77 localMapSize=1175 nToMatch=320 th=1 matched=151
+[raw-keypoints] id=78 N=5007
+[search-local-points] id=78 localMapSize=1027 nToMatch=254 th=1 matched=123
+[raw-keypoints] id=79 N=5006
+[search-local-points] id=79 localMapSize=1378 nToMatch=601 th=1 matched=368
+[raw-keypoints] id=80 N=5001
+[search-local-points] id=80 localMapSize=1401 nToMatch=428 th=1 matched=214
+[raw-keypoints] id=81 N=5004
+[search-local-points] id=81 localMapSize=1408 nToMatch=421 th=1 matched=179
+[raw-keypoints] id=82 N=5005
+[search-local-points] id=82 localMapSize=1376 nToMatch=391 th=1 matched=162
+[raw-keypoints] id=83 N=5006
+[search-local-points] id=83 localMapSize=1372 nToMatch=416 th=1 matched=178
+[raw-keypoints] id=84 N=5005
+[search-local-points] id=84 localMapSize=1372 nToMatch=401 th=1 matched=164
+[raw-keypoints] id=85 N=5005
+[search-local-points] id=85 localMapSize=1372 nToMatch=423 th=1 matched=156
+[raw-keypoints] id=86 N=5006
+[search-local-points] id=86 localMapSize=1372 nToMatch=428 th=1 matched=157
+[raw-keypoints] id=87 N=5005
+[search-local-points] id=87 localMapSize=1626 nToMatch=726 th=1 matched=421
+[raw-keypoints] id=88 N=5005
+[search-local-points] id=88 localMapSize=1640 nToMatch=494 th=1 matched=219
+[raw-keypoints] id=89 N=5005
+[search-local-points] id=89 localMapSize=1649 nToMatch=520 th=1 matched=217
+[raw-keypoints] id=90 N=5006
+[search-local-points] id=90 localMapSize=1657 nToMatch=519 th=1 matched=202
+[raw-keypoints] id=91 N=5001
+[search-local-points] id=91 localMapSize=1613 nToMatch=517 th=1 matched=177
+[raw-keypoints] id=92 N=5005
+[search-local-points] id=92 localMapSize=1613 nToMatch=493 th=1 matched=168
+[raw-keypoints] id=93 N=5007
+[search-local-points] id=93 localMapSize=1609 nToMatch=479 th=1 matched=149
+[raw-keypoints] id=94 N=5006
+[search-local-points] id=94 localMapSize=1439 nToMatch=382 th=1 matched=119
+[raw-keypoints] id=95 N=5002
+[search-local-points] id=95 localMapSize=1837 nToMatch=743 th=1 matched=406
+[raw-keypoints] id=96 N=5002
+[search-local-points] id=96 localMapSize=1863 nToMatch=513 th=1 matched=197
+[raw-keypoints] id=97 N=5001
+[search-local-points] id=97 localMapSize=1870 nToMatch=470 th=1 matched=158
+[raw-keypoints] id=98 N=5003
+[search-local-points] id=98 localMapSize=1842 nToMatch=460 th=1 matched=157
+[raw-keypoints] id=99 N=5005
+[search-local-points] id=99 localMapSize=1842 nToMatch=429 th=1 matched=150
+[raw-keypoints] id=100 N=5005
+[search-local-points] id=100 localMapSize=1842 nToMatch=396 th=1 matched=133
+[raw-keypoints] id=101 N=5003
+[search-local-points] id=101 localMapSize=1840 nToMatch=310 th=1 matched=107
+[raw-keypoints] id=102 N=5005
+[search-local-points] id=102 localMapSize=1840 nToMatch=254 th=1 matched=94
+[raw-keypoints] id=103 N=5003
+[search-local-points] id=103 localMapSize=1959 nToMatch=489 th=1 matched=323
+[raw-keypoints] id=104 N=5006
+[search-local-points] id=104 localMapSize=1982 nToMatch=287 th=1 matched=131
+[raw-keypoints] id=105 N=4989
+[search-local-points] id=105 localMapSize=1964 nToMatch=277 th=1 matched=132
+[raw-keypoints] id=106 N=4973
+[search-local-points] id=106 localMapSize=1964 nToMatch=277 th=1 matched=127
+[raw-keypoints] id=107 N=4991
+[search-local-points] id=107 localMapSize=1959 nToMatch=256 th=1 matched=122
+[raw-keypoints] id=108 N=4979
+[search-local-points] id=108 localMapSize=1959 nToMatch=238 th=1 matched=108
+[raw-keypoints] id=109 N=5005
+[search-local-points] id=109 localMapSize=1959 nToMatch=204 th=1 matched=89
+[raw-keypoints] id=110 N=5009
+[search-local-points] id=110 localMapSize=1959 nToMatch=202 th=1 matched=89
+[raw-keypoints] id=111 N=5004
+[search-local-points] id=111 localMapSize=2072 nToMatch=448 th=1 matched=302
+[raw-keypoints] id=112 N=5003
+[search-local-points] id=112 localMapSize=2141 nToMatch=267 th=1 matched=139
+[raw-keypoints] id=113 N=5002
+[search-local-points] id=113 localMapSize=2176 nToMatch=265 th=1 matched=123
+[raw-keypoints] id=114 N=5006
+[search-local-points] id=114 localMapSize=2114 nToMatch=240 th=1 matched=101
+[raw-keypoints] id=115 N=5002
+[search-local-points] id=115 localMapSize=2129 nToMatch=209 th=1 matched=75
+[raw-keypoints] id=116 N=5003
+[search-local-points] id=116 localMapSize=1993 nToMatch=148 th=1 matched=45
+[raw-keypoints] id=117 N=5004
+[search-local-points] id=117 localMapSize=2391 nToMatch=484 th=1 matched=301
+[raw-keypoints] id=118 N=5007
+[search-local-points] id=118 localMapSize=2364 nToMatch=237 th=1 matched=106
+[raw-keypoints] id=119 N=5006
+[search-local-points] id=119 localMapSize=2363 nToMatch=242 th=1 matched=106
+[raw-keypoints] id=120 N=5007
+[search-local-points] id=120 localMapSize=2199 nToMatch=254 th=1 matched=98
+[raw-keypoints] id=121 N=5005
+[search-local-points] id=121 localMapSize=2359 nToMatch=610 th=1 matched=305
+[raw-keypoints] id=122 N=5002
+[search-local-points] id=122 localMapSize=2305 nToMatch=369 th=1 matched=104
+[raw-keypoints] id=123 N=5004
+[search-local-points] id=123 localMapSize=2305 nToMatch=332 th=1 matched=107
+[raw-keypoints] id=124 N=5005
+[search-local-points] id=124 localMapSize=2300 nToMatch=296 th=1 matched=73
+[raw-keypoints] id=125 N=5011
+[search-local-points] id=125 localMapSize=1887 nToMatch=226 th=1 matched=59
+[raw-keypoints] id=126 N=5002
+[search-local-points] id=126 localMapSize=1693 nToMatch=235 th=1 matched=104
+[raw-keypoints] id=127 N=5004
+[search-local-points] id=127 localMapSize=1833 nToMatch=285 th=1 matched=114
+[raw-keypoints] id=128 N=5003
+[search-local-points] id=128 localMapSize=1785 nToMatch=181 th=1 matched=38
+[raw-keypoints] id=129 N=5005
+[search-local-points] id=129 localMapSize=1785 nToMatch=160 th=1 matched=44
+[raw-keypoints] id=130 N=5002
+[search-local-points] id=130 localMapSize=1881 nToMatch=119 th=1 matched=37
+[raw-keypoints] id=131 N=5006
+[search-local-points] id=131 localMapSize=1673 nToMatch=76 th=1 matched=13
+[raw-keypoints] id=132 N=5004
+[search-local-points] id=132 localMapSize=1807 nToMatch=214 th=1 matched=112
+[raw-keypoints] id=133 N=5003
+[search-local-points] id=133 localMapSize=1816 nToMatch=140 th=1 matched=51
+[raw-keypoints] id=134 N=5005
+[search-local-points] id=134 localMapSize=1813 nToMatch=117 th=1 matched=37
+[raw-keypoints] id=135 N=5001
+[search-local-points] id=135 localMapSize=1813 nToMatch=113 th=1 matched=39
+[raw-keypoints] id=136 N=5005
+[search-local-points] id=136 localMapSize=1812 nToMatch=98 th=1 matched=35
+[raw-keypoints] id=137 N=5003
+[search-local-points] id=137 localMapSize=1812 nToMatch=75 th=1 matched=19
+[raw-keypoints] id=138 N=5001
+[search-local-points] id=138 localMapSize=1806 nToMatch=198 th=1 matched=106
+[raw-keypoints] id=139 N=5006
+[search-local-points] id=139 localMapSize=1819 nToMatch=134 th=1 matched=60
+[raw-keypoints] id=140 N=5008
+[search-local-points] id=140 localMapSize=1811 nToMatch=103 th=1 matched=41
+[raw-keypoints] id=141 N=5006
+[search-local-points] id=141 localMapSize=1752 nToMatch=95 th=1 matched=35
+[raw-keypoints] id=142 N=5003
+[search-local-points] id=142 localMapSize=1954 nToMatch=263 th=1 matched=158
+[raw-keypoints] id=143 N=4993
+[search-local-points] id=143 localMapSize=2019 nToMatch=184 th=1 matched=104
+[raw-keypoints] id=144 N=4989
+[search-local-points] id=144 localMapSize=2000 nToMatch=153 th=1 matched=62
+[raw-keypoints] id=145 N=4985
+[search-local-points] id=145 localMapSize=2000 nToMatch=146 th=1 matched=52
+[raw-keypoints] id=146 N=4927
+[search-local-points] id=146 localMapSize=1989 nToMatch=159 th=1 matched=56
+[raw-keypoints] id=147 N=4947
+[search-local-points] id=147 localMapSize=1989 nToMatch=152 th=1 matched=48
+[raw-keypoints] id=148 N=4928
+[search-local-points] id=148 localMapSize=2249 nToMatch=451 th=1 matched=285
+[raw-keypoints] id=149 N=4916
+[search-local-points] id=149 localMapSize=2309 nToMatch=311 th=1 matched=123
+[raw-keypoints] id=150 N=4924
+[search-local-points] id=150 localMapSize=2303 nToMatch=308 th=1 matched=123
+[raw-keypoints] id=151 N=4969
+[search-local-points] id=151 localMapSize=2303 nToMatch=272 th=1 matched=92
+[raw-keypoints] id=152 N=5000
+[search-local-points] id=152 localMapSize=2303 nToMatch=262 th=1 matched=98
+[raw-keypoints] id=153 N=5004
+[search-local-points] id=153 localMapSize=2303 nToMatch=260 th=1 matched=109
+[raw-keypoints] id=154 N=5005
+[search-local-points] id=154 localMapSize=2295 nToMatch=256 th=1 matched=108
+[raw-keypoints] id=155 N=5005
+[search-local-points] id=155 localMapSize=2441 nToMatch=486 th=1 matched=265
+[raw-keypoints] id=156 N=5004
+[search-local-points] id=156 localMapSize=2557 nToMatch=486 th=1 matched=231
+[raw-keypoints] id=157 N=5005
+[search-local-points] id=157 localMapSize=2587 nToMatch=449 th=1 matched=180
+[raw-keypoints] id=158 N=5008
+[search-local-points] id=158 localMapSize=2523 nToMatch=395 th=1 matched=150
+[raw-keypoints] id=159 N=5007
+[search-local-points] id=159 localMapSize=2523 nToMatch=386 th=1 matched=128
+[raw-keypoints] id=160 N=5005
+[search-local-points] id=160 localMapSize=2520 nToMatch=392 th=1 matched=152
+[raw-keypoints] id=161 N=5004
+[search-local-points] id=161 localMapSize=2528 nToMatch=351 th=1 matched=124
+[raw-keypoints] id=162 N=5004
+[search-local-points] id=162 localMapSize=2049 nToMatch=295 th=1 matched=85
+[raw-keypoints] id=163 N=5002
+[search-local-points] id=163 localMapSize=2016 nToMatch=422 th=1 matched=159
+[raw-keypoints] id=164 N=5007
+[search-local-points] id=164 localMapSize=2075 nToMatch=348 th=1 matched=136
+[raw-keypoints] id=165 N=5003
+[search-local-points] id=165 localMapSize=2291 nToMatch=313 th=1 matched=103
+[raw-keypoints] id=166 N=5000
+[search-local-points] id=166 localMapSize=2274 nToMatch=274 th=1 matched=89
+[raw-keypoints] id=167 N=5004
+[search-local-points] id=167 localMapSize=2072 nToMatch=260 th=1 matched=86
+[raw-keypoints] id=168 N=5005
+[search-local-points] id=168 localMapSize=2072 nToMatch=233 th=1 matched=77
+[raw-keypoints] id=169 N=5007
+[search-local-points] id=169 localMapSize=2070 nToMatch=202 th=1 matched=62
+[raw-keypoints] id=170 N=5006
+[search-local-points] id=170 localMapSize=1903 nToMatch=160 th=1 matched=57
+[raw-keypoints] id=171 N=5003
+[search-local-points] id=171 localMapSize=2006 nToMatch=256 th=1 matched=120
+[raw-keypoints] id=172 N=5003
+[search-local-points] id=172 localMapSize=2027 nToMatch=204 th=1 matched=87
+[raw-keypoints] id=173 N=4998
+[search-local-points] id=173 localMapSize=2033 nToMatch=184 th=1 matched=75
+[raw-keypoints] id=174 N=4990
+[search-local-points] id=174 localMapSize=2042 nToMatch=172 th=1 matched=70
+[raw-keypoints] id=175 N=4988
+[search-local-points] id=175 localMapSize=2015 nToMatch=139 th=1 matched=60
+[raw-keypoints] id=176 N=5002
+[search-local-points] id=176 localMapSize=2015 nToMatch=134 th=1 matched=63
+[raw-keypoints] id=177 N=5000
+[search-local-points] id=177 localMapSize=2015 nToMatch=131 th=1 matched=56
+[raw-keypoints] id=178 N=5004
+[search-local-points] id=178 localMapSize=2015 nToMatch=126 th=1 matched=53
+[raw-keypoints] id=179 N=5005
+[search-local-points] id=179 localMapSize=2015 nToMatch=123 th=1 matched=54
+[raw-keypoints] id=180 N=5004
+[search-local-points] id=180 localMapSize=1848 nToMatch=104 th=1 matched=56
+[raw-keypoints] id=181 N=5001
+[search-local-points] id=181 localMapSize=1968 nToMatch=207 th=1 matched=129
+[raw-keypoints] id=182 N=4991
+[search-local-points] id=182 localMapSize=1991 nToMatch=155 th=1 matched=88
+[raw-keypoints] id=183 N=4986
+[search-local-points] id=183 localMapSize=1998 nToMatch=148 th=1 matched=81
+[raw-keypoints] id=184 N=4987
+[search-local-points] id=184 localMapSize=2000 nToMatch=131 th=1 matched=80
+[raw-keypoints] id=185 N=5002
+[search-local-points] id=185 localMapSize=1972 nToMatch=120 th=1 matched=63
+[raw-keypoints] id=186 N=5001
+[search-local-points] id=186 localMapSize=1972 nToMatch=131 th=1 matched=69
+[raw-keypoints] id=187 N=5003
+[search-local-points] id=187 localMapSize=1972 nToMatch=123 th=1 matched=61
+[raw-keypoints] id=188 N=5005
+[search-local-points] id=188 localMapSize=1970 nToMatch=128 th=1 matched=67
+[raw-keypoints] id=189 N=5003
+[search-local-points] id=189 localMapSize=1920 nToMatch=121 th=1 matched=55
+[raw-keypoints] id=190 N=5007
+[search-local-points] id=190 localMapSize=2048 nToMatch=246 th=1 matched=153
+[raw-keypoints] id=191 N=5003
+[search-local-points] id=191 localMapSize=2073 nToMatch=194 th=1 matched=107
+[raw-keypoints] id=192 N=5001
+[search-local-points] id=192 localMapSize=1914 nToMatch=190 th=1 matched=91
+[raw-keypoints] id=193 N=5006
+[search-local-points] id=193 localMapSize=2084 nToMatch=188 th=1 matched=76
+[raw-keypoints] id=194 N=5008
+[search-local-points] id=194 localMapSize=2085 nToMatch=199 th=1 matched=81
+[raw-keypoints] id=195 N=5007
+[search-local-points] id=195 localMapSize=2053 nToMatch=177 th=1 matched=75
+[raw-keypoints] id=196 N=5006
+[search-local-points] id=196 localMapSize=2053 nToMatch=195 th=1 matched=78
+[raw-keypoints] id=197 N=5006
+[search-local-points] id=197 localMapSize=2053 nToMatch=186 th=1 matched=77
+[raw-keypoints] id=198 N=5006
+[search-local-points] id=198 localMapSize=1844 nToMatch=169 th=1 matched=57
+[raw-keypoints] id=199 N=5007
+[search-local-points] id=199 localMapSize=1998 nToMatch=339 th=1 matched=173
+[raw-keypoints] id=200 N=5004
+[search-local-points] id=200 localMapSize=2036 nToMatch=291 th=1 matched=112
+[raw-keypoints] id=201 N=5002
+[search-local-points] id=201 localMapSize=1824 nToMatch=292 th=1 matched=89
+[raw-keypoints] id=202 N=5005
+[search-local-points] id=202 localMapSize=1648 nToMatch=244 th=1 matched=69
+[raw-keypoints] id=203 N=5008
+[search-local-points] id=203 localMapSize=1406 nToMatch=201 th=1 matched=39
+[raw-keypoints] id=204 N=5006
+[search-local-points] id=204 localMapSize=1385 nToMatch=137 th=1 matched=33
+Fail to track local map!
+[raw-keypoints] id=205 N=5003
+Fail to track local map!
+[raw-keypoints] id=206 N=5007
+Fail to track local map!
+[raw-keypoints] id=207 N=5004
+Fail to track local map!
+[raw-keypoints] id=208 N=5006
+Fail to track local map!
+[raw-keypoints] id=209 N=5004
+Fail to track local map!
+[raw-keypoints] id=210 N=5008
+Fail to track local map!
+[raw-keypoints] id=211 N=5006
+Fail to track local map!
+[raw-keypoints] id=212 N=5004
+Fail to track local map!
+[raw-keypoints] id=213 N=5004
+Fail to track local map!
+[raw-keypoints] id=214 N=5006
+Fail to track local map!
+[raw-keypoints] id=215 N=5005
+Fail to track local map!
+[raw-keypoints] id=216 N=5002
+Fail to track local map!
+[raw-keypoints] id=217 N=5002
+Fail to track local map!
+[raw-keypoints] id=218 N=5004
+Fail to track local map!
+[raw-keypoints] id=219 N=5002
+Fail to track local map!
+[raw-keypoints] id=220 N=5001
+Fail to track local map!
+[raw-keypoints] id=221 N=5001
+Fail to track local map!
+[raw-keypoints] id=222 N=5002
+Fail to track local map!
+[raw-keypoints] id=223 N=5003
+Fail to track local map!
+[raw-keypoints] id=224 N=5003
+Fail to track local map!
+[raw-keypoints] id=225 N=5005
+Fail to track local map!
+[raw-keypoints] id=226 N=5005
+Fail to track local map!
+[raw-keypoints] id=227 N=5005
+Fail to track local map!
+[raw-keypoints] id=228 N=5001
+Fail to track local map!
+[raw-keypoints] id=229 N=5002
+Fail to track local map!
+[raw-keypoints] id=230 N=5001
+Fail to track local map!
+[raw-keypoints] id=231 N=5002
+Fail to track local map!
+[raw-keypoints] id=232 N=5005
+Fail to track local map!
+[raw-keypoints] id=233 N=5003
+Fail to track local map!
+Creation of new map with id: 1
+Stored map with ID: 0
+Creation of new map with last KF id: 34
+[raw-keypoints] id=234 N=9017
+[raw-keypoints] id=235 N=8998
+First KF:34; Map init KF:34
+New Map created with 510 points
+[raw-keypoints] id=236 N=4983
+[search-local-points] id=236 localMapSize=510 nToMatch=370 th=1 matched=203
+[raw-keypoints] id=237 N=4980
+[search-local-points] id=237 localMapSize=1064 nToMatch=530 th=1 matched=210
+[raw-keypoints] id=238 N=4979
+[search-local-points] id=238 localMapSize=1094 nToMatch=418 th=1 matched=111
+[raw-keypoints] id=239 N=4981
+[search-local-points] id=239 localMapSize=1094 nToMatch=357 th=1 matched=72
+[raw-keypoints] id=240 N=4992
+[search-local-points] id=240 localMapSize=549 nToMatch=192 th=1 matched=51
+[raw-keypoints] id=241 N=4963
+[search-local-points] id=241 localMapSize=1079 nToMatch=643 th=1 matched=325
+[raw-keypoints] id=242 N=4989
+[search-local-points] id=242 localMapSize=1079 nToMatch=395 th=1 matched=155
+[raw-keypoints] id=243 N=4997
+[search-local-points] id=243 localMapSize=1079 nToMatch=353 th=1 matched=100
+[raw-keypoints] id=244 N=4993
+[search-local-points] id=244 localMapSize=768 nToMatch=270 th=1 matched=73
+[raw-keypoints] id=245 N=4969
+[search-local-points] id=245 localMapSize=978 nToMatch=414 th=1 matched=179
+[raw-keypoints] id=246 N=4956
+[search-local-points] id=246 localMapSize=1231 nToMatch=536 th=1 matched=241
+[raw-keypoints] id=247 N=4930
+[search-local-points] id=247 localMapSize=1237 nToMatch=462 th=1 matched=131
+[raw-keypoints] id=248 N=4962
+[search-local-points] id=248 localMapSize=1225 nToMatch=393 th=1 matched=103
+[raw-keypoints] id=249 N=4919
+[search-local-points] id=249 localMapSize=1225 nToMatch=369 th=1 matched=81
+[raw-keypoints] id=250 N=4941
+[search-local-points] id=250 localMapSize=1221 nToMatch=324 th=1 matched=90
+[raw-keypoints] id=251 N=4945
+[search-local-points] id=251 localMapSize=1238 nToMatch=517 th=1 matched=308
+[raw-keypoints] id=252 N=4973
+[search-local-points] id=252 localMapSize=1552 nToMatch=658 th=1 matched=399
+[raw-keypoints] id=253 N=4958
+[search-local-points] id=253 localMapSize=1491 nToMatch=386 th=1 matched=192
+[raw-keypoints] id=254 N=4914
+[search-local-points] id=254 localMapSize=1491 nToMatch=377 th=1 matched=162
+[raw-keypoints] id=255 N=4862
+[search-local-points] id=255 localMapSize=1490 nToMatch=377 th=1 matched=180
+[raw-keypoints] id=256 N=4834
+[search-local-points] id=256 localMapSize=1490 nToMatch=370 th=1 matched=164
+[raw-keypoints] id=257 N=4804
+[search-local-points] id=257 localMapSize=1708 nToMatch=690 th=1 matched=455
+[raw-keypoints] id=258 N=4799
+[search-local-points] id=258 localMapSize=1974 nToMatch=724 th=1 matched=395
+[raw-keypoints] id=259 N=4752
+[search-local-points] id=259 localMapSize=2027 nToMatch=608 th=1 matched=279
+[raw-keypoints] id=260 N=4758
+[search-local-points] id=260 localMapSize=1889 nToMatch=527 th=1 matched=210
+[raw-keypoints] id=261 N=4709
+[search-local-points] id=261 localMapSize=1889 nToMatch=513 th=1 matched=203
+[raw-keypoints] id=262 N=4680
+[search-local-points] id=262 localMapSize=1889 nToMatch=510 th=1 matched=185
+[raw-keypoints] id=263 N=4743
+[search-local-points] id=263 localMapSize=1887 nToMatch=486 th=1 matched=173
+[raw-keypoints] id=264 N=4794
+[search-local-points] id=264 localMapSize=1887 nToMatch=491 th=1 matched=182
+[raw-keypoints] id=265 N=4796
+[search-local-points] id=265 localMapSize=2111 nToMatch=800 th=1 matched=407
+[raw-keypoints] id=266 N=4780
+[search-local-points] id=266 localMapSize=2272 nToMatch=768 th=1 matched=334
+[raw-keypoints] id=267 N=4765
+[search-local-points] id=267 localMapSize=2156 nToMatch=614 th=1 matched=208
+[raw-keypoints] id=268 N=4804
+[search-local-points] id=268 localMapSize=2156 nToMatch=589 th=1 matched=178
+[raw-keypoints] id=269 N=4752
+[search-local-points] id=269 localMapSize=2156 nToMatch=560 th=1 matched=162
+[raw-keypoints] id=270 N=4724
+[search-local-points] id=270 localMapSize=2152 nToMatch=586 th=1 matched=161
+[raw-keypoints] id=271 N=4705
+[search-local-points] id=271 localMapSize=2152 nToMatch=589 th=1 matched=160
+[raw-keypoints] id=272 N=4709
+[search-local-points] id=272 localMapSize=2152 nToMatch=562 th=1 matched=172
+[raw-keypoints] id=273 N=4680
+[search-local-points] id=273 localMapSize=2196 nToMatch=783 th=1 matched=344
+[raw-keypoints] id=274 N=4775
+[search-local-points] id=274 localMapSize=2264 nToMatch=611 th=1 matched=236
+[raw-keypoints] id=275 N=4862
+[search-local-points] id=275 localMapSize=2179 nToMatch=523 th=1 matched=181
+[raw-keypoints] id=276 N=4867
+[search-local-points] id=276 localMapSize=2171 nToMatch=471 th=1 matched=163
+[raw-keypoints] id=277 N=4872
+[search-local-points] id=277 localMapSize=2171 nToMatch=459 th=1 matched=191
+[raw-keypoints] id=278 N=4904
+[search-local-points] id=278 localMapSize=2171 nToMatch=431 th=1 matched=152
+[raw-keypoints] id=279 N=4926
+[search-local-points] id=279 localMapSize=2165 nToMatch=445 th=1 matched=164
+[raw-keypoints] id=280 N=4973
+[search-local-points] id=280 localMapSize=2165 nToMatch=419 th=1 matched=154
+[raw-keypoints] id=281 N=4962
+[search-local-points] id=281 localMapSize=2071 nToMatch=491 th=1 matched=203
+[raw-keypoints] id=282 N=4963
+[search-local-points] id=282 localMapSize=2280 nToMatch=615 th=1 matched=286
+[raw-keypoints] id=283 N=4964
+[search-local-points] id=283 localMapSize=2323 nToMatch=564 th=1 matched=202
+[raw-keypoints] id=284 N=4973
+[search-local-points] id=284 localMapSize=2348 nToMatch=558 th=1 matched=195
+[raw-keypoints] id=285 N=5002
+[search-local-points] id=285 localMapSize=2231 nToMatch=443 th=1 matched=127
+[raw-keypoints] id=286 N=4977
+[search-local-points] id=286 localMapSize=2231 nToMatch=426 th=1 matched=121
+[raw-keypoints] id=287 N=4964
+[search-local-points] id=287 localMapSize=2231 nToMatch=399 th=1 matched=98
+[raw-keypoints] id=288 N=4939
+[search-local-points] id=288 localMapSize=2231 nToMatch=386 th=1 matched=93
+[raw-keypoints] id=289 N=4938
+[search-local-points] id=289 localMapSize=2227 nToMatch=381 th=1 matched=98
+[raw-keypoints] id=290 N=4925
+[search-local-points] id=290 localMapSize=2227 nToMatch=350 th=1 matched=87
+[raw-keypoints] id=291 N=4880
+[search-local-points] id=291 localMapSize=2227 nToMatch=316 th=1 matched=87
+[raw-keypoints] id=292 N=4870
+[search-local-points] id=292 localMapSize=2168 nToMatch=410 th=1 matched=202
+[raw-keypoints] id=293 N=4901
+[search-local-points] id=293 localMapSize=2257 nToMatch=318 th=1 matched=141
+[raw-keypoints] id=294 N=4897
+[search-local-points] id=294 localMapSize=2290 nToMatch=299 th=1 matched=120
+[raw-keypoints] id=295 N=4919
+[search-local-points] id=295 localMapSize=2314 nToMatch=311 th=1 matched=121
+[raw-keypoints] id=296 N=4925
+[search-local-points] id=296 localMapSize=2322 nToMatch=306 th=1 matched=110
+[raw-keypoints] id=297 N=4927
+[search-local-points] id=297 localMapSize=2258 nToMatch=282 th=1 matched=90
+[raw-keypoints] id=298 N=4876
+[search-local-points] id=298 localMapSize=2258 nToMatch=269 th=1 matched=79
+[raw-keypoints] id=299 N=4851
+[search-local-points] id=299 localMapSize=2258 nToMatch=247 th=1 matched=64
+[raw-keypoints] id=300 N=4851
+[search-local-points] id=300 localMapSize=2258 nToMatch=246 th=1 matched=48
+[raw-keypoints] id=301 N=4871
+[search-local-points] id=301 localMapSize=2256 nToMatch=212 th=1 matched=48
+[raw-keypoints] id=302 N=4862
+[search-local-points] id=302 localMapSize=2256 nToMatch=185 th=1 matched=40
+[raw-keypoints] id=303 N=4876
+[search-local-points] id=303 localMapSize=2130 nToMatch=179 th=1 matched=64
+[raw-keypoints] id=304 N=4897
+[search-local-points] id=304 localMapSize=2254 nToMatch=263 th=1 matched=127
+[raw-keypoints] id=305 N=4867
+[search-local-points] id=305 localMapSize=2293 nToMatch=246 th=1 matched=84
+[raw-keypoints] id=306 N=4855
+[search-local-points] id=306 localMapSize=2300 nToMatch=225 th=1 matched=68
+[raw-keypoints] id=307 N=4853
+[search-local-points] id=307 localMapSize=2305 nToMatch=238 th=1 matched=73
+[raw-keypoints] id=308 N=4922
+[search-local-points] id=308 localMapSize=2270 nToMatch=214 th=1 matched=48
+[raw-keypoints] id=309 N=4967
+[search-local-points] id=309 localMapSize=2270 nToMatch=222 th=1 matched=55
+[raw-keypoints] id=310 N=4912
+[search-local-points] id=310 localMapSize=2270 nToMatch=225 th=1 matched=56
+[raw-keypoints] id=311 N=4947
+[search-local-points] id=311 localMapSize=2270 nToMatch=213 th=1 matched=54
+[raw-keypoints] id=312 N=4937
+[search-local-points] id=312 localMapSize=2270 nToMatch=212 th=1 matched=44
+[raw-keypoints] id=313 N=4931
+[search-local-points] id=313 localMapSize=2044 nToMatch=134 th=1 matched=39
+[raw-keypoints] id=314 N=4969
+[search-local-points] id=314 localMapSize=2219 nToMatch=295 th=1 matched=134
+[raw-keypoints] id=315 N=4966
+[search-local-points] id=315 localMapSize=2241 nToMatch=230 th=1 matched=86
+[raw-keypoints] id=316 N=4993
+[search-local-points] id=316 localMapSize=2256 nToMatch=219 th=1 matched=58
+[raw-keypoints] id=317 N=4971
+[search-local-points] id=317 localMapSize=2256 nToMatch=217 th=1 matched=51
+[raw-keypoints] id=318 N=4998
+[search-local-points] id=318 localMapSize=2287 nToMatch=250 th=1 matched=69
+[raw-keypoints] id=319 N=5002
+[search-local-points] id=319 localMapSize=2272 nToMatch=228 th=1 matched=54
+[raw-keypoints] id=320 N=4991
+[search-local-points] id=320 localMapSize=2272 nToMatch=222 th=1 matched=45
+[raw-keypoints] id=321 N=4996
+[search-local-points] id=321 localMapSize=2272 nToMatch=192 th=1 matched=35
+[raw-keypoints] id=322 N=4984
+[search-local-points] id=322 localMapSize=2270 nToMatch=179 th=1 matched=32
+[raw-keypoints] id=323 N=4965
+[search-local-points] id=323 localMapSize=2270 nToMatch=173 th=1 matched=31
+[raw-keypoints] id=324 N=4949
+[search-local-points] id=324 localMapSize=2113 nToMatch=108 th=1 matched=23
+[raw-keypoints] id=325 N=4894
+[search-local-points] id=325 localMapSize=2332 nToMatch=332 th=1 matched=176
+[raw-keypoints] id=326 N=4928
+[search-local-points] id=326 localMapSize=2342 nToMatch=209 th=1 matched=71
+[raw-keypoints] id=327 N=4929
+[search-local-points] id=327 localMapSize=2336 nToMatch=193 th=1 matched=57
+[raw-keypoints] id=328 N=4880
+[search-local-points] id=328 localMapSize=2336 nToMatch=170 th=1 matched=58
+[raw-keypoints] id=329 N=4906
+[search-local-points] id=329 localMapSize=2336 nToMatch=171 th=1 matched=54
+[raw-keypoints] id=330 N=4914
+[search-local-points] id=330 localMapSize=2336 nToMatch=170 th=1 matched=47
+[raw-keypoints] id=331 N=4904
+[search-local-points] id=331 localMapSize=2336 nToMatch=160 th=1 matched=42
+[raw-keypoints] id=332 N=4954
+[search-local-points] id=332 localMapSize=2336 nToMatch=161 th=1 matched=49
+[raw-keypoints] id=333 N=4988
+[search-local-points] id=333 localMapSize=2336 nToMatch=161 th=1 matched=48
+[raw-keypoints] id=334 N=4971
+[search-local-points] id=334 localMapSize=2194 nToMatch=119 th=1 matched=31
+[raw-keypoints] id=335 N=4992
+[search-local-points] id=335 localMapSize=2494 nToMatch=397 th=1 matched=195
+[raw-keypoints] id=336 N=5002
+[search-local-points] id=336 localMapSize=2522 nToMatch=266 th=1 matched=90
+[raw-keypoints] id=337 N=5002
+[search-local-points] id=337 localMapSize=2508 nToMatch=226 th=1 matched=66
+[raw-keypoints] id=338 N=5001
+[search-local-points] id=338 localMapSize=2507 nToMatch=225 th=1 matched=42
+[raw-keypoints] id=339 N=5001
+[search-local-points] id=339 localMapSize=2507 nToMatch=204 th=1 matched=43
+[raw-keypoints] id=340 N=4973
+[search-local-points] id=340 localMapSize=2401 nToMatch=141 th=1 matched=44
+[raw-keypoints] id=341 N=4965
+[search-local-points] id=341 localMapSize=2641 nToMatch=272 th=1 matched=107
+[raw-keypoints] id=342 N=4947
+[search-local-points] id=342 localMapSize=2627 nToMatch=155 th=1 matched=32
+[raw-keypoints] id=343 N=4918
+[search-local-points] id=343 localMapSize=2626 nToMatch=140 th=1 matched=36
+[raw-keypoints] id=344 N=4944
+[search-local-points] id=344 localMapSize=2626 nToMatch=124 th=1 matched=22
+[raw-keypoints] id=345 N=4950
+[search-local-points] id=345 localMapSize=2609 nToMatch=85 th=1 matched=20
+[raw-keypoints] id=346 N=4929
+[search-local-points] id=346 localMapSize=2588 nToMatch=205 th=1 matched=107
+[raw-keypoints] id=347 N=4962
+[search-local-points] id=347 localMapSize=2590 nToMatch=129 th=1 matched=57
+[raw-keypoints] id=348 N=4964
+[search-local-points] id=348 localMapSize=2590 nToMatch=107 th=1 matched=36
+[raw-keypoints] id=349 N=4966
+[search-local-points] id=349 localMapSize=2380 nToMatch=85 th=1 matched=28
+[raw-keypoints] id=350 N=4883
+[search-local-points] id=350 localMapSize=2586 nToMatch=330 th=1 matched=196
+[raw-keypoints] id=351 N=4817
+[search-local-points] id=351 localMapSize=2598 nToMatch=197 th=1 matched=80
+[raw-keypoints] id=352 N=4702
+[search-local-points] id=352 localMapSize=2596 nToMatch=184 th=1 matched=73
+[raw-keypoints] id=353 N=4720
+[search-local-points] id=353 localMapSize=2596 nToMatch=174 th=1 matched=65
+[raw-keypoints] id=354 N=4676
+[search-local-points] id=354 localMapSize=1703 nToMatch=159 th=1 matched=62
+[raw-keypoints] id=355 N=4677
+[search-local-points] id=355 localMapSize=2596 nToMatch=156 th=1 matched=63
+[raw-keypoints] id=356 N=4500
+[search-local-points] id=356 localMapSize=2596 nToMatch=163 th=1 matched=59
+[raw-keypoints] id=357 N=4623
+[search-local-points] id=357 localMapSize=1703 nToMatch=144 th=1 matched=54
+[raw-keypoints] id=358 N=4618
+[search-local-points] id=358 localMapSize=2024 nToMatch=264 th=1 matched=138
+[raw-keypoints] id=359 N=4635
+[search-local-points] id=359 localMapSize=1798 nToMatch=223 th=1 matched=101
+[raw-keypoints] id=360 N=4750
+[search-local-points] id=360 localMapSize=2696 nToMatch=193 th=1 matched=83
+[raw-keypoints] id=361 N=4700
+[search-local-points] id=361 localMapSize=2512 nToMatch=202 th=1 matched=85
+[raw-keypoints] id=362 N=4756
+[search-local-points] id=362 localMapSize=2512 nToMatch=189 th=1 matched=65
+[raw-keypoints] id=363 N=4787
+[search-local-points] id=363 localMapSize=2512 nToMatch=168 th=1 matched=48
+[raw-keypoints] id=364 N=4832
+[search-local-points] id=364 localMapSize=2512 nToMatch=178 th=1 matched=56
+[raw-keypoints] id=365 N=4853
+[search-local-points] id=365 localMapSize=2086 nToMatch=605 th=1 matched=395
+[raw-keypoints] id=366 N=4837
+[search-local-points] id=366 localMapSize=2105 nToMatch=366 th=1 matched=151
+[raw-keypoints] id=367 N=4902
+[search-local-points] id=367 localMapSize=2090 nToMatch=334 th=1 matched=137
+[raw-keypoints] id=368 N=4887
+[search-local-points] id=368 localMapSize=2088 nToMatch=333 th=1 matched=127
+[raw-keypoints] id=369 N=4913
+[search-local-points] id=369 localMapSize=1677 nToMatch=358 th=1 matched=137
+[raw-keypoints] id=370 N=4884
+[search-local-points] id=370 localMapSize=1677 nToMatch=334 th=1 matched=122
+[raw-keypoints] id=371 N=4888
+[search-local-points] id=371 localMapSize=1805 nToMatch=519 th=1 matched=288
+[raw-keypoints] id=372 N=4945
+[search-local-points] id=372 localMapSize=2286 nToMatch=435 th=1 matched=190
+[raw-keypoints] id=373 N=4955
+[search-local-points] id=373 localMapSize=1852 nToMatch=385 th=1 matched=141
+[raw-keypoints] id=374 N=4950
+[search-local-points] id=374 localMapSize=1844 nToMatch=384 th=1 matched=141
+[raw-keypoints] id=375 N=4910
+[search-local-points] id=375 localMapSize=2252 nToMatch=393 th=1 matched=137
+[raw-keypoints] id=376 N=4910
+[search-local-points] id=376 localMapSize=2252 nToMatch=335 th=1 matched=113
+[raw-keypoints] id=377 N=4885
+[search-local-points] id=377 localMapSize=1871 nToMatch=526 th=1 matched=258
+[raw-keypoints] id=378 N=4945
+[search-local-points] id=378 localMapSize=1916 nToMatch=360 th=1 matched=131
+[raw-keypoints] id=379 N=4890
+[search-local-points] id=379 localMapSize=1934 nToMatch=340 th=1 matched=114
+[raw-keypoints] id=380 N=4870
+[search-local-points] id=380 localMapSize=2334 nToMatch=295 th=1 matched=107
+[raw-keypoints] id=381 N=4834
+[search-local-points] id=381 localMapSize=1923 nToMatch=272 th=1 matched=93
+[raw-keypoints] id=382 N=4826
+[search-local-points] id=382 localMapSize=1922 nToMatch=278 th=1 matched=99
+[raw-keypoints] id=383 N=4883
+[search-local-points] id=383 localMapSize=2179 nToMatch=208 th=1 matched=80
+[raw-keypoints] id=384 N=4842
+[search-local-points] id=384 localMapSize=2458 nToMatch=455 th=1 matched=261
+[raw-keypoints] id=385 N=4848
+[search-local-points] id=385 localMapSize=2484 nToMatch=348 th=1 matched=158
+[raw-keypoints] id=386 N=4860
+[search-local-points] id=386 localMapSize=2444 nToMatch=288 th=1 matched=135
+[raw-keypoints] id=387 N=4865
+[search-local-points] id=387 localMapSize=2435 nToMatch=279 th=1 matched=117
+[raw-keypoints] id=388 N=4870
+[search-local-points] id=388 localMapSize=2435 nToMatch=262 th=1 matched=106
+[raw-keypoints] id=389 N=4854
+[search-local-points] id=389 localMapSize=2430 nToMatch=254 th=1 matched=120
+[raw-keypoints] id=390 N=4875
+[search-local-points] id=390 localMapSize=2430 nToMatch=224 th=1 matched=96
+[raw-keypoints] id=391 N=4878
+[search-local-points] id=391 localMapSize=2210 nToMatch=183 th=1 matched=79
+[raw-keypoints] id=392 N=4886
+[search-local-points] id=392 localMapSize=2505 nToMatch=451 th=1 matched=266
+[raw-keypoints] id=393 N=4808
+[search-local-points] id=393 localMapSize=2551 nToMatch=358 th=1 matched=163
+[raw-keypoints] id=394 N=4740
+[search-local-points] id=394 localMapSize=2570 nToMatch=326 th=1 matched=117
+[raw-keypoints] id=395 N=4641
+[search-local-points] id=395 localMapSize=2521 nToMatch=231 th=1 matched=78
+[raw-keypoints] id=396 N=4678
+[search-local-points] id=396 localMapSize=2521 nToMatch=196 th=1 matched=81
+[raw-keypoints] id=397 N=4617
+[search-local-points] id=397 localMapSize=1698 nToMatch=204 th=1 matched=89
+[raw-keypoints] id=398 N=4562
+[search-local-points] id=398 localMapSize=2108 nToMatch=184 th=1 matched=72
+[raw-keypoints] id=399 N=4542
+[search-local-points] id=399 localMapSize=2400 nToMatch=142 th=1 matched=77
+[raw-keypoints] id=400 N=4525
+[search-local-points] id=400 localMapSize=2814 nToMatch=562 th=1 matched=391
+[raw-keypoints] id=401 N=4551
+[search-local-points] id=401 localMapSize=2891 nToMatch=387 th=1 matched=210
+[raw-keypoints] id=402 N=4594
+[search-local-points] id=402 localMapSize=2831 nToMatch=290 th=1 matched=129
+[raw-keypoints] id=403 N=4589
+[search-local-points] id=403 localMapSize=2010 nToMatch=309 th=1 matched=152
+[raw-keypoints] id=404 N=4635
+[search-local-points] id=404 localMapSize=2831 nToMatch=361 th=1 matched=178
+[raw-keypoints] id=405 N=4635
+[search-local-points] id=405 localMapSize=2006 nToMatch=336 th=1 matched=160
+[raw-keypoints] id=406 N=4676
+[search-local-points] id=406 localMapSize=2006 nToMatch=338 th=1 matched=175
+[raw-keypoints] id=407 N=4701
+[search-local-points] id=407 localMapSize=2006 nToMatch=340 th=1 matched=150
+[raw-keypoints] id=408 N=4733
+[search-local-points] id=408 localMapSize=2827 nToMatch=331 th=1 matched=143
+[raw-keypoints] id=409 N=4684
+[search-local-points] id=409 localMapSize=2006 nToMatch=358 th=1 matched=164
+[raw-keypoints] id=410 N=4705
+[search-local-points] id=410 localMapSize=2006 nToMatch=337 th=1 matched=134
+[raw-keypoints] id=411 N=4752
+[search-local-points] id=411 localMapSize=2416 nToMatch=355 th=1 matched=143
+[raw-keypoints] id=412 N=4794
+[search-local-points] id=412 localMapSize=2589 nToMatch=678 th=1 matched=401
+[raw-keypoints] id=413 N=4780
+[search-local-points] id=413 localMapSize=2272 nToMatch=591 th=1 matched=281
+[raw-keypoints] id=414 N=4812
+[search-local-points] id=414 localMapSize=2278 nToMatch=585 th=1 matched=261
+[raw-keypoints] id=415 N=4866
+[search-local-points] id=415 localMapSize=2712 nToMatch=614 th=1 matched=272
+[raw-keypoints] id=416 N=4908
+[search-local-points] id=416 localMapSize=3028 nToMatch=547 th=1 matched=203
+[raw-keypoints] id=417 N=4964
+[search-local-points] id=417 localMapSize=3028 nToMatch=566 th=1 matched=189
+[raw-keypoints] id=418 N=5001
+[search-local-points] id=418 localMapSize=2613 nToMatch=556 th=1 matched=151
+[raw-keypoints] id=419 N=5000
+[search-local-points] id=419 localMapSize=2606 nToMatch=556 th=1 matched=141
+[raw-keypoints] id=420 N=5000
+[search-local-points] id=420 localMapSize=2572 nToMatch=617 th=1 matched=245
+[raw-keypoints] id=421 N=4994
+[search-local-points] id=421 localMapSize=2998 nToMatch=508 th=1 matched=146
+[raw-keypoints] id=422 N=4958
+[search-local-points] id=422 localMapSize=2592 nToMatch=505 th=1 matched=110
+[raw-keypoints] id=423 N=4871
+[search-local-points] id=423 localMapSize=2060 nToMatch=400 th=1 matched=53
+[raw-keypoints] id=424 N=4735
+[search-local-points] id=424 localMapSize=1855 nToMatch=276 th=1 matched=60
+[raw-keypoints] id=425 N=4722
+[search-local-points] id=425 localMapSize=1853 nToMatch=220 th=1 matched=44
+[raw-keypoints] id=426 N=4505
+[search-local-points] id=426 localMapSize=1853 nToMatch=186 th=1 matched=43
+[raw-keypoints] id=427 N=4638
+[search-local-points] id=427 localMapSize=1852 nToMatch=141 th=1 matched=34
+[raw-keypoints] id=428 N=4691
+[search-local-points] id=428 localMapSize=1852 nToMatch=132 th=1 matched=28
+[raw-keypoints] id=429 N=4707
+[search-local-points] id=429 localMapSize=1777 nToMatch=276 th=1 matched=159
+[raw-keypoints] id=430 N=4690
+[search-local-points] id=430 localMapSize=1710 nToMatch=153 th=1 matched=71
+[raw-keypoints] id=431 N=4777
+[search-local-points] id=431 localMapSize=1743 nToMatch=105 th=1 matched=45
+[raw-keypoints] id=432 N=4795
+[search-local-points] id=432 localMapSize=1743 nToMatch=90 th=1 matched=41
+[raw-keypoints] id=433 N=4808
+[search-local-points] id=433 localMapSize=1661 nToMatch=161 th=1 matched=100
+[raw-keypoints] id=434 N=4882
+[search-local-points] id=434 localMapSize=1330 nToMatch=219 th=1 matched=115
+[raw-keypoints] id=435 N=4970
+[search-local-points] id=435 localMapSize=1330 nToMatch=153 th=1 matched=57
+[raw-keypoints] id=436 N=4973
+[search-local-points] id=436 localMapSize=1329 nToMatch=179 th=1 matched=70
+[raw-keypoints] id=437 N=5000
+[search-local-points] id=437 localMapSize=1775 nToMatch=166 th=1 matched=47
+[raw-keypoints] id=438 N=5001
+[search-local-points] id=438 localMapSize=1522 nToMatch=337 th=1 matched=159
+[raw-keypoints] id=439 N=5001
+[search-local-points] id=439 localMapSize=1514 nToMatch=238 th=1 matched=98
+[raw-keypoints] id=440 N=5005
+[search-local-points] id=440 localMapSize=1918 nToMatch=203 th=1 matched=71
+[raw-keypoints] id=441 N=5006
+[search-local-points] id=441 localMapSize=1918 nToMatch=192 th=1 matched=51
+[raw-keypoints] id=442 N=5006
+[search-local-points] id=442 localMapSize=1421 nToMatch=446 th=1 matched=260
+[raw-keypoints] id=443 N=5005
+[search-local-points] id=443 localMapSize=1963 nToMatch=301 th=1 matched=128
+[raw-keypoints] id=444 N=5002
+[search-local-points] id=444 localMapSize=1963 nToMatch=297 th=1 matched=117
+[raw-keypoints] id=445 N=5004
+[search-local-points] id=445 localMapSize=1961 nToMatch=306 th=1 matched=117
+[raw-keypoints] id=446 N=5005
+[search-local-points] id=446 localMapSize=1961 nToMatch=311 th=1 matched=102
+[raw-keypoints] id=447 N=5003
+[search-local-points] id=447 localMapSize=1961 nToMatch=290 th=1 matched=88
+[raw-keypoints] id=448 N=5002
+[search-local-points] id=448 localMapSize=1961 nToMatch=264 th=1 matched=95
+[raw-keypoints] id=449 N=5000
+[search-local-points] id=449 localMapSize=2084 nToMatch=422 th=1 matched=250
+[raw-keypoints] id=450 N=4973
+[search-local-points] id=450 localMapSize=2248 nToMatch=422 th=1 matched=208
+[raw-keypoints] id=451 N=4991
+[search-local-points] id=451 localMapSize=2178 nToMatch=248 th=1 matched=89
+[raw-keypoints] id=452 N=4991
+[search-local-points] id=452 localMapSize=2178 nToMatch=227 th=1 matched=73
+[raw-keypoints] id=453 N=4972
+[search-local-points] id=453 localMapSize=2172 nToMatch=208 th=1 matched=89
+[raw-keypoints] id=454 N=4918
+[search-local-points] id=454 localMapSize=1632 nToMatch=203 th=1 matched=80
+[raw-keypoints] id=455 N=4910
+[search-local-points] id=455 localMapSize=1801 nToMatch=449 th=1 matched=249
+[raw-keypoints] id=456 N=4905
+[search-local-points] id=456 localMapSize=1848 nToMatch=278 th=1 matched=124
+[raw-keypoints] id=457 N=4858
+[search-local-points] id=457 localMapSize=1806 nToMatch=228 th=1 matched=93
+[raw-keypoints] id=458 N=4824
+[search-local-points] id=458 localMapSize=1938 nToMatch=255 th=1 matched=105
+[raw-keypoints] id=459 N=4854
+[search-local-points] id=459 localMapSize=1807 nToMatch=227 th=1 matched=79
+[raw-keypoints] id=460 N=4859
+[search-local-points] id=460 localMapSize=2169 nToMatch=527 th=1 matched=288
+[raw-keypoints] id=461 N=4868
+[search-local-points] id=461 localMapSize=2164 nToMatch=363 th=1 matched=149
+[raw-keypoints] id=462 N=4834
+[search-local-points] id=462 localMapSize=2135 nToMatch=335 th=1 matched=136
+[raw-keypoints] id=463 N=4896
+[search-local-points] id=463 localMapSize=2133 nToMatch=335 th=1 matched=145
+[raw-keypoints] id=464 N=4898
+[search-local-points] id=464 localMapSize=1848 nToMatch=258 th=1 matched=110
+[raw-keypoints] id=465 N=4893
+[search-local-points] id=465 localMapSize=2253 nToMatch=604 th=1 matched=290
+[raw-keypoints] id=466 N=4894
+[search-local-points] id=466 localMapSize=2290 nToMatch=478 th=1 matched=206
+[raw-keypoints] id=467 N=4931
+[search-local-points] id=467 localMapSize=2221 nToMatch=404 th=1 matched=147
+[raw-keypoints] id=468 N=4933
+[search-local-points] id=468 localMapSize=2221 nToMatch=370 th=1 matched=133
+[raw-keypoints] id=469 N=4963
+[search-local-points] id=469 localMapSize=2217 nToMatch=329 th=1 matched=126
+[raw-keypoints] id=470 N=4966
+[search-local-points] id=470 localMapSize=2217 nToMatch=320 th=1 matched=132
+[raw-keypoints] id=471 N=4994
+[search-local-points] id=471 localMapSize=2128 nToMatch=372 th=1 matched=176
+[raw-keypoints] id=472 N=4991
+[search-local-points] id=472 localMapSize=2304 nToMatch=504 th=1 matched=235
+[raw-keypoints] id=473 N=5002
+[search-local-points] id=473 localMapSize=2351 nToMatch=460 th=1 matched=157
+[raw-keypoints] id=474 N=5006
+[search-local-points] id=474 localMapSize=2356 nToMatch=424 th=1 matched=126
+[raw-keypoints] id=475 N=5004
+[search-local-points] id=475 localMapSize=2297 nToMatch=349 th=1 matched=88
+[raw-keypoints] id=476 N=5006
+[search-local-points] id=476 localMapSize=2297 nToMatch=324 th=1 matched=85
+[raw-keypoints] id=477 N=5006
+[search-local-points] id=477 localMapSize=2297 nToMatch=288 th=1 matched=82
+[raw-keypoints] id=478 N=5006
+[search-local-points] id=478 localMapSize=2290 nToMatch=243 th=1 matched=68
+[raw-keypoints] id=479 N=5006
+[search-local-points] id=479 localMapSize=2290 nToMatch=202 th=1 matched=57
+[raw-keypoints] id=480 N=5004
+[search-local-points] id=480 localMapSize=1930 nToMatch=122 th=1 matched=47
+[raw-keypoints] id=481 N=5008
+[search-local-points] id=481 localMapSize=1997 nToMatch=191 th=1 matched=83
+[raw-keypoints] id=482 N=5006
+[search-local-points] id=482 localMapSize=2023 nToMatch=179 th=1 matched=77
+[raw-keypoints] id=483 N=5004
+[search-local-points] id=483 localMapSize=2029 nToMatch=163 th=1 matched=62
+[raw-keypoints] id=484 N=5007
+[search-local-points] id=484 localMapSize=2038 nToMatch=167 th=1 matched=61
+[raw-keypoints] id=485 N=5005
+[search-local-points] id=485 localMapSize=2034 nToMatch=167 th=1 matched=54
+[raw-keypoints] id=486 N=5007
+[search-local-points] id=486 localMapSize=2034 nToMatch=148 th=1 matched=56
+[raw-keypoints] id=487 N=5004
+[search-local-points] id=487 localMapSize=2034 nToMatch=147 th=1 matched=45
+[raw-keypoints] id=488 N=5006
+[search-local-points] id=488 localMapSize=2034 nToMatch=135 th=1 matched=54
+[raw-keypoints] id=489 N=5005
+[search-local-points] id=489 localMapSize=2034 nToMatch=127 th=1 matched=51
+[raw-keypoints] id=490 N=5006
+[search-local-points] id=490 localMapSize=2034 nToMatch=131 th=1 matched=45
+[raw-keypoints] id=491 N=5006
+[search-local-points] id=491 localMapSize=1871 nToMatch=123 th=1 matched=60
+[raw-keypoints] id=492 N=5005
+[search-local-points] id=492 localMapSize=1928 nToMatch=161 th=1 matched=85
+[raw-keypoints] id=493 N=5006
+[search-local-points] id=493 localMapSize=1960 nToMatch=153 th=1 matched=71
+[raw-keypoints] id=494 N=5004
+[search-local-points] id=494 localMapSize=1986 nToMatch=162 th=1 matched=56
+[raw-keypoints] id=495 N=5007
+[search-local-points] id=495 localMapSize=1999 nToMatch=164 th=1 matched=51
+[raw-keypoints] id=496 N=5007
+[search-local-points] id=496 localMapSize=1974 nToMatch=137 th=1 matched=44
+[raw-keypoints] id=497 N=5004
+[search-local-points] id=497 localMapSize=1974 nToMatch=135 th=1 matched=41
+[raw-keypoints] id=498 N=5004
+[search-local-points] id=498 localMapSize=1974 nToMatch=127 th=1 matched=47
+[raw-keypoints] id=499 N=5003
+[search-local-points] id=499 localMapSize=1974 nToMatch=114 th=1 matched=41
+[raw-keypoints] id=500 N=5005
+[search-local-points] id=500 localMapSize=1903 nToMatch=87 th=1 matched=46
+[stats] frame 500 / 1000
+[raw-keypoints] id=501 N=5002
+[search-local-points] id=501 localMapSize=2057 nToMatch=224 th=1 matched=146
+[raw-keypoints] id=502 N=5002
+[search-local-points] id=502 localMapSize=2100 nToMatch=177 th=1 matched=97
+[raw-keypoints] id=503 N=5002
+[search-local-points] id=503 localMapSize=2119 nToMatch=176 th=1 matched=76
+[raw-keypoints] id=504 N=5004
+[search-local-points] id=504 localMapSize=2126 nToMatch=194 th=1 matched=77
+[raw-keypoints] id=505 N=5004
+[search-local-points] id=505 localMapSize=2101 nToMatch=183 th=1 matched=73
+[raw-keypoints] id=506 N=5006
+[search-local-points] id=506 localMapSize=2101 nToMatch=186 th=1 matched=79
+[raw-keypoints] id=507 N=5005
+[search-local-points] id=507 localMapSize=2101 nToMatch=184 th=1 matched=69
+[raw-keypoints] id=508 N=5003
+[search-local-points] id=508 localMapSize=2099 nToMatch=189 th=1 matched=64
+[raw-keypoints] id=509 N=5005
+[search-local-points] id=509 localMapSize=2099 nToMatch=184 th=1 matched=63
+[raw-keypoints] id=510 N=5006
+[search-local-points] id=510 localMapSize=2099 nToMatch=175 th=1 matched=68
+[raw-keypoints] id=511 N=5002
+[search-local-points] id=511 localMapSize=2004 nToMatch=133 th=1 matched=64
+[raw-keypoints] id=512 N=5001
+[search-local-points] id=512 localMapSize=2164 nToMatch=294 th=1 matched=174
+[raw-keypoints] id=513 N=5001
+[search-local-points] id=513 localMapSize=2225 nToMatch=246 th=1 matched=112
+[raw-keypoints] id=514 N=5006
+[search-local-points] id=514 localMapSize=2255 nToMatch=263 th=1 matched=102
+[raw-keypoints] id=515 N=5006
+[search-local-points] id=515 localMapSize=2261 nToMatch=241 th=1 matched=74
+[raw-keypoints] id=516 N=5003
+[search-local-points] id=516 localMapSize=2271 nToMatch=267 th=1 matched=90
+[raw-keypoints] id=517 N=5008
+[search-local-points] id=517 localMapSize=2240 nToMatch=267 th=1 matched=78
+[raw-keypoints] id=518 N=5006
+[search-local-points] id=518 localMapSize=2240 nToMatch=259 th=1 matched=84
+[raw-keypoints] id=519 N=5005
+[search-local-points] id=519 localMapSize=2239 nToMatch=236 th=1 matched=92
+[raw-keypoints] id=520 N=5005
+[search-local-points] id=520 localMapSize=2239 nToMatch=229 th=1 matched=81
+[raw-keypoints] id=521 N=5008
+[search-local-points] id=521 localMapSize=2239 nToMatch=236 th=1 matched=90
+[raw-keypoints] id=522 N=5007
+[search-local-points] id=522 localMapSize=2239 nToMatch=223 th=1 matched=63
+[raw-keypoints] id=523 N=5008
+[search-local-points] id=523 localMapSize=2103 nToMatch=153 th=1 matched=56
+[raw-keypoints] id=524 N=5003
+[search-local-points] id=524 localMapSize=2440 nToMatch=486 th=1 matched=317
+[raw-keypoints] id=525 N=5003
+[search-local-points] id=525 localMapSize=2490 nToMatch=331 th=1 matched=175
+[raw-keypoints] id=526 N=5005
+[search-local-points] id=526 localMapSize=2500 nToMatch=319 th=1 matched=125
+[raw-keypoints] id=527 N=5005
+[search-local-points] id=527 localMapSize=2465 nToMatch=286 th=1 matched=122
+[raw-keypoints] id=528 N=5003
+[search-local-points] id=528 localMapSize=2465 nToMatch=298 th=1 matched=118
+[raw-keypoints] id=529 N=5005
+[search-local-points] id=529 localMapSize=2465 nToMatch=317 th=1 matched=103
+[raw-keypoints] id=530 N=5003
+[search-local-points] id=530 localMapSize=2465 nToMatch=325 th=1 matched=128
+[raw-keypoints] id=531 N=5005
+[search-local-points] id=531 localMapSize=2465 nToMatch=317 th=1 matched=113
+[raw-keypoints] id=532 N=5003
+[search-local-points] id=532 localMapSize=2465 nToMatch=325 th=1 matched=119
+[raw-keypoints] id=533 N=5005
+[search-local-points] id=533 localMapSize=2465 nToMatch=332 th=1 matched=120
+[raw-keypoints] id=534 N=5003
+[search-local-points] id=534 localMapSize=2465 nToMatch=315 th=1 matched=135
+[raw-keypoints] id=535 N=5001
+[search-local-points] id=535 localMapSize=2465 nToMatch=306 th=1 matched=118
+[raw-keypoints] id=536 N=5004
+[search-local-points] id=536 localMapSize=2465 nToMatch=306 th=1 matched=111
+[raw-keypoints] id=537 N=5001
+[search-local-points] id=537 localMapSize=2465 nToMatch=323 th=1 matched=118
+[raw-keypoints] id=538 N=5001
+[search-local-points] id=538 localMapSize=2465 nToMatch=330 th=1 matched=134
+[raw-keypoints] id=539 N=5000
+[search-local-points] id=539 localMapSize=2465 nToMatch=316 th=1 matched=137
+[raw-keypoints] id=540 N=4994
+[search-local-points] id=540 localMapSize=2465 nToMatch=315 th=1 matched=126
+[raw-keypoints] id=541 N=5002
+[search-local-points] id=541 localMapSize=2465 nToMatch=314 th=1 matched=107
+[raw-keypoints] id=542 N=4997
+[search-local-points] id=542 localMapSize=2465 nToMatch=323 th=1 matched=122
+[raw-keypoints] id=543 N=4987
+[search-local-points] id=543 localMapSize=2465 nToMatch=312 th=1 matched=114
+[raw-keypoints] id=544 N=4993
+[search-local-points] id=544 localMapSize=2465 nToMatch=317 th=1 matched=104
+[raw-keypoints] id=545 N=4995
+[search-local-points] id=545 localMapSize=2465 nToMatch=316 th=1 matched=102
+[raw-keypoints] id=546 N=4990
+[search-local-points] id=546 localMapSize=2465 nToMatch=299 th=1 matched=104
+[raw-keypoints] id=547 N=5002
+[search-local-points] id=547 localMapSize=2465 nToMatch=324 th=1 matched=114
+[raw-keypoints] id=548 N=5002
+[search-local-points] id=548 localMapSize=2465 nToMatch=312 th=1 matched=109
+[raw-keypoints] id=549 N=5001
+[search-local-points] id=549 localMapSize=2465 nToMatch=309 th=1 matched=114
+[raw-keypoints] id=550 N=5002
+[search-local-points] id=550 localMapSize=2465 nToMatch=307 th=1 matched=101
+[raw-keypoints] id=551 N=5001
+[search-local-points] id=551 localMapSize=2465 nToMatch=309 th=1 matched=111
+[raw-keypoints] id=552 N=4997
+[search-local-points] id=552 localMapSize=2465 nToMatch=308 th=1 matched=112
+[raw-keypoints] id=553 N=5002
+[search-local-points] id=553 localMapSize=2465 nToMatch=320 th=1 matched=121
+[raw-keypoints] id=554 N=5001
+[search-local-points] id=554 localMapSize=2465 nToMatch=287 th=1 matched=101
+[raw-keypoints] id=555 N=4995
+[search-local-points] id=555 localMapSize=2465 nToMatch=310 th=1 matched=106
+[raw-keypoints] id=556 N=5002
+[search-local-points] id=556 localMapSize=2465 nToMatch=299 th=1 matched=124
+[raw-keypoints] id=557 N=5002
+[search-local-points] id=557 localMapSize=2465 nToMatch=307 th=1 matched=105
+[raw-keypoints] id=558 N=5001
+[search-local-points] id=558 localMapSize=2465 nToMatch=309 th=1 matched=106
+[raw-keypoints] id=559 N=5001
+[search-local-points] id=559 localMapSize=2465 nToMatch=318 th=1 matched=115
+[raw-keypoints] id=560 N=5001
+[search-local-points] id=560 localMapSize=2465 nToMatch=308 th=1 matched=135
+[raw-keypoints] id=561 N=5000
+[search-local-points] id=561 localMapSize=2465 nToMatch=296 th=1 matched=118
+[raw-keypoints] id=562 N=5000
+[search-local-points] id=562 localMapSize=2465 nToMatch=308 th=1 matched=134
+[raw-keypoints] id=563 N=5002
+[search-local-points] id=563 localMapSize=2465 nToMatch=301 th=1 matched=132
+[raw-keypoints] id=564 N=4997
+[search-local-points] id=564 localMapSize=2465 nToMatch=284 th=1 matched=132
+[raw-keypoints] id=565 N=4978
+[search-local-points] id=565 localMapSize=2465 nToMatch=298 th=1 matched=118
+[raw-keypoints] id=566 N=5000
+[search-local-points] id=566 localMapSize=2465 nToMatch=315 th=1 matched=115
+[raw-keypoints] id=567 N=5002
+[search-local-points] id=567 localMapSize=2465 nToMatch=314 th=1 matched=120
+[raw-keypoints] id=568 N=4970
+[search-local-points] id=568 localMapSize=2465 nToMatch=306 th=1 matched=118
+[raw-keypoints] id=569 N=4994
+[search-local-points] id=569 localMapSize=2465 nToMatch=291 th=1 matched=103
+[raw-keypoints] id=570 N=4990
+[search-local-points] id=570 localMapSize=2465 nToMatch=282 th=1 matched=108
+[raw-keypoints] id=571 N=5001
+[search-local-points] id=571 localMapSize=2465 nToMatch=295 th=1 matched=91
+[raw-keypoints] id=572 N=5003
+[search-local-points] id=572 localMapSize=2465 nToMatch=298 th=1 matched=96
+[raw-keypoints] id=573 N=5000
+[search-local-points] id=573 localMapSize=2506 nToMatch=421 th=1 matched=275
+[raw-keypoints] id=574 N=5003
+[search-local-points] id=574 localMapSize=2615 nToMatch=382 th=1 matched=189
+[raw-keypoints] id=575 N=5009
+[search-local-points] id=575 localMapSize=2631 nToMatch=364 th=1 matched=139
+[raw-keypoints] id=576 N=5004
+[search-local-points] id=576 localMapSize=2636 nToMatch=364 th=1 matched=129
+[raw-keypoints] id=577 N=5005
+[search-local-points] id=577 localMapSize=2649 nToMatch=371 th=1 matched=122
+[raw-keypoints] id=578 N=5005
+[search-local-points] id=578 localMapSize=2592 nToMatch=338 th=1 matched=92
+[raw-keypoints] id=579 N=5000
+[search-local-points] id=579 localMapSize=2592 nToMatch=300 th=1 matched=91
+[raw-keypoints] id=580 N=5007
+[search-local-points] id=580 localMapSize=2592 nToMatch=295 th=1 matched=89
+[raw-keypoints] id=581 N=5006
+[search-local-points] id=581 localMapSize=2590 nToMatch=278 th=1 matched=81
+[raw-keypoints] id=582 N=5000
+[search-local-points] id=582 localMapSize=2228 nToMatch=195 th=1 matched=53
+[raw-keypoints] id=583 N=5004
+[search-local-points] id=583 localMapSize=1777 nToMatch=546 th=1 matched=308
+[raw-keypoints] id=584 N=5003
+[search-local-points] id=584 localMapSize=1823 nToMatch=350 th=1 matched=123
+[raw-keypoints] id=585 N=5003
+[search-local-points] id=585 localMapSize=1801 nToMatch=300 th=1 matched=96
+[raw-keypoints] id=586 N=5003
+[search-local-points] id=586 localMapSize=1801 nToMatch=279 th=1 matched=86
+[raw-keypoints] id=587 N=5003
+[search-local-points] id=587 localMapSize=1797 nToMatch=215 th=1 matched=60
+[raw-keypoints] id=588 N=5003
+[search-local-points] id=588 localMapSize=1521 nToMatch=142 th=1 matched=46
+[raw-keypoints] id=589 N=5012
+[search-local-points] id=589 localMapSize=1844 nToMatch=451 th=1 matched=262
+[raw-keypoints] id=590 N=5005
+[search-local-points] id=590 localMapSize=1833 nToMatch=232 th=1 matched=67
+[raw-keypoints] id=591 N=5005
+[search-local-points] id=591 localMapSize=1529 nToMatch=178 th=1 matched=48
+[raw-keypoints] id=592 N=5005
+[search-local-points] id=592 localMapSize=1528 nToMatch=151 th=1 matched=48
+[raw-keypoints] id=593 N=5004
+[search-local-points] id=593 localMapSize=1528 nToMatch=116 th=1 matched=39
+[raw-keypoints] id=594 N=5004
+[search-local-points] id=594 localMapSize=1531 nToMatch=259 th=1 matched=142
+[raw-keypoints] id=595 N=5007
+[search-local-points] id=595 localMapSize=1583 nToMatch=186 th=1 matched=74
+[raw-keypoints] id=596 N=5007
+[search-local-points] id=596 localMapSize=1249 nToMatch=149 th=1 matched=55
+[raw-keypoints] id=597 N=5008
+[search-local-points] id=597 localMapSize=1215 nToMatch=121 th=1 matched=48
+[raw-keypoints] id=598 N=5006
+[search-local-points] id=598 localMapSize=1052 nToMatch=85 th=1 matched=36
+[raw-keypoints] id=599 N=5006
+[search-local-points] id=599 localMapSize=1255 nToMatch=255 th=1 matched=131
+[raw-keypoints] id=600 N=5004
+[search-local-points] id=600 localMapSize=1235 nToMatch=160 th=1 matched=59
+[raw-keypoints] id=601 N=5003
+[search-local-points] id=601 localMapSize=1229 nToMatch=156 th=1 matched=48
+[raw-keypoints] id=602 N=5003
+[search-local-points] id=602 localMapSize=1229 nToMatch=136 th=1 matched=46
+[raw-keypoints] id=603 N=5004
+[search-local-points] id=603 localMapSize=1100 nToMatch=90 th=1 matched=29
+[raw-keypoints] id=604 N=5001
+[search-local-points] id=604 localMapSize=1355 nToMatch=287 th=1 matched=179
+[raw-keypoints] id=605 N=5004
+[search-local-points] id=605 localMapSize=1456 nToMatch=281 th=1 matched=142
+[raw-keypoints] id=606 N=5005
+[search-local-points] id=606 localMapSize=1456 nToMatch=221 th=1 matched=91
+[raw-keypoints] id=607 N=5004
+[search-local-points] id=607 localMapSize=1456 nToMatch=211 th=1 matched=83
+[raw-keypoints] id=608 N=5000
+[search-local-points] id=608 localMapSize=1365 nToMatch=134 th=1 matched=61
+[raw-keypoints] id=609 N=5004
+[search-local-points] id=609 localMapSize=1714 nToMatch=477 th=1 matched=299
+[raw-keypoints] id=610 N=5001
+[search-local-points] id=610 localMapSize=1703 nToMatch=293 th=1 matched=145
+[raw-keypoints] id=611 N=5003
+[search-local-points] id=611 localMapSize=1703 nToMatch=287 th=1 matched=124
+[raw-keypoints] id=612 N=5001
+[search-local-points] id=612 localMapSize=1703 nToMatch=287 th=1 matched=108
+[raw-keypoints] id=613 N=5002
+[search-local-points] id=613 localMapSize=1488 nToMatch=219 th=1 matched=97
+[raw-keypoints] id=614 N=5004
+[search-local-points] id=614 localMapSize=1750 nToMatch=479 th=1 matched=271
+[raw-keypoints] id=615 N=5003
+[search-local-points] id=615 localMapSize=1785 nToMatch=366 th=1 matched=143
+[raw-keypoints] id=616 N=5005
+[search-local-points] id=616 localMapSize=1769 nToMatch=365 th=1 matched=137
+[raw-keypoints] id=617 N=5007
+[search-local-points] id=617 localMapSize=1769 nToMatch=349 th=1 matched=112
+[raw-keypoints] id=618 N=5005
+[search-local-points] id=618 localMapSize=1767 nToMatch=336 th=1 matched=110
+[raw-keypoints] id=619 N=5006
+[search-local-points] id=619 localMapSize=1767 nToMatch=309 th=1 matched=98
+[raw-keypoints] id=620 N=5004
+[search-local-points] id=620 localMapSize=1769 nToMatch=366 th=1 matched=187
+[raw-keypoints] id=621 N=5006
+[search-local-points] id=621 localMapSize=1772 nToMatch=339 th=1 matched=126
+[raw-keypoints] id=622 N=5003
+[search-local-points] id=622 localMapSize=1766 nToMatch=300 th=1 matched=81
+[raw-keypoints] id=623 N=5003
+[search-local-points] id=623 localMapSize=1766 nToMatch=266 th=1 matched=76
+[raw-keypoints] id=624 N=5007
+[search-local-points] id=624 localMapSize=1763 nToMatch=244 th=1 matched=72
+[raw-keypoints] id=625 N=5004
+[search-local-points] id=625 localMapSize=1763 nToMatch=190 th=1 matched=52
+[raw-keypoints] id=626 N=5009
+[search-local-points] id=626 localMapSize=1596 nToMatch=150 th=1 matched=56
+[raw-keypoints] id=627 N=5008
+[search-local-points] id=627 localMapSize=1772 nToMatch=314 th=1 matched=128
+[raw-keypoints] id=628 N=5006
+[search-local-points] id=628 localMapSize=1802 nToMatch=261 th=1 matched=90
+[raw-keypoints] id=629 N=5010
+[search-local-points] id=629 localMapSize=1786 nToMatch=218 th=1 matched=69
+[raw-keypoints] id=630 N=5007
+[search-local-points] id=630 localMapSize=1786 nToMatch=201 th=1 matched=58
+[raw-keypoints] id=631 N=5004
+[search-local-points] id=631 localMapSize=1786 nToMatch=183 th=1 matched=50
+[raw-keypoints] id=632 N=5005
+[search-local-points] id=632 localMapSize=1783 nToMatch=175 th=1 matched=43
+[raw-keypoints] id=633 N=5005
+[search-local-points] id=633 localMapSize=1783 nToMatch=161 th=1 matched=34
+Fail to track local map!
+[raw-keypoints] id=634 N=5009
+Fail to track local map!
+[raw-keypoints] id=635 N=5006
+Fail to track local map!
+[raw-keypoints] id=636 N=5006
+Fail to track local map!
+[raw-keypoints] id=637 N=5001
+Fail to track local map!
+[raw-keypoints] id=638 N=5003
+Fail to track local map!
+[raw-keypoints] id=639 N=5007
+Fail to track local map!
+[raw-keypoints] id=640 N=5000
+Fail to track local map!
+[raw-keypoints] id=641 N=5003
+Fail to track local map!
+[raw-keypoints] id=642 N=5006
+Fail to track local map!
+[raw-keypoints] id=643 N=5003
+Fail to track local map!
+[raw-keypoints] id=644 N=5005
+Fail to track local map!
+[raw-keypoints] id=645 N=5008
+Fail to track local map!
+[raw-keypoints] id=646 N=5010
+Fail to track local map!
+[raw-keypoints] id=647 N=5003
+Fail to track local map!
+[raw-keypoints] id=648 N=5005
+Fail to track local map!
+[raw-keypoints] id=649 N=5003
+Fail to track local map!
+[raw-keypoints] id=650 N=5004
+Fail to track local map!
+[raw-keypoints] id=651 N=5005
+Fail to track local map!
+[raw-keypoints] id=652 N=5008
+Fail to track local map!
+[raw-keypoints] id=653 N=5007
+Fail to track local map!
+[raw-keypoints] id=654 N=5005
+Fail to track local map!
+[raw-keypoints] id=655 N=5007
+Fail to track local map!
+[raw-keypoints] id=656 N=5004
+Fail to track local map!
+[raw-keypoints] id=657 N=5006
+Fail to track local map!
+[raw-keypoints] id=658 N=5008
+Fail to track local map!
+[raw-keypoints] id=659 N=5004
+Fail to track local map!
+[raw-keypoints] id=660 N=5006
+Fail to track local map!
+[raw-keypoints] id=661 N=5006
+Fail to track local map!
+[raw-keypoints] id=662 N=5004
+Fail to track local map!
+Creation of new map with id: 2
+Stored map with ID: 1
+Creation of new map with last KF id: 85
+[raw-keypoints] id=663 N=13534
+[raw-keypoints] id=664 N=13540
+First KF:85; Map init KF:85
+New Map created with 829 points
+[raw-keypoints] id=665 N=5005
+[search-local-points] id=665 localMapSize=829 nToMatch=718 th=1 matched=259
+[raw-keypoints] id=666 N=5007
+[search-local-points] id=666 localMapSize=829 nToMatch=532 th=1 matched=137
+[raw-keypoints] id=667 N=5009
+[search-local-points] id=667 localMapSize=829 nToMatch=543 th=1 matched=134
+[raw-keypoints] id=668 N=5008
+[search-local-points] id=668 localMapSize=1877 nToMatch=1216 th=1 matched=270
+[raw-keypoints] id=669 N=5006
+[search-local-points] id=669 localMapSize=1590 nToMatch=715 th=1 matched=121
+[raw-keypoints] id=670 N=5003
+[search-local-points] id=670 localMapSize=1590 nToMatch=521 th=1 matched=104
+[raw-keypoints] id=671 N=5003
+[search-local-points] id=671 localMapSize=1590 nToMatch=334 th=1 matched=53
+Fail to track local map!
+[raw-keypoints] id=672 N=5004
+Fail to track local map!
+[raw-keypoints] id=673 N=5005
+Fail to track local map!
+[raw-keypoints] id=674 N=5004
+Fail to track local map!
+[raw-keypoints] id=675 N=5006
+Fail to track local map!
+[raw-keypoints] id=676 N=5005
+Fail to track local map!
+[raw-keypoints] id=677 N=5005
+Fail to track local map!
+[raw-keypoints] id=678 N=5009
+Fail to track local map!
+[raw-keypoints] id=679 N=5007
+Fail to track local map!
+[raw-keypoints] id=680 N=5007
+Fail to track local map!
+[raw-keypoints] id=681 N=5005
+Fail to track local map!
+[raw-keypoints] id=682 N=5006
+Fail to track local map!
+[raw-keypoints] id=683 N=5005
+Fail to track local map!
+[raw-keypoints] id=684 N=5005
+Fail to track local map!
+[raw-keypoints] id=685 N=5005
+Fail to track local map!
+[raw-keypoints] id=686 N=5003
+Fail to track local map!
+[raw-keypoints] id=687 N=5006
+Fail to track local map!
+[raw-keypoints] id=688 N=5006
+Fail to track local map!
+[raw-keypoints] id=689 N=5003
+Fail to track local map!
+[raw-keypoints] id=690 N=5012
+Fail to track local map!
+[raw-keypoints] id=691 N=5007
+Fail to track local map!
+[raw-keypoints] id=692 N=5004
+Fail to track local map!
+[raw-keypoints] id=693 N=5006
+Fail to track local map!
+[raw-keypoints] id=694 N=5003
+Fail to track local map!
+[raw-keypoints] id=695 N=5002
+Fail to track local map!
+[raw-keypoints] id=696 N=5006
+Fail to track local map!
+[raw-keypoints] id=697 N=5003
+Fail to track local map!
+[raw-keypoints] id=698 N=5001
+Fail to track local map!
+[raw-keypoints] id=699 N=5002
+Fail to track local map!
+[raw-keypoints] id=700 N=5006
+Fail to track local map!
+SYSTEM-> Reseting active map in monocular case
+LM: Active map reset recieved
+LM: Active map reset, waiting...
+LM: Reseting current map in Local Mapping...
+LM: End reseting Local Mapping...
+LM: Reset free the mutex
+LM: Active map reset, Done!!!
+mnFirstFrameId = 48
+mnInitialFrameId = 663
+36 Frames set to lost
+[raw-keypoints] id=701 N=10128
+[raw-keypoints] id=702 N=10310
+First KF:87; Map init KF:85
+New Map created with 705 points
+[raw-keypoints] id=703 N=5001
+[search-local-points] id=703 localMapSize=1340 nToMatch=1089 th=1 matched=498
+[raw-keypoints] id=704 N=5006
+[search-local-points] id=704 localMapSize=1340 nToMatch=660 th=1 matched=218
+[raw-keypoints] id=705 N=5004
+[search-local-points] id=705 localMapSize=1353 nToMatch=671 th=1 matched=207
+[raw-keypoints] id=706 N=5005
+[search-local-points] id=706 localMapSize=1353 nToMatch=602 th=1 matched=150
+[raw-keypoints] id=707 N=5004
+[search-local-points] id=707 localMapSize=1165 nToMatch=856 th=1 matched=453
+[raw-keypoints] id=708 N=5002
+[search-local-points] id=708 localMapSize=1284 nToMatch=672 th=1 matched=278
+[raw-keypoints] id=709 N=5005
+[search-local-points] id=709 localMapSize=1282 nToMatch=594 th=1 matched=238
+[raw-keypoints] id=710 N=5005
+[search-local-points] id=710 localMapSize=1282 nToMatch=571 th=1 matched=211
+[raw-keypoints] id=711 N=5009
+[search-local-points] id=711 localMapSize=1243 nToMatch=649 th=1 matched=343
+[raw-keypoints] id=712 N=5004
+[search-local-points] id=712 localMapSize=1618 nToMatch=873 th=1 matched=446
+[raw-keypoints] id=713 N=5005
+[search-local-points] id=713 localMapSize=1588 nToMatch=633 th=1 matched=257
+[raw-keypoints] id=714 N=5006
+[search-local-points] id=714 localMapSize=1584 nToMatch=654 th=1 matched=256
+[raw-keypoints] id=715 N=5004
+[search-local-points] id=715 localMapSize=1428 nToMatch=556 th=1 matched=223
+[raw-keypoints] id=716 N=5003
+[search-local-points] id=716 localMapSize=1890 nToMatch=988 th=1 matched=517
+[raw-keypoints] id=717 N=5005
+[search-local-points] id=717 localMapSize=1891 nToMatch=777 th=1 matched=339
+[raw-keypoints] id=718 N=5008
+[search-local-points] id=718 localMapSize=1891 nToMatch=761 th=1 matched=311
+[raw-keypoints] id=719 N=5002
+[search-local-points] id=719 localMapSize=1890 nToMatch=718 th=1 matched=289
+[raw-keypoints] id=720 N=5003
+[search-local-points] id=720 localMapSize=1670 nToMatch=572 th=1 matched=211
+[raw-keypoints] id=721 N=5003
+[search-local-points] id=721 localMapSize=2379 nToMatch=1282 th=1 matched=744
+[raw-keypoints] id=722 N=5005
+[search-local-points] id=722 localMapSize=2321 nToMatch=861 th=1 matched=397
+[raw-keypoints] id=723 N=5004
+[search-local-points] id=723 localMapSize=2321 nToMatch=866 th=1 matched=342
+[raw-keypoints] id=724 N=5002
+[search-local-points] id=724 localMapSize=2321 nToMatch=874 th=1 matched=326
+[raw-keypoints] id=725 N=5005
+[search-local-points] id=725 localMapSize=2320 nToMatch=875 th=1 matched=340
+[raw-keypoints] id=726 N=5003
+[search-local-points] id=726 localMapSize=2118 nToMatch=746 th=1 matched=328
+[raw-keypoints] id=727 N=5003
+[search-local-points] id=727 localMapSize=2652 nToMatch=1251 th=1 matched=665
+[raw-keypoints] id=728 N=5002
+[search-local-points] id=728 localMapSize=2603 nToMatch=955 th=1 matched=411
+[raw-keypoints] id=729 N=5007
+[search-local-points] id=729 localMapSize=2588 nToMatch=870 th=1 matched=336
+[raw-keypoints] id=730 N=5002
+[search-local-points] id=730 localMapSize=2588 nToMatch=861 th=1 matched=332
+[raw-keypoints] id=731 N=5003
+[search-local-points] id=731 localMapSize=2588 nToMatch=877 th=1 matched=353
+[raw-keypoints] id=732 N=5007
+[search-local-points] id=732 localMapSize=2587 nToMatch=912 th=1 matched=324
+[raw-keypoints] id=733 N=5004
+[search-local-points] id=733 localMapSize=2573 nToMatch=782 th=1 matched=277
+[raw-keypoints] id=734 N=5001
+[search-local-points] id=734 localMapSize=2707 nToMatch=1175 th=1 matched=550
+[raw-keypoints] id=735 N=5003
+[search-local-points] id=735 localMapSize=2757 nToMatch=1024 th=1 matched=342
+[raw-keypoints] id=736 N=5005
+[search-local-points] id=736 localMapSize=2631 nToMatch=850 th=1 matched=259
+[raw-keypoints] id=737 N=5004
+[search-local-points] id=737 localMapSize=2631 nToMatch=802 th=1 matched=264
+[raw-keypoints] id=738 N=5004
+[search-local-points] id=738 localMapSize=2631 nToMatch=802 th=1 matched=265
+[raw-keypoints] id=739 N=5004
+[search-local-points] id=739 localMapSize=2627 nToMatch=810 th=1 matched=242
+[raw-keypoints] id=740 N=5002
+[search-local-points] id=740 localMapSize=2627 nToMatch=765 th=1 matched=211
+[raw-keypoints] id=741 N=5006
+[search-local-points] id=741 localMapSize=2460 nToMatch=698 th=1 matched=201
+[raw-keypoints] id=742 N=5002
+[search-local-points] id=742 localMapSize=2747 nToMatch=951 th=1 matched=367
+[raw-keypoints] id=743 N=5009
+[search-local-points] id=743 localMapSize=2783 nToMatch=705 th=1 matched=178
+[raw-keypoints] id=744 N=5006
+[search-local-points] id=744 localMapSize=2746 nToMatch=568 th=1 matched=152
+[raw-keypoints] id=745 N=5003
+[search-local-points] id=745 localMapSize=2723 nToMatch=460 th=1 matched=110
+[raw-keypoints] id=746 N=5002
+[search-local-points] id=746 localMapSize=2723 nToMatch=421 th=1 matched=124
+[raw-keypoints] id=747 N=4989
+[search-local-points] id=747 localMapSize=2723 nToMatch=323 th=1 matched=101
+[raw-keypoints] id=748 N=4994
+[search-local-points] id=748 localMapSize=2723 nToMatch=235 th=1 matched=80
+[raw-keypoints] id=749 N=4997
+[search-local-points] id=749 localMapSize=2718 nToMatch=159 th=1 matched=58
+[raw-keypoints] id=750 N=4992
+[search-local-points] id=750 localMapSize=2718 nToMatch=114 th=1 matched=35
+[raw-keypoints] id=751 N=4986
+[search-local-points] id=751 localMapSize=2578 nToMatch=94 th=1 matched=22
+[raw-keypoints] id=752 N=4968
+TRACK_REF_KF: Less than 15 matches!!
+Fail to track local map!
+SYSTEM-> Reseting active map in monocular case
+LM: Active map reset recieved
+LM: Active map reset, waiting...
+LM: Reseting current map in Local Mapping...
+LM: End reseting Local Mapping...
+LM: Reset free the mutex
+LM: Active map reset, Done!!!
+mnFirstFrameId = 48
+mnInitialFrameId = 700
+49 Frames set to lost
+[raw-keypoints] id=753 N=8607
+[raw-keypoints] id=754 N=8680
+First KF:97; Map init KF:87
+New Map created with 692 points
+[raw-keypoints] id=755 N=4887
+[search-local-points] id=755 localMapSize=692 nToMatch=504 th=1 matched=262
+[raw-keypoints] id=756 N=4888
+[search-local-points] id=756 localMapSize=1626 nToMatch=993 th=1 matched=416
+[raw-keypoints] id=757 N=4940
+[search-local-points] id=757 localMapSize=1663 nToMatch=718 th=1 matched=226
+[raw-keypoints] id=758 N=4974
+[search-local-points] id=758 localMapSize=1663 nToMatch=679 th=1 matched=197
+[raw-keypoints] id=759 N=4998
+[search-local-points] id=759 localMapSize=1663 nToMatch=649 th=1 matched=148
+[raw-keypoints] id=760 N=5005
+[search-local-points] id=760 localMapSize=1344 nToMatch=851 th=1 matched=330
+[raw-keypoints] id=761 N=5004
+[search-local-points] id=761 localMapSize=1346 nToMatch=568 th=1 matched=204
+[raw-keypoints] id=762 N=5006
+[search-local-points] id=762 localMapSize=1346 nToMatch=495 th=1 matched=162
+[raw-keypoints] id=763 N=5004
+[search-local-points] id=763 localMapSize=1339 nToMatch=454 th=1 matched=133
+[raw-keypoints] id=764 N=5007
+[search-local-points] id=764 localMapSize=853 nToMatch=219 th=1 matched=58
+[raw-keypoints] id=765 N=5003
+[search-local-points] id=765 localMapSize=914 nToMatch=253 th=1 matched=77
+[raw-keypoints] id=766 N=5005
+[search-local-points] id=766 localMapSize=981 nToMatch=257 th=1 matched=77
+[raw-keypoints] id=767 N=5006
+[search-local-points] id=767 localMapSize=997 nToMatch=202 th=1 matched=49
+[raw-keypoints] id=768 N=5006
+[search-local-points] id=768 localMapSize=995 nToMatch=139 th=1 matched=34
+[raw-keypoints] id=769 N=5007
+[search-local-points] id=769 localMapSize=766 nToMatch=74 th=1 matched=26
+[raw-keypoints] id=770 N=5007
+[search-local-points] id=770 localMapSize=982 nToMatch=279 th=1 matched=158
+[raw-keypoints] id=771 N=5009
+[search-local-points] id=771 localMapSize=1009 nToMatch=184 th=1 matched=79
+[raw-keypoints] id=772 N=5008
+[search-local-points] id=772 localMapSize=995 nToMatch=155 th=1 matched=60
+[raw-keypoints] id=773 N=5008
+[search-local-points] id=773 localMapSize=993 nToMatch=143 th=1 matched=62
+[raw-keypoints] id=774 N=5007
+[search-local-points] id=774 localMapSize=900 nToMatch=100 th=1 matched=56
+[raw-keypoints] id=775 N=5008
+[search-local-points] id=775 localMapSize=1148 nToMatch=337 th=1 matched=191
+[raw-keypoints] id=776 N=5005
+[search-local-points] id=776 localMapSize=1142 nToMatch=227 th=1 matched=107
+[raw-keypoints] id=777 N=5004
+[search-local-points] id=777 localMapSize=1140 nToMatch=206 th=1 matched=85
+[raw-keypoints] id=778 N=5003
+[search-local-points] id=778 localMapSize=1072 nToMatch=194 th=1 matched=82
+[raw-keypoints] id=779 N=5006
+[search-local-points] id=779 localMapSize=1305 nToMatch=396 th=1 matched=190
+[raw-keypoints] id=780 N=5007
+[search-local-points] id=780 localMapSize=1353 nToMatch=330 th=1 matched=144
+[raw-keypoints] id=781 N=5002
+[search-local-points] id=781 localMapSize=1319 nToMatch=254 th=1 matched=97
+[raw-keypoints] id=782 N=5006
+[search-local-points] id=782 localMapSize=1319 nToMatch=228 th=1 matched=87
+[raw-keypoints] id=783 N=5005
+[search-local-points] id=783 localMapSize=1318 nToMatch=214 th=1 matched=82
+[raw-keypoints] id=784 N=5002
+[search-local-points] id=784 localMapSize=1181 nToMatch=140 th=1 matched=59
+[raw-keypoints] id=785 N=5004
+[search-local-points] id=785 localMapSize=1311 nToMatch=238 th=1 matched=114
+[raw-keypoints] id=786 N=5003
+[search-local-points] id=786 localMapSize=1357 nToMatch=183 th=1 matched=72
+[raw-keypoints] id=787 N=5003
+[search-local-points] id=787 localMapSize=1339 nToMatch=134 th=1 matched=38
+[raw-keypoints] id=788 N=5007
+[search-local-points] id=788 localMapSize=1334 nToMatch=92 th=1 matched=25
+[raw-keypoints] id=789 N=5009
+[search-local-points] id=789 localMapSize=1332 nToMatch=74 th=1 matched=19
+[raw-keypoints] id=790 N=5007
+[search-local-points] id=790 localMapSize=1191 nToMatch=44 th=1 matched=16
+[raw-keypoints] id=791 N=5007
+[search-local-points] id=791 localMapSize=1293 nToMatch=138 th=1 matched=78
+[raw-keypoints] id=792 N=5010
+[search-local-points] id=792 localMapSize=1305 nToMatch=90 th=1 matched=49
+[raw-keypoints] id=793 N=5007
+[search-local-points] id=793 localMapSize=1325 nToMatch=95 th=1 matched=41
+[raw-keypoints] id=794 N=5006
+[search-local-points] id=794 localMapSize=1316 nToMatch=104 th=1 matched=44
+[raw-keypoints] id=795 N=5007
+[search-local-points] id=795 localMapSize=1316 nToMatch=99 th=1 matched=26
+[raw-keypoints] id=796 N=5006
+[search-local-points] id=796 localMapSize=1316 nToMatch=106 th=1 matched=29
+[raw-keypoints] id=797 N=5001
+[search-local-points] id=797 localMapSize=1206 nToMatch=78 th=1 matched=30
+[raw-keypoints] id=798 N=5003
+[search-local-points] id=798 localMapSize=1331 nToMatch=191 th=1 matched=108
+[raw-keypoints] id=799 N=5006
+[search-local-points] id=799 localMapSize=1341 nToMatch=133 th=1 matched=59
+[raw-keypoints] id=800 N=5003
+[search-local-points] id=800 localMapSize=1374 nToMatch=152 th=1 matched=76
+[raw-keypoints] id=801 N=5006
+[search-local-points] id=801 localMapSize=1352 nToMatch=129 th=1 matched=54
+[raw-keypoints] id=802 N=5002
+[search-local-points] id=802 localMapSize=1350 nToMatch=142 th=1 matched=47
+[raw-keypoints] id=803 N=5005
+[search-local-points] id=803 localMapSize=1350 nToMatch=142 th=1 matched=47
+[raw-keypoints] id=804 N=5007
+[search-local-points] id=804 localMapSize=1267 nToMatch=96 th=1 matched=27
+[raw-keypoints] id=805 N=5006
+[search-local-points] id=805 localMapSize=1370 nToMatch=196 th=1 matched=95
+[raw-keypoints] id=806 N=5008
+[search-local-points] id=806 localMapSize=1391 nToMatch=159 th=1 matched=49
+[raw-keypoints] id=807 N=5009
+[search-local-points] id=807 localMapSize=1403 nToMatch=165 th=1 matched=43
+[raw-keypoints] id=808 N=5006
+[search-local-points] id=808 localMapSize=1416 nToMatch=165 th=1 matched=50
+[raw-keypoints] id=809 N=5006
+[search-local-points] id=809 localMapSize=1389 nToMatch=149 th=1 matched=35
+[raw-keypoints] id=810 N=4939
+[search-local-points] id=810 localMapSize=1389 nToMatch=146 th=1 matched=33
+[raw-keypoints] id=811 N=4942
+[search-local-points] id=811 localMapSize=1389 nToMatch=145 th=1 matched=34
+[raw-keypoints] id=812 N=4955
+[search-local-points] id=812 localMapSize=1389 nToMatch=130 th=1 matched=28
+[raw-keypoints] id=813 N=4944
+[search-local-points] id=813 localMapSize=1389 nToMatch=123 th=1 matched=23
+[raw-keypoints] id=814 N=4933
+[search-local-points] id=814 localMapSize=1395 nToMatch=187 th=1 matched=73
+[raw-keypoints] id=815 N=4924
+[search-local-points] id=815 localMapSize=1453 nToMatch=183 th=1 matched=96
+[raw-keypoints] id=816 N=4937
+[search-local-points] id=816 localMapSize=1467 nToMatch=140 th=1 matched=54
+[raw-keypoints] id=817 N=4934
+[search-local-points] id=817 localMapSize=1479 nToMatch=130 th=1 matched=53
+[raw-keypoints] id=818 N=4952
+[search-local-points] id=818 localMapSize=1482 nToMatch=128 th=1 matched=49
+[raw-keypoints] id=819 N=4955
+[search-local-points] id=819 localMapSize=1490 nToMatch=142 th=1 matched=52
+[raw-keypoints] id=820 N=4967
+[search-local-points] id=820 localMapSize=1452 nToMatch=125 th=1 matched=34
+[raw-keypoints] id=821 N=4981
+[search-local-points] id=821 localMapSize=1452 nToMatch=123 th=1 matched=38
+[raw-keypoints] id=822 N=4990
+[search-local-points] id=822 localMapSize=1452 nToMatch=126 th=1 matched=44
+[raw-keypoints] id=823 N=5005
+[search-local-points] id=823 localMapSize=1452 nToMatch=112 th=1 matched=30
+[raw-keypoints] id=824 N=5004
+[search-local-points] id=824 localMapSize=1452 nToMatch=112 th=1 matched=33
+[raw-keypoints] id=825 N=5002
+[search-local-points] id=825 localMapSize=1505 nToMatch=220 th=1 matched=138
+[raw-keypoints] id=826 N=5002
+[search-local-points] id=826 localMapSize=1534 nToMatch=154 th=1 matched=86
+[raw-keypoints] id=827 N=5005
+[search-local-points] id=827 localMapSize=1543 nToMatch=146 th=1 matched=63
+[raw-keypoints] id=828 N=5004
+[search-local-points] id=828 localMapSize=1552 nToMatch=161 th=1 matched=64
+[raw-keypoints] id=829 N=5004
+[search-local-points] id=829 localMapSize=1555 nToMatch=147 th=1 matched=61
+[raw-keypoints] id=830 N=5002
+[search-local-points] id=830 localMapSize=1538 nToMatch=150 th=1 matched=51
+[raw-keypoints] id=831 N=5004
+[search-local-points] id=831 localMapSize=1538 nToMatch=155 th=1 matched=50
+[raw-keypoints] id=832 N=5003
+[search-local-points] id=832 localMapSize=1538 nToMatch=179 th=1 matched=55
+[raw-keypoints] id=833 N=5003
+[search-local-points] id=833 localMapSize=1537 nToMatch=178 th=1 matched=46
+[raw-keypoints] id=834 N=5003
+[search-local-points] id=834 localMapSize=1537 nToMatch=176 th=1 matched=49
+[raw-keypoints] id=835 N=5005
+[search-local-points] id=835 localMapSize=1691 nToMatch=380 th=1 matched=227
+[raw-keypoints] id=836 N=5004
+[search-local-points] id=836 localMapSize=1741 nToMatch=279 th=1 matched=119
+[raw-keypoints] id=837 N=5003
+[search-local-points] id=837 localMapSize=1745 nToMatch=243 th=1 matched=83
+[raw-keypoints] id=838 N=5003
+[search-local-points] id=838 localMapSize=1755 nToMatch=269 th=1 matched=95
+[raw-keypoints] id=839 N=5002
+[search-local-points] id=839 localMapSize=1744 nToMatch=246 th=1 matched=76
+[raw-keypoints] id=840 N=5001
+[search-local-points] id=840 localMapSize=1744 nToMatch=254 th=1 matched=86
+[raw-keypoints] id=841 N=5005
+[search-local-points] id=841 localMapSize=1743 nToMatch=228 th=1 matched=81
+[raw-keypoints] id=842 N=5003
+[search-local-points] id=842 localMapSize=1743 nToMatch=224 th=1 matched=74
+[raw-keypoints] id=843 N=5001
+[search-local-points] id=843 localMapSize=1651 nToMatch=191 th=1 matched=69
+[raw-keypoints] id=844 N=5003
+[search-local-points] id=844 localMapSize=2072 nToMatch=604 th=1 matched=362
+[raw-keypoints] id=845 N=5001
+[search-local-points] id=845 localMapSize=2094 nToMatch=411 th=1 matched=180
+[raw-keypoints] id=846 N=4994
+[search-local-points] id=846 localMapSize=2103 nToMatch=402 th=1 matched=180
+[raw-keypoints] id=847 N=4992
+[search-local-points] id=847 localMapSize=2111 nToMatch=386 th=1 matched=180
+[raw-keypoints] id=848 N=4981
+[search-local-points] id=848 localMapSize=2065 nToMatch=339 th=1 matched=151
+[raw-keypoints] id=849 N=4977
+[search-local-points] id=849 localMapSize=2065 nToMatch=333 th=1 matched=140
+[raw-keypoints] id=850 N=4971
+[search-local-points] id=850 localMapSize=2065 nToMatch=351 th=1 matched=148
+[raw-keypoints] id=851 N=4958
+[search-local-points] id=851 localMapSize=2065 nToMatch=319 th=1 matched=127
+[raw-keypoints] id=852 N=4929
+[search-local-points] id=852 localMapSize=2065 nToMatch=313 th=1 matched=125
+[raw-keypoints] id=853 N=4947
+[search-local-points] id=853 localMapSize=2065 nToMatch=269 th=1 matched=89
+[raw-keypoints] id=854 N=4960
+[search-local-points] id=854 localMapSize=2205 nToMatch=502 th=1 matched=286
+[raw-keypoints] id=855 N=4903
+[search-local-points] id=855 localMapSize=2229 nToMatch=354 th=1 matched=152
+[raw-keypoints] id=856 N=4877
+[search-local-points] id=856 localMapSize=2236 nToMatch=352 th=1 matched=109
+[raw-keypoints] id=857 N=4836
+[search-local-points] id=857 localMapSize=2245 nToMatch=326 th=1 matched=98
+[raw-keypoints] id=858 N=4702
+[search-local-points] id=858 localMapSize=2251 nToMatch=305 th=1 matched=86
+[raw-keypoints] id=859 N=4621
+[search-local-points] id=859 localMapSize=2236 nToMatch=300 th=1 matched=75
+[raw-keypoints] id=860 N=4616
+[search-local-points] id=860 localMapSize=2201 nToMatch=246 th=1 matched=75
+[raw-keypoints] id=861 N=4653
+[search-local-points] id=861 localMapSize=2201 nToMatch=213 th=1 matched=59
+[raw-keypoints] id=862 N=4737
+[search-local-points] id=862 localMapSize=2201 nToMatch=188 th=1 matched=50
+[raw-keypoints] id=863 N=4838
+[search-local-points] id=863 localMapSize=2198 nToMatch=160 th=1 matched=47
+[raw-keypoints] id=864 N=4849
+[search-local-points] id=864 localMapSize=2198 nToMatch=169 th=1 matched=51
+[raw-keypoints] id=865 N=4892
+[search-local-points] id=865 localMapSize=2092 nToMatch=298 th=1 matched=175
+[raw-keypoints] id=866 N=4854
+[search-local-points] id=866 localMapSize=2140 nToMatch=237 th=1 matched=117
+[raw-keypoints] id=867 N=4840
+[search-local-points] id=867 localMapSize=2149 nToMatch=218 th=1 matched=95
+[raw-keypoints] id=868 N=4920
+[search-local-points] id=868 localMapSize=2153 nToMatch=214 th=1 matched=91
+[raw-keypoints] id=869 N=4942
+[search-local-points] id=869 localMapSize=2160 nToMatch=220 th=1 matched=82
+[raw-keypoints] id=870 N=4948
+[search-local-points] id=870 localMapSize=2132 nToMatch=208 th=1 matched=73
+[raw-keypoints] id=871 N=4981
+[search-local-points] id=871 localMapSize=2132 nToMatch=219 th=1 matched=79
+[raw-keypoints] id=872 N=4977
+[search-local-points] id=872 localMapSize=2132 nToMatch=207 th=1 matched=77
+[raw-keypoints] id=873 N=4938
+[search-local-points] id=873 localMapSize=2132 nToMatch=209 th=1 matched=64
+[raw-keypoints] id=874 N=4874
+[search-local-points] id=874 localMapSize=2131 nToMatch=214 th=1 matched=66
+[raw-keypoints] id=875 N=4896
+[search-local-points] id=875 localMapSize=2131 nToMatch=182 th=1 matched=60
+[raw-keypoints] id=876 N=4943
+[search-local-points] id=876 localMapSize=2192 nToMatch=378 th=1 matched=229
+[raw-keypoints] id=877 N=4976
+[search-local-points] id=877 localMapSize=2221 nToMatch=272 th=1 matched=118
+[raw-keypoints] id=878 N=4986
+[search-local-points] id=878 localMapSize=2235 nToMatch=254 th=1 matched=80
+[raw-keypoints] id=879 N=5003
+[search-local-points] id=879 localMapSize=2212 nToMatch=215 th=1 matched=62
+[raw-keypoints] id=880 N=5001
+[search-local-points] id=880 localMapSize=2212 nToMatch=228 th=1 matched=60
+[raw-keypoints] id=881 N=5002
+[search-local-points] id=881 localMapSize=2211 nToMatch=243 th=1 matched=75
+[raw-keypoints] id=882 N=4996
+[search-local-points] id=882 localMapSize=2084 nToMatch=148 th=1 matched=52
+[raw-keypoints] id=883 N=5007
+[search-local-points] id=883 localMapSize=2274 nToMatch=314 th=1 matched=138
+[raw-keypoints] id=884 N=5006
+[search-local-points] id=884 localMapSize=2291 nToMatch=243 th=1 matched=70
+[raw-keypoints] id=885 N=5005
+[search-local-points] id=885 localMapSize=2278 nToMatch=226 th=1 matched=72
+[raw-keypoints] id=886 N=5007
+[search-local-points] id=886 localMapSize=2275 nToMatch=205 th=1 matched=55
+[raw-keypoints] id=887 N=5007
+[search-local-points] id=887 localMapSize=2275 nToMatch=179 th=1 matched=59
+[raw-keypoints] id=888 N=5010
+[search-local-points] id=888 localMapSize=2093 nToMatch=121 th=1 matched=46
+[raw-keypoints] id=889 N=5005
+[search-local-points] id=889 localMapSize=2239 nToMatch=263 th=1 matched=126
+[raw-keypoints] id=890 N=5005
+[search-local-points] id=890 localMapSize=2252 nToMatch=183 th=1 matched=93
+[raw-keypoints] id=891 N=5004
+[search-local-points] id=891 localMapSize=2237 nToMatch=157 th=1 matched=60
+[raw-keypoints] id=892 N=5005
+[search-local-points] id=892 localMapSize=2237 nToMatch=163 th=1 matched=71
+[raw-keypoints] id=893 N=5005
+[search-local-points] id=893 localMapSize=2237 nToMatch=137 th=1 matched=51
+[raw-keypoints] id=894 N=5007
+[search-local-points] id=894 localMapSize=2237 nToMatch=127 th=1 matched=39
+[raw-keypoints] id=895 N=5003
+[search-local-points] id=895 localMapSize=2145 nToMatch=123 th=1 matched=55
+[raw-keypoints] id=896 N=5005
+[search-local-points] id=896 localMapSize=2214 nToMatch=146 th=1 matched=68
+[raw-keypoints] id=897 N=5004
+[search-local-points] id=897 localMapSize=2219 nToMatch=110 th=1 matched=44
+[raw-keypoints] id=898 N=5003
+[search-local-points] id=898 localMapSize=2220 nToMatch=104 th=1 matched=46
+[raw-keypoints] id=899 N=5006
+[search-local-points] id=899 localMapSize=2219 nToMatch=98 th=1 matched=31
+[raw-keypoints] id=900 N=5005
+[search-local-points] id=900 localMapSize=2219 nToMatch=85 th=1 matched=23
+[raw-keypoints] id=901 N=5006
+[search-local-points] id=901 localMapSize=2182 nToMatch=102 th=1 matched=41
+[raw-keypoints] id=902 N=5005
+[search-local-points] id=902 localMapSize=2202 nToMatch=98 th=1 matched=54
+[raw-keypoints] id=903 N=5005
+[search-local-points] id=903 localMapSize=2207 nToMatch=69 th=1 matched=32
+[raw-keypoints] id=904 N=5009
+[search-local-points] id=904 localMapSize=2202 nToMatch=70 th=1 matched=20
+[raw-keypoints] id=905 N=5003
+[search-local-points] id=905 localMapSize=2202 nToMatch=70 th=1 matched=19
+[raw-keypoints] id=906 N=5006
+[search-local-points] id=906 localMapSize=2202 nToMatch=66 th=1 matched=17
+[raw-keypoints] id=907 N=5006
+[search-local-points] id=907 localMapSize=2138 nToMatch=39 th=1 matched=16
+[raw-keypoints] id=908 N=5007
+[search-local-points] id=908 localMapSize=2231 nToMatch=129 th=1 matched=72
+[raw-keypoints] id=909 N=5002
+[search-local-points] id=909 localMapSize=2251 nToMatch=92 th=1 matched=35
+[raw-keypoints] id=910 N=5005
+[search-local-points] id=910 localMapSize=2262 nToMatch=81 th=1 matched=24
+[raw-keypoints] id=911 N=5005
+[search-local-points] id=911 localMapSize=2251 nToMatch=72 th=1 matched=18
+[raw-keypoints] id=912 N=5004
+[search-local-points] id=912 localMapSize=2251 nToMatch=82 th=1 matched=24
+[raw-keypoints] id=913 N=5004
+[search-local-points] id=913 localMapSize=2251 nToMatch=81 th=1 matched=23
+[raw-keypoints] id=914 N=5005
+[search-local-points] id=914 localMapSize=2251 nToMatch=78 th=1 matched=27
+[raw-keypoints] id=915 N=5004
+[search-local-points] id=915 localMapSize=2251 nToMatch=76 th=1 matched=26
+[raw-keypoints] id=916 N=4992
+[search-local-points] id=916 localMapSize=2182 nToMatch=47 th=1 matched=15
+[raw-keypoints] id=917 N=5008
+[search-local-points] id=917 localMapSize=2280 nToMatch=140 th=1 matched=76
+[raw-keypoints] id=918 N=5007
+[search-local-points] id=918 localMapSize=2292 nToMatch=108 th=1 matched=41
+[raw-keypoints] id=919 N=5005
+[search-local-points] id=919 localMapSize=2291 nToMatch=93 th=1 matched=27
+[raw-keypoints] id=920 N=5004
+[search-local-points] id=920 localMapSize=2291 nToMatch=98 th=1 matched=35
+[raw-keypoints] id=921 N=5004
+[search-local-points] id=921 localMapSize=2291 nToMatch=82 th=1 matched=24
+[raw-keypoints] id=922 N=5005
+[search-local-points] id=922 localMapSize=2413 nToMatch=255 th=1 matched=143
+[raw-keypoints] id=923 N=5005
+[search-local-points] id=923 localMapSize=2414 nToMatch=148 th=1 matched=53
+[raw-keypoints] id=924 N=5003
+[search-local-points] id=924 localMapSize=2430 nToMatch=147 th=1 matched=60
+[raw-keypoints] id=925 N=5009
+[search-local-points] id=925 localMapSize=2423 nToMatch=132 th=1 matched=45
+[raw-keypoints] id=926 N=5008
+[search-local-points] id=926 localMapSize=2423 nToMatch=133 th=1 matched=39
+[raw-keypoints] id=927 N=5008
+[search-local-points] id=927 localMapSize=2423 nToMatch=132 th=1 matched=47
+[raw-keypoints] id=928 N=5007
+[search-local-points] id=928 localMapSize=2423 nToMatch=125 th=1 matched=32
+[raw-keypoints] id=929 N=5008
+[search-local-points] id=929 localMapSize=2423 nToMatch=131 th=1 matched=42
+[raw-keypoints] id=930 N=5005
+[search-local-points] id=930 localMapSize=2423 nToMatch=102 th=1 matched=34
+[raw-keypoints] id=931 N=5003
+[search-local-points] id=931 localMapSize=2441 nToMatch=188 th=1 matched=115
+[raw-keypoints] id=932 N=5006
+[search-local-points] id=932 localMapSize=2480 nToMatch=158 th=1 matched=81
+[raw-keypoints] id=933 N=5004
+[search-local-points] id=933 localMapSize=2486 nToMatch=130 th=1 matched=52
+[raw-keypoints] id=934 N=5005
+[search-local-points] id=934 localMapSize=2480 nToMatch=135 th=1 matched=44
+[raw-keypoints] id=935 N=5006
+[search-local-points] id=935 localMapSize=2480 nToMatch=138 th=1 matched=47
+[raw-keypoints] id=936 N=5005
+[search-local-points] id=936 localMapSize=2480 nToMatch=141 th=1 matched=39
+[raw-keypoints] id=937 N=5004
+[search-local-points] id=937 localMapSize=2606 nToMatch=339 th=1 matched=195
+[raw-keypoints] id=938 N=5004
+[search-local-points] id=938 localMapSize=2643 nToMatch=244 th=1 matched=99
+[raw-keypoints] id=939 N=5006
+[search-local-points] id=939 localMapSize=2654 nToMatch=245 th=1 matched=89
+[raw-keypoints] id=940 N=5000
+[search-local-points] id=940 localMapSize=2667 nToMatch=251 th=1 matched=71
+[raw-keypoints] id=941 N=5003
+[search-local-points] id=941 localMapSize=2644 nToMatch=229 th=1 matched=72
+[raw-keypoints] id=942 N=5004
+[search-local-points] id=942 localMapSize=2644 nToMatch=215 th=1 matched=73
+[raw-keypoints] id=943 N=5005
+[search-local-points] id=943 localMapSize=2644 nToMatch=205 th=1 matched=75
+[raw-keypoints] id=944 N=5005
+[search-local-points] id=944 localMapSize=2644 nToMatch=184 th=1 matched=58
+[raw-keypoints] id=945 N=5004
+[search-local-points] id=945 localMapSize=2644 nToMatch=172 th=1 matched=49
+[raw-keypoints] id=946 N=5004
+[search-local-points] id=946 localMapSize=2644 nToMatch=156 th=1 matched=40
+[raw-keypoints] id=947 N=5005
+[search-local-points] id=947 localMapSize=2638 nToMatch=214 th=1 matched=113
+[raw-keypoints] id=948 N=5004
+[search-local-points] id=948 localMapSize=2702 nToMatch=206 th=1 matched=105
+[raw-keypoints] id=949 N=5004
+[search-local-points] id=949 localMapSize=2718 nToMatch=191 th=1 matched=63
+[raw-keypoints] id=950 N=5005
+[search-local-points] id=950 localMapSize=2722 nToMatch=190 th=1 matched=56
+[raw-keypoints] id=951 N=5005
+[search-local-points] id=951 localMapSize=2459 nToMatch=176 th=1 matched=43
+[raw-keypoints] id=952 N=5004
+[search-local-points] id=952 localMapSize=1403 nToMatch=142 th=1 matched=31
+[raw-keypoints] id=953 N=5007
+[search-local-points] id=953 localMapSize=914 nToMatch=83 th=1 matched=26
+[raw-keypoints] id=954 N=5003
+[search-local-points] id=954 localMapSize=1116 nToMatch=259 th=1 matched=155
+[raw-keypoints] id=955 N=5002
+[search-local-points] id=955 localMapSize=1144 nToMatch=149 th=1 matched=62
+[raw-keypoints] id=956 N=5002
+[search-local-points] id=956 localMapSize=1141 nToMatch=129 th=1 matched=41
+[raw-keypoints] id=957 N=5003
+[search-local-points] id=957 localMapSize=1110 nToMatch=90 th=1 matched=27
+[raw-keypoints] id=958 N=5003
+[search-local-points] id=958 localMapSize=1104 nToMatch=54 th=1 matched=23
+[raw-keypoints] id=959 N=5006
+[search-local-points] id=959 localMapSize=1218 nToMatch=210 th=1 matched=131
+[raw-keypoints] id=960 N=5004
+[search-local-points] id=960 localMapSize=1234 nToMatch=124 th=1 matched=43
+[raw-keypoints] id=961 N=5004
+[search-local-points] id=961 localMapSize=1234 nToMatch=105 th=1 matched=37
+[raw-keypoints] id=962 N=5005
+[search-local-points] id=962 localMapSize=978 nToMatch=95 th=1 matched=23
+[raw-keypoints] id=963 N=5007
+[search-local-points] id=963 localMapSize=1186 nToMatch=269 th=1 matched=138
+[raw-keypoints] id=964 N=5004
+[search-local-points] id=964 localMapSize=797 nToMatch=131 th=1 matched=42
+[raw-keypoints] id=965 N=5004
+[search-local-points] id=965 localMapSize=828 nToMatch=119 th=1 matched=39
+[raw-keypoints] id=966 N=5004
+[search-local-points] id=966 localMapSize=827 nToMatch=105 th=1 matched=30
+[raw-keypoints] id=967 N=5006
+[search-local-points] id=967 localMapSize=837 nToMatch=209 th=1 matched=123
+[raw-keypoints] id=968 N=4994
+[search-local-points] id=968 localMapSize=889 nToMatch=175 th=1 matched=85
+[raw-keypoints] id=969 N=5002
+[search-local-points] id=969 localMapSize=889 nToMatch=158 th=1 matched=60
+[raw-keypoints] id=970 N=4995
+[search-local-points] id=970 localMapSize=888 nToMatch=150 th=1 matched=56
+[raw-keypoints] id=971 N=5007
+[search-local-points] id=971 localMapSize=888 nToMatch=139 th=1 matched=51
+[raw-keypoints] id=972 N=5001
+[search-local-points] id=972 localMapSize=943 nToMatch=265 th=1 matched=149
+[raw-keypoints] id=973 N=5007
+[search-local-points] id=973 localMapSize=994 nToMatch=236 th=1 matched=116
+[raw-keypoints] id=974 N=5004
+[search-local-points] id=974 localMapSize=993 nToMatch=189 th=1 matched=79
+[raw-keypoints] id=975 N=5005
+[search-local-points] id=975 localMapSize=934 nToMatch=152 th=1 matched=50
+[raw-keypoints] id=976 N=5003
+[search-local-points] id=976 localMapSize=1142 nToMatch=363 th=1 matched=171
+[raw-keypoints] id=977 N=5004
+[search-local-points] id=977 localMapSize=1153 nToMatch=269 th=1 matched=90
+[raw-keypoints] id=978 N=5001
+[search-local-points] id=978 localMapSize=1144 nToMatch=254 th=1 matched=79
+[raw-keypoints] id=979 N=5004
+[search-local-points] id=979 localMapSize=1143 nToMatch=229 th=1 matched=80
+[raw-keypoints] id=980 N=5006
+[search-local-points] id=980 localMapSize=1143 nToMatch=219 th=1 matched=65
+[raw-keypoints] id=981 N=5007
+[search-local-points] id=981 localMapSize=1023 nToMatch=192 th=1 matched=70
+[raw-keypoints] id=982 N=5007
+[search-local-points] id=982 localMapSize=1162 nToMatch=241 th=1 matched=88
+[raw-keypoints] id=983 N=5004
+[search-local-points] id=983 localMapSize=1165 nToMatch=210 th=1 matched=86
+[raw-keypoints] id=984 N=5003
+[search-local-points] id=984 localMapSize=1162 nToMatch=182 th=1 matched=60
+[raw-keypoints] id=985 N=5003
+[search-local-points] id=985 localMapSize=1027 nToMatch=135 th=1 matched=42
+[raw-keypoints] id=986 N=5007
+[search-local-points] id=986 localMapSize=1154 nToMatch=235 th=1 matched=106
+[raw-keypoints] id=987 N=5010
+[search-local-points] id=987 localMapSize=1161 nToMatch=144 th=1 matched=55
+[raw-keypoints] id=988 N=5007
+[search-local-points] id=988 localMapSize=1169 nToMatch=140 th=1 matched=42
+[raw-keypoints] id=989 N=5008
+[search-local-points] id=989 localMapSize=1162 nToMatch=121 th=1 matched=25
+[raw-keypoints] id=990 N=5002
+[search-local-points] id=990 localMapSize=1161 nToMatch=112 th=1 matched=29
+[raw-keypoints] id=991 N=5002
+[search-local-points] id=991 localMapSize=1059 nToMatch=78 th=1 matched=19
+[raw-keypoints] id=992 N=5007
+[search-local-points] id=992 localMapSize=1137 nToMatch=131 th=1 matched=54
+[raw-keypoints] id=993 N=5005
+[search-local-points] id=993 localMapSize=1169 nToMatch=124 th=1 matched=65
+[raw-keypoints] id=994 N=5004
+[search-local-points] id=994 localMapSize=1209 nToMatch=129 th=1 matched=59
+[raw-keypoints] id=995 N=5002
+[search-local-points] id=995 localMapSize=1182 nToMatch=94 th=1 matched=25
+[raw-keypoints] id=996 N=5002
+[search-local-points] id=996 localMapSize=1182 nToMatch=100 th=1 matched=28
+[raw-keypoints] id=997 N=5006
+[search-local-points] id=997 localMapSize=1182 nToMatch=87 th=1 matched=22
+[raw-keypoints] id=998 N=5007
+[search-local-points] id=998 localMapSize=1133 nToMatch=199 th=1 matched=121
+[raw-keypoints] id=999 N=5007
+[search-local-points] id=999 localMapSize=1202 nToMatch=182 th=1 matched=82
+Shutdown
+[atlas-coverage] 3 map fragment(s) in Atlas at shutdown
+[atlas-coverage] total keyframes across all fragments: 113
+[fragment 0 (24 KFs)] matched=24/24 scale=22.349 pathLen=100.0m ATE(rmse/mean/median/max)=0.590/0.533/0.573/1.080m (0.59% of path) gtBBox=x[-5.2,52.0] z[43.6,90.6] start=(-2.5,43.6) end=(52.0,89.3)
+[fragment 1 (51 KFs)] matched=51/51 scale=12.585 pathLen=255.5m ATE(rmse/mean/median/max)=0.945/0.812/0.669/3.324m (0.37% of path) gtBBox=x[-15.1,71.9] z[105.4,279.2] start=(60.3,105.4) end=(-15.1,279.2)
+[fragment 2 (38 KFs)] matched=38/38 scale=16.403 pathLen=190.7m ATE(rmse/mean/median/max)=0.705/0.629/0.652/1.791m (0.37% of path) gtBBox=x[-187.2,-28.5] z[331.3,375.1] start=(-28.5,375.1) end=(-185.1,331.3)
+
+Saving keyframe trajectory to scratchpad/sbpdiag_orb_1000_KeyFrameTrajectory.txt ...
+[sbp-diag] total=307144 empty_window=119280 dist_reject=59923 ratio_reject=16700 accepted=111241

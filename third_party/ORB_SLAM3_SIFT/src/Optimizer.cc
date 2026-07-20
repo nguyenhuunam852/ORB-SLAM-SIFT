@@ -2345,8 +2345,24 @@ int Optimizer::OptimizeSim3(KeyFrame *pKF1, KeyFrame *pKF2, vector<MapPoint *> &
     else
         nMoreIterations=5;
 
-    if(nCorrespondences-nBad<10)
+    // [merge-investigate] this hard-coded survivor-count bailout is a 4th
+    // absolute threshold in the merge chain, not exposed as a parameter,
+    // found after lowering the caller's nProjMatches/nProjOptMatches/
+    // nSim3Inliers (part 19/20). Pulled 10->6 per part 21's real bailout
+    // data (survivor counts of 0,7,0,7,8 -- 6 lets the near-miss 7/8 cases
+    // through while still rejecting the 100%-rejected 0 cases, which no
+    // threshold value can fix since they reflect a genuinely bad Sim3 fit,
+    // not a borderline one). Paired with lowering the caller's
+    // nSim3Inliers to the same 6 (LoopClosing.cc) since leaving that at 10
+    // would just re-reject these same cases immediately afterward -- see
+    // DEBUGGING.md part 22.
+    constexpr int kMinSim3Survivors = 6;
+    if(nCorrespondences-nBad<kMinSim3Survivors)
+    {
+        fprintf(stderr, "[merge-investigate][optsim3] kf1=%lu kf2=%lu nCorrespondences=%d nBad=%d survivors=%d<%d -- BAILOUT (returning 0)\n",
+                pKF1->mnId, pKF2->mnId, nCorrespondences, nBad, nCorrespondences-nBad, kMinSim3Survivors);
         return 0;
+    }
 
     // Optimize again only with inliers
     optimizer.initializeOptimization();

@@ -174,10 +174,12 @@ int main(int argc, char **argv)
     std::fprintf(stderr, "true-match squared-L2:  p50=%.1f p90=%.1f p95=%.1f p99=%.1f max=%.1f\n",
                  percentile(trueDist, 0.50), percentile(trueDist, 0.90), percentile(trueDist, 0.95),
                  percentile(trueDist, 0.99), trueDist.empty() ? -1.f : *std::max_element(trueDist.begin(), trueDist.end()));
-    std::fprintf(stderr, "false-match squared-L2: min=%.1f p1=%.1f p5=%.1f p10=%.1f p50=%.1f\n",
+    std::fprintf(stderr, "false-match squared-L2: min=%.1f p1=%.1f p5=%.1f p10=%.1f p50=%.1f p90=%.1f p95=%.1f p99=%.1f max=%.1f\n",
                  falseDist.empty() ? -1.f : *std::min_element(falseDist.begin(), falseDist.end()),
                  percentile(falseDist, 0.01), percentile(falseDist, 0.05), percentile(falseDist, 0.10),
-                 percentile(falseDist, 0.50));
+                 percentile(falseDist, 0.50), percentile(falseDist, 0.90), percentile(falseDist, 0.95),
+                 percentile(falseDist, 0.99),
+                 falseDist.empty() ? -1.f : *std::max_element(falseDist.begin(), falseDist.end()));
 
     const float thLow = percentile(trueDist, 0.95);
     const float thHigh = percentile(trueDist, 0.99) * 1.5f;

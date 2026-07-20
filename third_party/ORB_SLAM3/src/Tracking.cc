@@ -2966,6 +2966,12 @@ bool Tracking::TrackLocalMap()
                 aux2++;
         }
 
+    // [track-local-map-detail] TEMPORARY diagnostic, part 56 -- matched
+    // counterpart of the SIFT fork's own diagnostic, added for a direct
+    // outlier-rate comparison (see DEBUGGING.md).
+    fprintf(stderr, "[track-local-map-detail] id=%lu beforePO_candidates=%d beforePO_flaggedOutlier=%d\n",
+            mCurrentFrame.mnId, aux1, aux2);
+
     int inliers;
     if (!mpAtlas->isImuInitialized())
         Optimizer::PoseOptimization(&mCurrentFrame);
@@ -3000,6 +3006,10 @@ bool Tracking::TrackLocalMap()
             if(mCurrentFrame.mvbOutlier[i])
                 aux2++;
         }
+
+    // [track-local-map-detail] TEMPORARY diagnostic, part 56.
+    fprintf(stderr, "[track-local-map-detail] id=%lu afterPO_candidates=%d afterPO_flaggedOutlier=%d afterPO_survivors=%d\n",
+            mCurrentFrame.mnId, aux1, aux2, aux1-aux2);
 
     mnMatchesInliers = 0;
 
@@ -3411,6 +3421,14 @@ void Tracking::SearchLocalPoints()
             th=15; // 15
 
         int matches = matcher.SearchByProjection(mCurrentFrame, mvpLocalMapPoints, th, mpLocalMapper->mbFarPoints, mpLocalMapper->mThFarPoints);
+
+        // [search-local-points] TEMPORARY diagnostic, matching the SIFT
+        // fork's own (part 55, see Project/DEBUGGING.md) -- direct
+        // ORB-vs-SIFT match-RATE comparison (matched/nToMatch) on the same
+        // segment, now that raw keypoint-count and detection-yield have
+        // already been compared.
+        fprintf(stderr, "[search-local-points] id=%lu localMapSize=%zu nToMatch=%d th=%d matched=%d\n",
+                mCurrentFrame.mnId, mvpLocalMapPoints.size(), nToMatch, th, matches);
     }
 }
 

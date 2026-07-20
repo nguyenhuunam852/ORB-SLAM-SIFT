@@ -14,6 +14,7 @@
 
 #include <cstdlib>
 #include <vector>
+#include <mutex>
 
 namespace DUtils {
 
@@ -51,9 +52,23 @@ public:
 	/**
 	 * Returns a random number in the range [0..1]
 	 * @return random T number in [0..1]
+	 *
+	 * Locked (part 53): rand()'s global state is not thread-safe. This SLAM
+	 * fork runs RANSAC (Sim3Solver, MLPnPsolver) from multiple concurrent
+	 * threads (Tracking, LocalMapping, LoopClosing) -- concurrent unsynchronized
+	 * rand() calls are undefined behavior, confirmed as the source of real
+	 * run-to-run nondeterminism even with a fixed seed (SeedRandOnce): the same
+	 * exact code+data on a fixed 541-frame test segment produced 102, 111, 102
+	 * raw tracking failures across three otherwise-identical repeat runs, only
+	 * explicable by OS thread-scheduling variance racing on the shared rand()
+	 * state. This lock does not change RANSAC's own sampling behavior (still
+	 * draws many random subsets per call, same as before) -- it only makes the
+	 * draw SEQUENCE reproducible for the same input, instead of scheduling-
+	 * dependent. See DEBUGGING.md part 53.
 	 */
 	template <class T>
 	static T RandomValue(){
+		std::lock_guard<std::mutex> lock(s_randMutex);
 		return (T)rand()/(T)RAND_MAX;
 	}
 
@@ -103,7 +118,14 @@ private:
 
   /// If SeedRandOnce() or SeedRandOnce(int) have already been called
   static bool m_already_seeded;
-  
+
+  /// Part 53: serializes all rand() access -- see RandomValue<T>()'s doc
+  /// comment for why. Plain static (not `inline`) since one build target
+  /// (orbslam3_sift_ext) is pinned to C++14, which doesn't support inline
+  /// static data members -- defined once in Random.cpp instead, same
+  /// pattern as m_already_seeded above.
+  static std::mutex s_randMutex;
+
 };
 
 // ---------------------------------------------------------------------------

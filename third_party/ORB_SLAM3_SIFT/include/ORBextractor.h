@@ -21,6 +21,7 @@
 
 #include <vector>
 #include <list>
+#include <cmath>
 #include <opencv2/opencv.hpp>
 
 
@@ -80,8 +81,29 @@ public:
     int inline GetOctaveLayers(){
         return nOctaveLayers;}
 
+    // Part 56 fix (see DEBUGGING.md): this used to return the raw
+    // constructor-argument `scaleFactor` (the settings file's
+    // ORBextractor.scaleFactor=1.2), which is otherwise UNUSED by this SIFT
+    // reimplementation (the constructor's own comment already says
+    // _scaleFactor is "accepted for signature compatibility but not used").
+    // But Frame/KeyFrame's mfScaleFactor/mfLogScaleFactor -- fed straight
+    // from this getter -- ARE real consumers: MapPoint::PredictScale()
+    // divides by mfLogScaleFactor to convert a real-world distance ratio
+    // into a flat-level array index, and LocalMapping::CreateNewMapPoints()
+    // multiplies mfScaleFactor into a scale-consistency tolerance band.
+    // Both need the TRUE per-flat-level scale step this SIFT
+    // reimplementation actually uses (mvScaleFactor[lvl] jumps by 2.0x per
+    // *octave*, i.e. per nOctaveLayers flat levels -- see the constructor),
+    // not the vestigial 1.2 config value. Using 1.2 made PredictScale's
+    // denominator ~2.1x too large (log(1.2)=0.182 vs the true per-flat-level
+    // log(2^(1/nOctaveLayers))=log(2)/nOctaveLayers=0.087 for nOctaveLayers=8),
+    // so every predicted flat level came out roughly half of where the point
+    // actually was -- systematically mis-centering SearchByProjection's
+    // search window regardless of how wide that window is. Measured to be
+    // the dominant cause of both empty_window (58.3%) and dist_reject
+    // (75.9% conditional) in the sbp-diag breakdown.
     float inline GetScaleFactor(){
-        return scaleFactor;}
+        return std::pow(2.0f, 1.0f / static_cast<float>(nOctaveLayers));}
 
     std::vector<float> inline GetScaleFactors(){
         return mvScaleFactor;

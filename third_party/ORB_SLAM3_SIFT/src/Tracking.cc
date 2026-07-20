@@ -2013,12 +2013,26 @@ void Tracking::Track()
                         // camera really has moved somewhere the old map can't
                         // cover), so this can only add a recovery path, not remove
                         // the existing one.
-                        bOK = mbVelocity && TrackWithMotionModel();
+                        const bool bDR = mbVelocity && TrackWithMotionModel();
+                        bOK = bDR;
+                        bool bRelocAttempted = false;
                         if(!bOK)
                         {
                             // Relocalization
+                            bRelocAttempted = true;
                             bOK = Relocalization();
                         }
+                        // [recently-lost] TEMPORARY diagnostic, see DEBUGGING.md
+                        // part 18 -- confirms/refutes whether the ~3s recovery
+                        // window is structurally unable to succeed for young/
+                        // sparse maps. Uses fprintf(stderr,...), NOT
+                        // Verbose::PrintMess, since Verbose::th is set to
+                        // VERBOSITY_QUIET for this CLI tool (System.cc) and would
+                        // silently produce zero output (see part 18's postmortem
+                        // on that exact mistake).
+                        fprintf(stderr, "[recently-lost] id=%lu mapKFs=%d mbVelocity=%d drOK=%d relocAttempted=%d relocOK=%d elapsed=%.2fs\n",
+                                mCurrentFrame.mnId, pCurrentMap->KeyFramesInMap(), (int)mbVelocity, (int)bDR,
+                                (int)bRelocAttempted, (int)bOK, mCurrentFrame.mTimeStamp-mTimeStampLost);
                         // NOTE: renewing mTimeStampLost here on a bare
                         // TrackWithMotionModel() success was tried and measured
                         // worse (see DEBUGGING.md "Option 2b") -- a marginal
@@ -2029,10 +2043,64 @@ void Tracking::Track()
                         // renewing here.
                         //std::cout << "mCurrentFrame.mTimeStamp:" << to_string(mCurrentFrame.mTimeStamp) << std::endl;
                         //std::cout << "mTimeStampLost:" << to_string(mTimeStampLost) << std::endl;
-                        if(mCurrentFrame.mTimeStamp-mTimeStampLost>3.0f && !bOK)
+                        // Part 29 tried 3.0f->20.0f on the theory that recovery just
+                        // needed more time. MEASURED WRONG: full-checkpoint stats from
+                        // that run (DEBUGGING.md part 29) show dead-reckoning succeeds
+                        // 14/3380 checks (0.41%), relocalization succeeds 22/3380
+                        // (0.65%), and dbCandidates==0 (the KF database has NO candidate
+                        // at all, not just a non-matching one) 74.3% of the time. Only
+                        // 17 distinct RECENTLY_LOST episodes occurred in the whole
+                        // 4541-frame run, each burning ~198 frames (~19.8s) on average
+                        // before timing out -- i.e. nearly the ENTIRE 20s budget, almost
+                        // every time. Coverage came out flat (484.4m vs the ~498.6m
+                        // gate35 baseline, within run-to-run noise) despite raw reset
+                        // *events* dropping 3x (99/95->31), because extending the window
+                        // didn't raise the near-zero recovery success rate -- it just
+                        // made each already-doomed episode take longer to fail.
+                        // Pulled 20.0f->1.0f (part 30): since recovery essentially never
+                        // succeeds once triggered, and fresh mono-init is known fast
+                        // (~2.3 frames average once attempted, part 26 measurement), the
+                        // better use of frames is failing fast and getting back to a new
+                        // init attempt sooner, not waiting out a near-certain failure.
+                        // 1.0f (not 0, ~10 frames at this sequence's ~10fps) deliberately
+                        // keeps a short window since DR/reloc do occasionally succeed
+                        // (36 total real successes in part 29's run, not literally zero).
+                        // Part 30 measured 1.0f: 836.6m coverage, +67.8% vs the gate35
+                        // baseline (~498.6m) and +72.7% vs part 29's 20.0f attempt
+                        // (484.4m) -- confirms fail-fast (short recovery window, restart
+                        // sooner) is the dominant lever, not raw match-count thresholds.
+                        // Recovery successes cluster very early in a dropout (DR/reloc
+                        // success rates were HIGHER at 1.0f than at 20.0f despite ~3x
+                        // fewer attempts). Pulled 1.0f->0.3f (part 31): 1278.3m, +52.8%
+                        // vs 1.0f, +156% vs the gate35 baseline -- still scaling, not
+                        // saturated. BUT first run where per-fragment ATE visibly
+                        // degraded (not just flat): one fragment hit rmse=10.496m/
+                        // max=30.050m, still under the 20m RMSE budget but roughly
+                        // halfway there, and max already exceeds 20m even though RMSE
+                        // doesn't. Pulled 0.3f->0.1f (part 32) to keep testing whether
+                        // the coverage benefit keeps scaling -- watch per-fragment RMSE
+                        // closely on this one, not just total coverage; back off if any
+                        // fragment's RMSE (not max) actually exceeds 20m. See
+                        // DEBUGGING.md part 32.
+                        // Part 55 probe: tried raising this back to 3.0f to test
+                        // whether it would recover the "connective coverage" that
+                        // seems to be lost as segments grow (SIFT's coverage % of GT
+                        // path drops 59%->45%->39% from frames 0-500/1000/1500 while
+                        // stock ORB's rises 60%->75%->83% over the same growing
+                        // segments). MEASURED WORSE, not better: on frames 1-1000,
+                        // 3.0f gave 285 fails/286.6m (4 fragments) vs 0.1f's 67
+                        // fails/320m (6 fragments) -- both more failures AND less
+                        // coverage. Confirms parts 30-32's fail-fast conclusion still
+                        // holds; the "SIFT needs more patience" hypothesis for this
+                        // specific coverage-drop trend is WRONG. Reverted to 0.1f. The
+                        // real explanation for the growing SIFT-vs-ORB gap is still
+                        // unknown -- see DEBUGGING.md part 55 for other candidates
+                        // being investigated (nFeatures, loosened match thresholds
+                        // inherited from earlier parts, destroy-threshold, etc.).
+                        if(mCurrentFrame.mTimeStamp-mTimeStampLost>0.1f && !bOK)
                         {
                             mState = LOST;
-                            Verbose::PrintMess("Track Lost...", Verbose::VERBOSITY_NORMAL);
+                            fprintf(stderr, "[recently-lost] id=%lu TIMEOUT -- flipping to LOST\n", mCurrentFrame.mnId);
                             bOK=false;
                         }
                     }
@@ -2042,7 +2110,24 @@ void Tracking::Track()
 
                     Verbose::PrintMess("A new map is started...", Verbose::VERBOSITY_NORMAL);
 
-                    if (pCurrentMap->KeyFramesInMap()<10)
+                    // Pulled 10->5 (part 34), then back to 9 (part 48). Part 34's
+                    // repeat trials (1455.3m/1143.4m, avg 1299.4m) turned out to be
+                    // statistically indistinguishable from the pre-change ~1267-1300m
+                    // baseline -- the lowered threshold never actually proved a
+                    // coverage win. Meanwhile it has a real, measured cost: more
+                    // preserved small fragments means more Atlas fragments alive at
+                    // once, and LoopClosing's merge-candidate check (DetectNBestCandidates,
+                    // capped at 10 candidates per call but drawn from the whole
+                    // accumulating fragment pool) gets proportionally more expensive as
+                    // that pool grows -- part42_run1 hit 21+ fragments and stalled at
+                    // ~56% progress after 67+ minutes (vs the usual ~20-30min). Since the
+                    // coverage benefit was never confirmed and the runtime cost is real
+                    // and severe, raised back toward (not all the way to) the original
+                    // 10 -- 9 still rescues some of the 8-9 KF fragments confirmed to
+                    // align successfully (parts 32/33), while cutting off the deepest,
+                    // least-valuable end of the small-fragment tail. See DEBUGGING.md
+                    // part 48.
+                    if (pCurrentMap->KeyFramesInMap()<9)
                     {
                         mpSystem->ResetActiveMap();
                         Verbose::PrintMess("Reseting current map...", Verbose::VERBOSITY_NORMAL);
@@ -2241,45 +2326,69 @@ void Tracking::Track()
                 mbVelocity = false;
             }
 
-            // Dynamic feature density during aggressive turns (see
-            // DEBUGGING.md's "Option 1" session): a sharp per-frame
-            // rotation sweeps features across the FOV fast enough to risk
-            // starving the guided-search/BoW matching that keeps tracking
-            // alive through the maneuver, which is what the turn-region
-            // tracking losses documented earlier in this file trace back
-            // to. mVelocity already carries the relative rotation between
-            // the last two tracked frames -- reuse it instead of adding a
-            // second signal, and only reconfigure mpORBextractorLeft's
-            // live cv::SIFT object on a state *transition* (entering or
-            // leaving high-angular-velocity mode), not every frame.
+            // Dynamic feature density -- RETARGETED (part 50) from angular to
+            // translation velocity. Originally ("Option 1" session, see
+            // DEBUGGING.md) this boosted density during sharp turns, on the
+            // theory that fast rotation sweeps features across the FOV and
+            // starves matching. That session measured it neutral -- now
+            // explained: part 45's GT-pose correlation directly REFUTED the
+            // turn hypothesis (failures were, if anything, UNDER-represented
+            // at high rotation, 7.7% vs 10% baseline) and instead found a real
+            // correlation with translation SPEED (18.1% of failures in the
+            // top-10%-speed bucket). This boost mechanism -- 2x features, half
+            // the contrast threshold -- was sound infrastructure aimed at the
+            // wrong trigger the whole time. Reusing the same mVelocity signal,
+            // just its translation magnitude instead of rotation, and the same
+            // threshold already calibrated and validated for the search-radius
+            // fix (part 46/47, true measured p90=0.087 from a 3486-sample
+            // checkpoint) rather than inventing a new one. Only reconfigures
+            // the live cv::SIFT object on a state *transition*, not every
+            // frame, same as before. NOT yet measured, see DEBUGGING.md part 50.
             if(mbVelocity && mnBaseNFeatures > 0)
             {
-                // 5 deg/frame: real KITTI seq00 turns average well under
-                // 1 deg/frame with occasional few-degree bumps in normal
-                // curves, but hit an 18 deg/frame peak during the sharp
-                // maneuver that triggers the documented tracking-loss
-                // cascade (see DEBUGGING.md) -- 5 sits well above ordinary
-                // motion and well below that peak, but is a starting
-                // estimate, not measured/calibrated the way TH_HIGH/TH_LOW
-                // were in Stage 4.
-                constexpr float kHighAngularVelocityDeg = 5.0f;
+                // Part 51 tested always-on (-1.0f, unconditional boost) across 4
+                // separate samples (primary hot zone 4000-4540: 120 fails vs 107
+                // baseline/102 gated; plus 3 more samples all trending worse) --
+                // CONFIRMED WORSE, not better: flooding every frame with 2x
+                // features at a lower contrast threshold dilutes match quality/
+                // slows processing rather than helping. Reverted to the
+                // calibrated, velocity-gated value (0.087, true measured p90,
+                // part 47) -- this remains the best result so far (102/541 on
+                // the primary hot zone). See DEBUGGING.md part 51.
+                constexpr float kHighTranslationVelocity = 0.087f;
                 // 2x base features, half the extractor's default 0.04
                 // contrast threshold (see ORBextractor.cc's kContrastThreshold
                 // -- kept in sync manually, there's no shared constant to
                 // reference across the two files).
                 constexpr int kDensityBoostFactor = 2;
                 constexpr double kBoostedContrastThreshold = 0.02;
+                // Part 55: DIRECT measurement (raw keypoint count on identical
+                // frames) found SIFT extracts far fewer raw keypoints than ORB
+                // under matched nFeatures=5000 settings -- mean 3860.7 vs
+                // ORB's 5843.7, worst frame 2354 vs ORB's 4916. Tried lowering
+                // this BASE threshold to 0.01 to close that gap: mean DID rise
+                // (3860.7->4598.2) but MEASURED WORSE overall -- 105 fails/58
+                // resets/103.3m (14.4% of GT path) vs baseline's 67/33/320m
+                // (44.7%), and the worst-frame count actually got WORSE (1409,
+                // below even the original 2354). Letting more borderline
+                // keypoints through adds noise/dilutes match quality rather
+                // than helping -- same failure mode as part 51's always-on
+                // boost (0.02) being confirmed worse. Reverted to stock 0.04.
+                // The raw-keypoint-count gap is real and unexplained, but
+                // "just lower the contrast bar" is confirmed NOT the fix
+                // (tried at two different thresholds, both worse). See
+                // DEBUGGING.md part 55.
                 constexpr double kBaseContrastThreshold = 0.04;
 
-                const float angleDeg = mVelocity.so3().log().norm() * 180.0f / static_cast<float>(M_PI);
-                const bool bHighAngularVelocity = angleDeg >= kHighAngularVelocityDeg;
+                const float velNorm = mVelocity.translation().norm();
+                const bool bHighTranslationVelocity = velNorm >= kHighTranslationVelocity;
 
-                if(bHighAngularVelocity && !mbHighAngularVelocityMode)
+                if(bHighTranslationVelocity && !mbHighAngularVelocityMode)
                 {
                     mpORBextractorLeft->SetDynamicDensity(kDensityBoostFactor * mnBaseNFeatures, kBoostedContrastThreshold);
                     mbHighAngularVelocityMode = true;
                 }
-                else if(!bHighAngularVelocity && mbHighAngularVelocityMode)
+                else if(!bHighTranslationVelocity && mbHighAngularVelocityMode)
                 {
                     mpORBextractorLeft->SetDynamicDensity(mnBaseNFeatures, kBaseContrastThreshold);
                     mbHighAngularVelocityMode = false;
@@ -2339,9 +2448,23 @@ void Tracking::Track()
         }
 
         // Reset if the camera get lost soon after initialization
+        //
+        // Part 35: found this SECOND, separate KeyFramesInMap threshold check
+        // (functionally the same destroy-vs-preserve decision as the one in
+        // the LOST-state handler above, ~line 2113, edited in part 34) --
+        // this one was still at the old <=10 value, unchanged by that edit.
+        // Likely explains part 34's inconsistent measured effect (1455.3m /
+        // 1143.4m across two identical repeat runs): only part of the
+        // destroy/preserve decision space was actually being addressed.
+        // Lowered to <5 to match, so both checks are now consistent (part 35).
+        // Raised to <9 (part 48) alongside the other check -- see its comment
+        // above (~line 2098) for why: part 34's coverage gain from 5 was never
+        // confirmed against repeat-trial noise, while the fragment-accumulation
+        // cost (slower merge-candidate checking as Atlas fragments pile up) was
+        // real and severe. See DEBUGGING.md part 48.
         if(mState==LOST)
         {
-            if(pCurrentMap->KeyFramesInMap()<=10)
+            if(pCurrentMap->KeyFramesInMap()<9)
             {
                 mpSystem->ResetActiveMap();
                 return;
@@ -3149,18 +3272,50 @@ bool Tracking::TrackLocalMap()
     // Decide if the tracking was succesful
     // More restrictive if there was a relocalization recently
     mpLocalMapper->mnMatchesInliers=mnMatchesInliers;
-    if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && mnMatchesInliers<50)
+
+    // Check the RECENTLY_LOST recovery bypass BEFORE the stricter post-reloc
+    // gate below -- see DEBUGGING.md part 18. Quantified in Session 15 as
+    // 23% of this fork's tracking failures: a Relocalization() success sets
+    // mnLastRelocFrameId to the current frame, so the very next
+    // TrackLocalMap() call (the one confirming the just-recovered pose) falls
+    // inside the mMaxFrames post-reloc window and was being killed by the
+    // >=50 bar below even when it had >10 inliers -- exactly the case this
+    // bypass exists to accept. The stock (unmodified, byte-identical to
+    // third_party/ORB_SLAM3) ordering never surfaces this conflict because
+    // that codebase relocalizes rarely; this fork's higher relocalization
+    // frequency (SIFT/VLAD vs. ORB/DBoW2) makes the two gates collide
+    // constantly, so reordering (not loosening either bar's own value) is
+    // the fix.
+    if((mnMatchesInliers>10)&&(mState==RECENTLY_LOST))
+        return true;
+
+    // Pulled 50->35 (part 26), then tried 30 (part 27) -- reverted back to
+    // 35 after measuring 30 on a full checkpoint: coverage (total scored
+    // path) went 543.6m(gate50 baseline)->478.7m(gate35)->314.4m(gate30),
+    // monotonically WORSE despite mechanically rescuing more near-miss
+    // frames each step. Not yet root-caused (possibly a "survivorship
+    // paradox" -- keeping a barely-alive map going a few more frames on a
+    // weaker pose may walk it into a harder failure shortly after, instead
+    // of resetting promptly and getting a fresh, possibly easier, restart
+    // -- or possibly just run-to-run RANSAC/threading nondeterminism, see
+    // the vendoring memory). 35 was the best measured result of the three;
+    // do NOT push this specific gate below 35 again without first
+    // confirming the 30-result with repeat trials (single-run comparisons
+    // have already flipped conclusions once this session). See DEBUGGING.md
+    // part 27/28. Part 55 re-tested reverting to stock's 50 on the frames
+    // 1-1000 segment (isolated) -- MEASURED WORSE there too (85 fails/36
+    // resets/290.1m vs 35's 67/33/320m), confirming 35 remains the right
+    // value at this segment length too, not just full-sequence. Reverted
+    // back to 35. See DEBUGGING.md part 55.
+    if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && mnMatchesInliers<35)
     {
         // [track-local-map-gate] TEMPORARY diagnostic, see DEBUGGING.md
         // part 10 -- confirms/refutes whether the stricter post-relocalization
-        // >=50 bar (not the normal monocular >=30) is what's killing young maps.
+        // bar (not the normal monocular >=30) is what's killing young maps.
         fprintf(stderr, "[track-local-map-gate] id=%lu mnLastRelocFrameId=%u mMaxFrames=%d mnMatchesInliers=%d -- FAIL (post-reloc strict gate)\n",
                 mCurrentFrame.mnId, mnLastRelocFrameId, mMaxFrames, mnMatchesInliers);
         return false;
     }
-
-    if((mnMatchesInliers>10)&&(mState==RECENTLY_LOST))
-        return true;
 
 
     if (mSensor == System::IMU_MONOCULAR)
@@ -3186,9 +3341,34 @@ bool Tracking::TrackLocalMap()
         // [track-local-map] TEMPORARY diagnostic, see DEBUGGING.md part 9 --
         // pinpointing why maps fail to track almost immediately after
         // CreateInitialMapMonocular().
-        fprintf(stderr, "[track-local-map] id=%lu mnMatchesInliers=%d (need>=30) mapKFs=%d\n",
+        //
+        // Pulled 30->15 (part 29). Part 55 tested raising back to 30 in
+        // isolation on frames 1-1000: modest real improvement (340.1m vs
+        // 320m, 6 fragments both times) but not the dominant lever -- kept
+        // at 15 here (reverted) so the NEXT isolated test (post-reloc gate
+        // 35->50 below-ish) can be measured cleanly on its own, per the
+        // strict one-variable-at-a-time methodology. See DEBUGGING.md part 55.
+        // TESTED part 56 (see DEBUGGING.md): tried dropping this gate from
+        // 15 to 3 (near-"no constraint") on the theory that the constraint
+        // itself doesn't create new real matches, only decides whether to
+        // trust what SearchLocalPoints already found -- so maybe it was
+        // needlessly discarding usable-if-weak tracking. Result on frames
+        // 1-1000: fails/resets/outlier-rate all improved slightly (53->47,
+        // 29->27, 6.6%->5.6%) and -- importantly -- NO fragment's RMSE blew
+        // past the 20m budget (max seen 1.546m, well within it), so the
+        // theoretical accuracy risk did not materialize. But coverage was
+        // essentially flat-to-slightly-worse (53.1%->50.6%, within this
+        // session's established noise band for this segment length) -- no
+        // clear benefit to justify keeping the looser gate. Reverted to 15.
+        // TESTING part 56 continued: user asked to push even further
+        // ("giảm xuống 0.1" -- mnMatchesInliers is an integer count, so
+        // interpreted as the most extreme possible relaxation: accept ANY
+        // nonzero inlier count as good enough). Kept at need>=1 per user's
+        // explicit request to test contrastThreshold=0.005 combined with
+        // need>=1, not need>=15.
+        fprintf(stderr, "[track-local-map] id=%lu mnMatchesInliers=%d (need>=1) mapKFs=%d\n",
                 mCurrentFrame.mnId, mnMatchesInliers, mpAtlas->GetCurrentMap()->KeyFramesInMap());
-        if(mnMatchesInliers<30)
+        if(mnMatchesInliers<1)
             return false;
         else
             return true;
@@ -3287,7 +3467,25 @@ bool Tracking::NeedNewKeyFrame()
     }
 
     // Condition 1a: More than "MaxFrames" have passed from last keyframe insertion
-    const bool c1a = mCurrentFrame.mnId>=mnLastKeyFrameId+mMaxFrames;
+    //
+    // Part 49: decoupled this hard ceiling from mMaxFrames (fps, ~10 -- 1s) to a
+    // tighter, purpose-specific constant. Rationale: mMaxFrames is shared with
+    // unrelated logic (the post-relocalization strict gate window, IMU reset
+    // timing) so changing it directly would have wide side effects; this
+    // condition specifically bounds how stale the reference keyframe is allowed
+    // to get during otherwise-stable tracking (c1b/c2 already react quickly to
+    // actual match-quality degradation, but only this hard ceiling forces a KF
+    // during a stretch where matching STAYS nominally fine the whole second).
+    // At highway speed this fork covers noticeably more distance per second
+    // than at rest, so a fixed 1s/10-frame ceiling means a much larger spatial
+    // (not just temporal) gap between keyframes during exactly the fast-motion
+    // stretches already identified (part 45) as failure-prone. Halving it to
+    // ~0.5s keeps the reference keyframe spatially fresher specifically when
+    // speed is high, complementing (not replacing) the velocity-adaptive
+    // search radius fix from part 46/47. NOT yet measured, see DEBUGGING.md
+    // part 49.
+    const int kKeyFrameMaxFrames = std::max(1, mMaxFrames / 2);
+    const bool c1a = mCurrentFrame.mnId>=mnLastKeyFrameId+kKeyFrameMaxFrames;
     // Condition 1b: More than "MinFrames" have passed and Local Mapping is idle
     const bool c1b = ((mCurrentFrame.mnId>=mnLastKeyFrameId+mMinFrames) && bLocalMappingIdle); //mpLocalMapper->KeyframesInQueue() < 2);
     //Condition 1c: tracking is weak
@@ -3549,6 +3747,51 @@ void Tracking::SearchLocalPoints()
         if(mState==LOST || mState==RECENTLY_LOST) // Lost for less than 1 second
             th=15; // 15
 
+        // Part 46 fix: widen the search radius on high-speed frames. Measured
+        // (part 45): tracking failures correlate strongly with vehicle speed --
+        // via GT poses, 18.1% of failures were in the top-10%-speed bucket
+        // (vs 10% baseline). Every OTHER case in this function already widens
+        // th for a harder-matching situation (RGBD, IMU, post-reloc, lost) --
+        // only the default monocular OK-state case never did.
+        //
+        // Threshold recalibrated (part 47): the original 0.05f was picked
+        // from an early 550-sample checkpoint (p90=0.0538) that turned out to
+        // be unrepresentative -- the FULL 3486-sample part41_run2 checkpoint
+        // showed p50=0.0547 (i.e. 0.05 was sitting at the MEDIAN, not p90) and
+        // true p90=0.0867. Confirmed by symptom: that run had 58.1% of frames
+        // triggering the widen (2026/3486), not the intended ~10%, making this
+        // "almost always widen" rather than a targeted fast-motion case, and
+        // reset count (221) showed no clear improvement over the ~150-260
+        // baseline -- consistent with the threshold being miscalibrated rather
+        // than the underlying speed-correlation hypothesis being wrong.
+        // Re-measure with the corrected threshold before drawing a conclusion
+        // either way. See DEBUGGING.md part 47.
+        constexpr float kHighVelThreshold = 0.087f;
+        if(mbVelocity && mVelocity.translation().norm() > kHighVelThreshold)
+            th = std::max(th, 5);
+
+        // [sim3-investigate]-style diagnostic, part 45 -- see DEBUGGING.md.
+        // Root-caused via GT-pose correlation (analyze_death_pattern.py) that
+        // tracking failures correlate strongly with vehicle SPEED (18.1% of
+        // failures fell in the top-10%-speed bucket vs 10% baseline), NOT
+        // rotation (7.7%, actually below baseline -- refutes the earlier
+        // "hard turns" hypothesis from way back in this project). Mechanism:
+        // faster motion -> larger inter-frame baseline -> features shift
+        // further in image space -> harder to match within the fixed th=1
+        // search radius used here for ordinary monocular OK-state tracking
+        // (every other case in this function already widens th: RGBD,
+        // IMU-initialized, post-reloc, lost -- only the default monocular
+        // case never does). mVelocity (constant-velocity motion model,
+        // already computed elsewhere) is a proxy for per-frame motion
+        // magnitude in this SLAM's own internal (not-necessarily-metric)
+        // scale. Logging its translation norm here, correlated against
+        // th=1-vs-matched-count and against actual failures, to pick a real
+        // threshold before writing an adaptive-th fix -- do not guess a
+        // magic number blind.
+        float velNorm = mbVelocity ? mVelocity.translation().norm() : -1.0f;
+        fprintf(stderr, "[velocity-investigate] id=%lu velNorm=%.4f th=%d\n",
+                mCurrentFrame.mnId, velNorm, th);
+
         int matches = matcher.SearchByProjection(mCurrentFrame, mvpLocalMapPoints, th, mpLocalMapper->mbFarPoints, mpLocalMapper->mThFarPoints);
 
         // [search-local-points] TEMPORARY diagnostic, see DEBUGGING.md --
@@ -3769,6 +4012,10 @@ bool Tracking::Relocalization()
     // Track Lost: Query KeyFrame Database for keyframe candidates for relocalisation
     vector<KeyFrame*> vpCandidateKFs = mpKeyFrameDB->DetectRelocalizationCandidates(&mCurrentFrame, mpAtlas->GetCurrentMap());
 
+    // [reloc-investigate] TEMPORARY diagnostic, see DEBUGGING.md part 18.
+    fprintf(stderr, "[reloc-investigate] id=%lu mapKFs=%d dbCandidates=%zu\n",
+            mCurrentFrame.mnId, mpAtlas->GetCurrentMap()->KeyFramesInMap(), vpCandidateKFs.size());
+
     if(vpCandidateKFs.empty()) {
         Verbose::PrintMess("There are not candidates", Verbose::VERBOSITY_NORMAL);
         return false;
@@ -3814,10 +4061,19 @@ bool Tracking::Relocalization()
         }
     }
 
+    // [reloc-investigate] captured before the RANSAC loop below decrements
+    // nCandidates as candidates get discarded -- see DEBUGGING.md part 18.
+    const int nCandidatesAfterBoW = nCandidates;
+
     // Alternatively perform some iterations of P4P RANSAC
     // Until we found a camera pose supported by enough inliers
     bool bMatch = false;
     ORBmatcher matcher2(0.9,true);
+    // Part 33: track which candidate KF actually won, so the cross-map
+    // ChangeMap() check below (after this loop) knows which map to switch
+    // to -- see the matching KeyFrameDatabase.cc change for why cross-map
+    // candidates can now appear here at all.
+    KeyFrame* pRelocWinnerKF = nullptr;
 
     while(nCandidates>0 && !bMatch)
     {
@@ -3910,11 +4166,16 @@ bool Tracking::Relocalization()
                 if(nGood>=50)
                 {
                     bMatch = true;
+                    pRelocWinnerKF = vpCandidateKFs[i];
                     break;
                 }
             }
         }
     }
+
+    // [reloc-investigate] TEMPORARY diagnostic, see DEBUGGING.md part 18.
+    fprintf(stderr, "[reloc-investigate] id=%lu passedBoWFilter=%d finalMatch=%d\n",
+            mCurrentFrame.mnId, nCandidatesAfterBoW, (int)bMatch);
 
     if(!bMatch)
     {
@@ -3922,6 +4183,31 @@ bool Tracking::Relocalization()
     }
     else
     {
+        // Part 33: pRelocWinnerKF may now belong to a DIFFERENT map than
+        // mpAtlas->GetCurrentMap(), since KeyFrameDatabase::
+        // DetectRelocalizationCandidates no longer filters to the current
+        // map only (see that file's comment for why). If so, switch the
+        // Atlas's active map to the winner's map via the existing
+        // ChangeMap() mechanism (same one LoopClosing uses after a
+        // successful map merge) BEFORE returning, so tracking continues in
+        // a map that's actually consistent with mCurrentFrame's newly-set
+        // pose and mvpMapPoints (both already reference the winner's map's
+        // KeyFrame/MapPoint objects from the PnP above). mpLastKeyFrame is
+        // cleared for the same reason CreateMapInAtlas()/Reset() clear it
+        // elsewhere in this file: it still points at a KeyFrame in the map
+        // being abandoned, which the fresh map's KF chain has never seen.
+        // NOT yet measured against a real run for correctness -- if this
+        // crashes or produces obviously-corrupt trajectories, revert this
+        // change first (see DEBUGGING.md part 33) before trusting any
+        // coverage number that used it.
+        if(pRelocWinnerKF && pRelocWinnerKF->GetMap() != mpAtlas->GetCurrentMap())
+        {
+            fprintf(stderr, "[reloc-crossmap] id=%lu switching active map to winner KF's map (id=%d)\n",
+                    mCurrentFrame.mnId, pRelocWinnerKF->GetMap()->GetId());
+            mpAtlas->ChangeMap(pRelocWinnerKF->GetMap());
+            if(mpLastKeyFrame)
+                mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
+        }
         mnLastRelocFrameId = mCurrentFrame.mnId;
         cout << "Relocalized!!" << endl;
         return true;

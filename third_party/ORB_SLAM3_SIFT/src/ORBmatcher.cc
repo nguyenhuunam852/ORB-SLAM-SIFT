@@ -21,6 +21,8 @@
 
 #include<limits.h>
 #include<limits>
+#include<atomic>
+#include<cstdio>
 
 #include<opencv2/core/core.hpp>
 
@@ -29,6 +31,28 @@
 #include<stdint-gcc.h>
 
 using namespace std;
+
+namespace {
+    // [sbp-diag] TEMPORARY diagnostic, part 56 -- categorize exactly why
+    // in-frustum map points fail to match in SearchByProjection(Frame&,
+    // vector<MapPoint*>&,...), the function backing SearchLocalPoints().
+    // See DEBUGGING.md: SIFT's match rate here measured at only 10.0% vs
+    // ORB's 40.3% on identical frames, and the historical flat-level-window
+    // bug (already fixed at every monocular call site) does not explain it.
+    std::atomic<long> g_sbpDiagTotal{0};
+    std::atomic<long> g_sbpDiagEmptyWindow{0};
+    std::atomic<long> g_sbpDiagDistReject{0};
+    std::atomic<long> g_sbpDiagRatioReject{0};
+    std::atomic<long> g_sbpDiagAccepted{0};
+    struct SbpDiagPrinter {
+        ~SbpDiagPrinter() {
+            fprintf(stderr, "[sbp-diag] total=%ld empty_window=%ld dist_reject=%ld ratio_reject=%ld accepted=%ld\n",
+                    g_sbpDiagTotal.load(), g_sbpDiagEmptyWindow.load(),
+                    g_sbpDiagDistReject.load(), g_sbpDiagRatioReject.load(),
+                    g_sbpDiagAccepted.load());
+        }
+    } g_sbpDiagPrinter;
+}
 
 namespace ORB_SLAM3
 {
@@ -96,11 +120,30 @@ namespace ORB_SLAM3
                 // points already confirmed in-frustum. Safe now that
                 // ORBextractor.cc's scale/sigma arrays are per-octave (not
                 // per-flat-level, see the SearchForInitialization fix).
+                //
+                // TESTED part 56 (see DEBUGGING.md): after fixing
+                // GetScaleFactor()'s unit-mismatch bug (which was the real
+                // cause of nPredictedLevel being mis-centered, not just this
+                // window being under-sized), tried narrowing this back down
+                // to +-2 flat levels on the theory that correct centering
+                // would make a tight window sufficient. Measured WORSE on
+                // frames 1-1000: fails 53->66, empty_window 45.7%->59.4%
+                // (worse than even the PRE-scale-fix 58.3%), accepted-rate
+                // 16.7%->11.6%. Reverted. The full-octave width is doing
+                // real work independent of centering -- almost certainly
+                // compensating for SIFT's own lower raw keypoint yield
+                // (~66% of ORB's, part 55) and genuine prediction noise
+                // (depth/viewpoint estimation error), not just the old
+                // centering bug. Kept at full-octave width.
                 const int nOctaveLayers = F.mpORBextractorLeft->GetOctaveLayers();
                 const int octaveBase = (nPredictedLevel/nOctaveLayers)*nOctaveLayers;
 
                 const vector<size_t> vIndices =
                         F.GetFeaturesInArea(pMP->mTrackProjX,pMP->mTrackProjY,r*F.mvScaleFactors[nPredictedLevel],octaveBase,octaveBase+nOctaveLayers-1);
+
+                g_sbpDiagTotal++;
+                if(vIndices.empty())
+                    g_sbpDiagEmptyWindow++;
 
                 if(!vIndices.empty()){
                     const cv::Mat MPdescriptor = pMP->GetDescriptor();
@@ -151,12 +194,29 @@ namespace ORB_SLAM3
                     }
 
                     // Apply ratio to second match (only if best and second are in the same scale level)
+                    //
+                    // TESTED part 56 (see DEBUGGING.md): tried gating this on same-OCTAVE instead
+                    // of same-flat-level (reasoning: part 12's window widening means bestLevel/
+                    // bestLevel2 rarely match exactly for SIFT anymore, so the ratio test almost
+                    // never fires -- 0.1% vs ORB's 5.4% -- leaving TH_HIGH, which barely
+                    // discriminates true/false matches above ~60000 squared-L2 per the calibration
+                    // rerun, as the only real filter). Mechanically the fix worked as diagnosed
+                    // (ratio_reject rose 437->1845, ~4x), but net coverage on frames 1-1000 got
+                    // WORSE (320m/44.7% -> 269.7m/37.7%; accepted-rate 9.9%->9.25%) even though the
+                    // post-hoc outlier rate improved slightly (7.9%->6.8%). Reverted: applying
+                    // Lowe's ratio test across an octave-wide candidate pool rejects more true
+                    // positives than false ones for this dataset/descriptor combo, net negative for
+                    // the coverage-first goal. Root-cause diagnosis (ratio test effectively disabled)
+                    // stands and is confirmed correct; this particular fix for it does not.
                     if(bestDist<=TH_HIGH)
                     {
-                        if(bestLevel==bestLevel2 && bestDist>mfNNratio*bestDist2)
+                        if(bestLevel==bestLevel2 && bestDist>mfNNratio*bestDist2){
+                            g_sbpDiagRatioReject++;
                             continue;
+                        }
 
                         if(bestLevel!=bestLevel2 || bestDist<=mfNNratio*bestDist2){
+                            g_sbpDiagAccepted++;
                             F.mvpMapPoints[bestIdx]=pMP;
 
                             if(F.Nleft != -1 && F.mvLeftToRightMatch[bestIdx] != -1){ //Also match with the stereo observation at right camera
@@ -168,6 +228,10 @@ namespace ORB_SLAM3
                             nmatches++;
                             left++;
                         }
+                    }
+                    else
+                    {
+                        g_sbpDiagDistReject++;
                     }
                 }
             }
@@ -1967,7 +2031,16 @@ namespace ORB_SLAM3
                     // Search in a window
                     const float radius = th*CurrentFrame.mvScaleFactors[nPredictedLevel];
 
-                    const vector<size_t> vIndices2 = CurrentFrame.GetFeaturesInArea(uv(0), uv(1), radius, nPredictedLevel-1, nPredictedLevel+1);
+                    // Widened from [nPredictedLevel-1, nPredictedLevel+1] to
+                    // the whole octave nPredictedLevel falls in -- same
+                    // flat-level-packing fix as the other SearchByProjection
+                    // overloads (see DEBUGGING.md). This overload backs
+                    // Relocalization(), one of the top suspects flagged for
+                    // this exact bug pattern.
+                    const int nOctaveLayers = CurrentFrame.mpORBextractorLeft->GetOctaveLayers();
+                    const int octaveBase = (nPredictedLevel/nOctaveLayers)*nOctaveLayers;
+
+                    const vector<size_t> vIndices2 = CurrentFrame.GetFeaturesInArea(uv(0), uv(1), radius, octaveBase, octaveBase+nOctaveLayers-1);
 
                     if(vIndices2.empty())
                         continue;

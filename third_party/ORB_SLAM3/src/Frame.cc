@@ -130,6 +130,10 @@ Frame::Frame(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timeSt
 #endif
 
     N = mvKeys.size();
+    // [raw-keypoints] TEMPORARY diagnostic, matching the SIFT fork's own
+    // (part 55, see Project/DEBUGGING.md) -- direct ORB-vs-SIFT raw
+    // keypoint count comparison on matched frames.
+    fprintf(stderr, "[raw-keypoints] id=%lu N=%d\n", mnId, N);
     if(mvKeys.empty())
         return;
 
@@ -317,6 +321,10 @@ Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor* extra
 
 
     N = mvKeys.size();
+    // [raw-keypoints] TEMPORARY diagnostic, matching the SIFT fork's own
+    // (part 55, see Project/DEBUGGING.md) -- direct ORB-vs-SIFT raw
+    // keypoint count comparison on matched frames.
+    fprintf(stderr, "[raw-keypoints] id=%lu N=%d\n", mnId, N);
     if(mvKeys.empty())
         return;
 
