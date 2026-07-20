@@ -58,10 +58,14 @@ add_library(orbslam3_sift_ext STATIC
     ${DBOW2_DIR}/DUtils/Random.cpp
     ${DBOW2_DIR}/DUtils/Timestamp.cpp
 )
-# Matches the vendored ORB-SLAM3 source's own original target (LoopClosing.h's
-# mnFullBAIdx++ on a bool member is legal pre-C++17, removed in C++17) -- see
-# the root CMakeLists.txt's identical override for the full explanation.
-set_target_properties(orbslam3_sift_ext PROPERTIES CXX_STANDARD 14 CXX_STANDARD_REQUIRED ON)
+# Deliberately built at the project default C++17 (NOT the C++14 override
+# the untouched original ORB-SLAM3 vendored copy needs) -- LoopClosing.cc's
+# mnFullBAIdx++ on a bool member was changed to mnFullBAIdx = true (identical
+# semantics under the old pre-C++17 bool-increment rule) specifically so this
+# target can build under C++17, which LightGlueMatcher.cc's
+# onnxruntime_cxx_api.h headers require (newer onnxruntime releases use
+# structured bindings internally -- C++14 fails outright, not just a
+# deprecation warning).
 target_include_directories(orbslam3_sift_ext PUBLIC
     ${OpenCV_INCLUDE_DIRS}
     ${SIFT_FORK_DIR}

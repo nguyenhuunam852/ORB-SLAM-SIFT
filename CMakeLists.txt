@@ -248,7 +248,14 @@ add_library(orbslam3_sift_ext STATIC
     third_party/DBoW2/DUtils/Random.cpp
     third_party/DBoW2/DUtils/Timestamp.cpp
 )
-set_target_properties(orbslam3_sift_ext PROPERTIES CXX_STANDARD 14 CXX_STANDARD_REQUIRED ON)
+# Unlike orbslam3_ext above, this fork does NOT need the CXX_STANDARD 14
+# override -- LoopClosing.cc's mnFullBAIdx++ (the only reason for it, see
+# orbslam3_ext's own comment) was changed to mnFullBAIdx = true (identical
+# semantics under the old pre-C++17 bool-increment rule) specifically so
+# this target can build under the project's default C++17, which
+# LightGlueMatcher.cc's onnxruntime_cxx_api.h headers require (newer
+# onnxruntime releases use structured bindings internally -- C++14 fails
+# to compile them at all, not just a style/deprecation warning).
 target_include_directories(orbslam3_sift_ext PUBLIC
     ${OpenCV_INCLUDE_DIRS}
     third_party/ORB_SLAM3_SIFT
