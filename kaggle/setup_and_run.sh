@@ -130,9 +130,22 @@ echo "=== [5/6] Configure + build orbslam3_sift_kitti_ate ==="
 BUILD_DIR="${WORK_DIR}/build"
 cmake -S "${WORK_DIR}" -B "${BUILD_DIR}" \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CXX_FLAGS="-w" \
     -DG2O_ROOT="${G2O_BUILD_ROOT}" \
-    -DONNXRUNTIME_ROOT="${ORT_ROOT}"
-cmake --build "${BUILD_DIR}" --target orbslam3_sift_kitti_ate -j"$(nproc)"
+    -DONNXRUNTIME_ROOT="${ORT_ROOT}" \
+    > /tmp/cmake-configure.log 2>&1 \
+    || { echo "cmake configure failed, see /tmp/cmake-configure.log"; tail -50 /tmp/cmake-configure.log; exit 1; }
+# -w (above) silences the vendored ORB-SLAM3/g2o/Eigen source's own
+# warnings (deprecated Eigen::AlignedBit, snprintf truncation, etc. --
+# none of them ours to fix); build output is also logged and only shown
+# in full on failure, so a clean build prints just this one line.
+if cmake --build "${BUILD_DIR}" --target orbslam3_sift_kitti_ate -j"$(nproc)" > /tmp/cmake-build.log 2>&1; then
+    echo "Build succeeded."
+else
+    echo "Build FAILED, showing full log:" >&2
+    cat /tmp/cmake-build.log >&2
+    exit 1
+fi
 
 else
     echo "=== [2-5/6] SKIP_BUILD=1, reusing existing build ==="
