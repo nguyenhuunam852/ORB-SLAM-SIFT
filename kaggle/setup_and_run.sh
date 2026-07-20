@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# Kaggle setup + run for the SIFT+LightGlue ORB-SLAM3 fork's headless KITTI
-# benchmark (orbslam3_sift_kitti_ate). See kaggle/CMakeLists.txt for why this
-# is a separate, minimal build (no Qt/Ceres, no dev-machine-specific paths).
+# Kaggle setup + run for the CudaSIFT+RootSIFT ORB-SLAM3 fork's headless
+# KITTI benchmark (orbslam3_sift_kitti_ate). See kaggle/CMakeLists.txt for
+# why this is a separate, minimal build (no Qt/Ceres, no dev-machine-
+# specific paths). This fork's earlier LightGlue matcher experiment was
+# reverted (negative result -- see DEBUGGING.md/git log) in favor of GPU-
+# accelerating the SIFT EXTRACTOR itself instead.
 #
 # Usage (from a Kaggle notebook cell, GPU accelerator + internet ON,
 # repo already cloned/attached so this script's own directory is
@@ -9,6 +12,8 @@
 #   !bash kaggle/setup_and_run.sh
 #
 # Env vars (all optional, override any default):
+#   USE_CUDASIFT    1 (default) to build the GPU CudaSift extractor, 0 to
+#                    build the plain CPU cv::SIFT path instead
 #   KITTI_SEQ_DIR   Directory containing image_0/*.png for the sequence
 #                    (default: auto-search common /kaggle/input layouts)
 #   KITTI_POSES     Path to poses/00.txt-style ground truth
@@ -24,19 +29,32 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 WORK_DIR="${SCRIPT_DIR}"
 
-echo "=== [1/6] GPU check ==="
+# USE_CUDASIFT=1 (default): build the GPU CudaSift extractor (see
+# ORBextractor.cc's USE_CUDASIFT-gated path) instead of CPU cv::SIFT.
+# Set to 0 to build the plain CPU path instead (e.g. for a quick sanity
+# comparison run without touching CUDA at all).
+USE_CUDASIFT="${USE_CUDASIFT:-1}"
+
+echo "=== [1/7] GPU + CUDA toolkit check ==="
 if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 else
-    echo "WARNING: nvidia-smi not found -- ONNX Runtime will fall back to CPU" \
-         "(LightGlue's attention is O(N^2) in keypoint count; CPU-only was" \
-         "measured at ~9s/pair locally and previously OOM-killed a 1000-frame" \
-         "run -- make sure the Kaggle notebook's Accelerator is set to a GPU)." >&2
+    echo "WARNING: nvidia-smi not found -- make sure the Kaggle notebook's" \
+         "Accelerator is set to a GPU." >&2
+fi
+if [ "${USE_CUDASIFT}" = "1" ]; then
+    if ! command -v nvcc >/dev/null 2>&1; then
+        echo "ERROR: USE_CUDASIFT=1 but nvcc (CUDA toolkit compiler) was not found." >&2
+        echo "Kaggle's GPU images normally ship it; if missing, set USE_CUDASIFT=0" >&2
+        echo "to build the CPU cv::SIFT path instead, or install the toolkit manually." >&2
+        exit 1
+    fi
+    nvcc --version | tail -1
 fi
 
 if [ "${SKIP_BUILD:-0}" != "1" ]; then
 
-echo "=== [2/6] apt dependencies ==="
+echo "=== [2/7] apt dependencies ==="
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq \
@@ -50,7 +68,7 @@ apt-get install -y -qq \
 OPENCV_VER=$(python3 -c "import cv2; print(cv2.__version__)" 2>/dev/null || pkg-config --modversion opencv4 2>/dev/null || echo "unknown")
 echo "OpenCV version seen by pkg-config/python: ${OPENCV_VER}"
 
-echo "=== [3/6] Build g2o (ORB-SLAM3's own Thirdparty/g2o fork) ==="
+echo "=== [3/7] Build g2o (ORB-SLAM3's own Thirdparty/g2o fork) ==="
 G2O_BUILD_ROOT="${WORK_DIR}/g2o_build"
 if [ ! -f "${G2O_BUILD_ROOT}/lib/libg2o.so" ]; then
     rm -rf /tmp/orbslam3_upstream
@@ -75,7 +93,26 @@ fi
 # the g2o we just built instead.
 ln -sfn "${G2O_BUILD_ROOT}" "${REPO_ROOT}/third_party/ORB_SLAM3_SIFT/Thirdparty/g2o"
 
-echo "=== [4/6] Download ONNX Runtime GPU ==="
+echo "=== [4/7] Clone CudaSift source ==="
+CUDASIFT_SRC_DIR="${WORK_DIR}/cudasift_src"
+if [ "${USE_CUDASIFT}" = "1" ]; then
+    if [ ! -f "${CUDASIFT_SRC_DIR}/cudaSift.h" ]; then
+        rm -rf "${CUDASIFT_SRC_DIR}"
+        git clone --depth 1 https://github.com/Celebrandil/CudaSift.git "${CUDASIFT_SRC_DIR}"
+        echo "CudaSift source cloned to ${CUDASIFT_SRC_DIR}"
+    else
+        echo "CudaSift source already present at ${CUDASIFT_SRC_DIR}, skipping"
+    fi
+    # NOTE: CudaSift's own CMakeLists.txt/build system is deliberately NOT
+    # used (hardcodes an outdated -arch=sm_20 and only builds a demo
+    # executable, no library/install rules) -- kaggle/CMakeLists.txt globs
+    # its .cu/.cpp sources directly into orbslam3_sift_ext instead, same
+    # "vendor source, build it ourselves" pattern as DBoW2/g2o above.
+else
+    echo "USE_CUDASIFT=0, skipping CudaSift clone"
+fi
+
+echo "=== [5/7] Download ONNX Runtime GPU ==="
 ORT_ROOT="${WORK_DIR}/onnxruntime"
 if [ ! -f "${ORT_ROOT}/lib/libonnxruntime.so" ]; then
     echo "Querying GitHub API for the latest onnxruntime release..."
@@ -126,33 +163,31 @@ else
     echo "ONNX Runtime already present at ${ORT_ROOT}, skipping"
 fi
 
-echo "=== [5/6] Configure + build orbslam3_sift_kitti_ate ==="
+echo "=== [6/7] Configure + build orbslam3_sift_kitti_ate ==="
 BUILD_DIR="${WORK_DIR}/build"
+CMAKE_USE_CUDASIFT="OFF"
+[ "${USE_CUDASIFT}" = "1" ] && CMAKE_USE_CUDASIFT="ON"
 cmake -S "${WORK_DIR}" -B "${BUILD_DIR}" \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CXX_FLAGS="-w" \
     -DG2O_ROOT="${G2O_BUILD_ROOT}" \
     -DONNXRUNTIME_ROOT="${ORT_ROOT}" \
-    > /tmp/cmake-configure.log 2>&1 \
-    || { echo "cmake configure failed, see /tmp/cmake-configure.log"; tail -50 /tmp/cmake-configure.log; exit 1; }
-# -w (above) silences the vendored ORB-SLAM3/g2o/Eigen source's own
-# warnings (deprecated Eigen::AlignedBit, snprintf truncation, etc. --
-# none of them ours to fix); build output is also logged and only shown
-# in full on failure, so a clean build prints just this one line.
-if cmake --build "${BUILD_DIR}" --target orbslam3_sift_kitti_ate -j"$(nproc)" > /tmp/cmake-build.log 2>&1; then
-    echo "Build succeeded."
-else
-    echo "Build FAILED, showing full log:" >&2
-    cat /tmp/cmake-build.log >&2
-    exit 1
+    -DUSE_CUDASIFT="${CMAKE_USE_CUDASIFT}" \
+    -DCUDASIFT_SRC_DIR="${CUDASIFT_SRC_DIR}"
+cmake --build "${BUILD_DIR}" --target orbslam3_sift_kitti_ate -j"$(nproc)"
+if [ "${USE_CUDASIFT}" = "1" ]; then
+    cmake --build "${BUILD_DIR}" --target cudasift_probe -j"$(nproc)"
+    echo "Built cudasift_probe -- STRONGLY recommended to run it first:"
+    echo "  \"${BUILD_DIR}/cudasift_probe\" \"\${KITTI_SEQ_DIR}\" 200"
+    echo "and confirm the printed octave/scale ranges before trusting a full benchmark run" \
+         "(ORBextractor.cc's USE_CUDASIFT path is a placeholder pending this probe's measurement)."
 fi
 
 else
-    echo "=== [2-5/6] SKIP_BUILD=1, reusing existing build ==="
+    echo "=== [2-6/7] SKIP_BUILD=1, reusing existing build ==="
     BUILD_DIR="${WORK_DIR}/build"
 fi
 
-echo "=== [6/6] Locate KITTI dataset and run ==="
+echo "=== [7/7] Locate KITTI dataset and run ==="
 if [ -z "${KITTI_SEQ_DIR:-}" ]; then
     # Common layouts for a Kaggle "KITTI odometry" dataset attachment.
     CANDIDATE=$(find /kaggle/input -maxdepth 6 -type d -iname "image_0" 2>/dev/null | head -1)
@@ -181,10 +216,38 @@ START_FRAME="${START_FRAME:-0}"
 MAX_FRAMES="${MAX_FRAMES:-1000}"
 OUT_PREFIX="${OUT_PREFIX:-/kaggle/working/lightglue_run}"
 
+# ORBextractor.cc's USE_CUDASIFT path applies RootSIFT permanently to every
+# stored descriptor (see its own doc comment) -- vocabulary_sift/
+# vlad_codebook_all.yml was trained on raw-SIFT descriptors, so it's stale
+# for a CudaSift build. Retrain via:
+#   cmake --build "${WORK_DIR}/build" --target orbslam3_vlad_train
+#   "${WORK_DIR}/build/orbslam3_vlad_train" <settings.yaml> <one-or-more-sequence-dirs...> \
+#       vocabulary_sift/vlad_codebook_all_rootsift.yml
+# (needs KITTI sequences attached, matching Session 14's original 22-
+# sequence training methodology -- see DEBUGGING.md). Not run automatically
+# here since it needs a much larger dataset attachment than a single
+# sequence and takes real wall-clock time; falls back to the raw-SIFT
+# codebook with a loud warning if the RootSIFT one doesn't exist yet --
+# tracking/ATE are unaffected (VLAD only feeds loop-closure/relocalization
+# candidate search), just with unreliable loop-closure scores until retrained.
+if [ "${USE_CUDASIFT}" = "1" ]; then
+    VLAD_CODEBOOK="${VLAD_CODEBOOK:-vocabulary_sift/vlad_codebook_all_rootsift.yml}"
+    if [ ! -f "${REPO_ROOT}/${VLAD_CODEBOOK}" ]; then
+        echo "WARNING: ${VLAD_CODEBOOK} does not exist (not yet retrained for RootSIFT)." >&2
+        echo "Falling back to vocabulary_sift/vlad_codebook_all.yml (raw-SIFT-trained --" >&2
+        echo "loop-closure/relocalization scores will be unreliable until retrained; see" >&2
+        echo "the retraining command in this script's comments just above)." >&2
+        VLAD_CODEBOOK="vocabulary_sift/vlad_codebook_all.yml"
+    fi
+else
+    VLAD_CODEBOOK="vocabulary_sift/vlad_codebook_all.yml"
+fi
+echo "VLAD_CODEBOOK=${VLAD_CODEBOOK}"
+
 cd "${REPO_ROOT}"
 LD_LIBRARY_PATH="${WORK_DIR}/onnxruntime/lib:${WORK_DIR}/g2o_build/lib:${LD_LIBRARY_PATH:-}" \
 "${WORK_DIR}/build/orbslam3_sift_kitti_ate" \
-    vocabulary_sift/vlad_codebook_all.yml \
+    "${VLAD_CODEBOOK}" \
     settings_sift/KITTI00-02-sift.yaml \
     "${KITTI_SEQ_DIR}" \
     "${KITTI_POSES}" \

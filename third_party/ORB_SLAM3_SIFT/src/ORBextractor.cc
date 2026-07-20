@@ -58,6 +58,9 @@
 #include <opencv2/imgproc/imgproc.hpp>
 #include <vector>
 #include <iostream>
+#include <algorithm>
+#include <cstring>
+#include <cmath>
 
 #include "ORBextractor.h"
 
@@ -530,7 +533,20 @@ namespace ORB_SLAM3
                                                    // GetLevels() reports and every mvScaleFactors[]
                                                    // consumer expects as the valid array length
 
+#ifdef USE_CUDASIFT
+        // One-time CUDA context init, safe to call more than once per
+        // process but only needs to happen once -- guarded so multiple
+        // ORBextractor instances (e.g. this class's own left/right stereo
+        // members, unused for this project's monocular path but still
+        // constructed) don't reinitialize the device repeatedly.
+        static bool sCudaInitDone = false;
+        if (!sCudaInitDone) {
+            InitCuda(0);
+            sCudaInitDone = true;
+        }
+#else
         mSift = cv::SIFT::create(nfeatures, nOctaveLayers, kContrastThreshold, kEdgeThreshold, kSigma);
+#endif
 
         mvScaleFactor.resize(nlevels);
         mvInvScaleFactor.resize(nlevels);
@@ -1207,6 +1223,96 @@ namespace ORB_SLAM3
         _keypoints.clear();
         Mat descriptors;
 
+#ifdef USE_CUDASIFT
+        {
+            Mat imgF;
+            image.convertTo(imgF, CV_32FC1);
+            CudaImage cimg;
+            cimg.Allocate(imgF.cols, imgF.rows, iAlignUp(imgF.cols, 128), false, nullptr, (float*)imgF.data);
+            cimg.Download();
+
+            SiftData siftData;
+            InitSiftData(siftData, 32768, true, true);
+            // initBlur/thresh: CudaSift mainSift.cpp demo defaults, NOT yet
+            // tuned against this project's kContrastThreshold/kEdgeThreshold/
+            // kSigma equivalents -- a later step once the octave/scale
+            // mapping below is confirmed correct via analyze/cudasift_probe.cpp.
+            ExtractSift(siftData, cimg, 5 /*numOctaves*/, 1.0f /*initBlur*/, 3.5f /*thresh*/, 0.0f /*lowestScale*/);
+
+            const int nRaw = siftData.numPts;
+            _keypoints.reserve(nRaw);
+            descriptors.create(nRaw, 128, CV_32F);
+            for (int p = 0; p < nRaw; ++p) {
+                const SiftPoint& sp = siftData.h_data[p];
+                KeyPoint kp;
+                kp.pt = Point2f(sp.xpos, sp.ypos);
+                kp.angle = sp.orientation; // CudaSift orientation is already in degrees, matching cv::KeyPoint's convention
+                kp.response = sp.score;
+                kp.size = sp.scale;
+                // *** PLACEHOLDER, NOT YET VALIDATED (see analyze/cudasift_probe.cpp's
+                // doc comment) *** -- CudaSift's SiftPoint has no packed
+                // octave/layer field the way cv::SIFT does; `subsampling` is
+                // its octave-downsample factor (assumed power-of-2: 1,2,4,...)
+                // and `scale` is a continuous sigma. This formula (octave =
+                // log2(subsampling), layer = position of scale within one
+                // octave-doubling on a log scale) is a best-effort guess
+                // based on CudaSift's general SIFT-pyramid design, NOT
+                // measured against real data -- run analyze/cudasift_probe.cpp
+                // on real KITTI frames FIRST and correct this before trusting
+                // any live tracking result (this project's own repeated
+                // lesson, see Session 14 Stage 0's real off-by-one catch and
+                // flatLevel()'s doc comment above the constructor).
+                const int octaveGuess = static_cast<int>(std::lround(std::log2(std::max(1.0f, sp.subsampling))));
+                const float layerFloat = static_cast<float>(nOctaveLayers) *
+                        std::log2(std::max(1e-6f, sp.scale / std::max(1e-6f, sp.subsampling)));
+                const int layerGuess = static_cast<int>(std::lround(layerFloat)) % std::max(1, nOctaveLayers) + 1;
+                kp.octave = flatLevel(octaveGuess, layerGuess, nOctaveLayers);
+                _keypoints.push_back(kp);
+                std::memcpy(descriptors.ptr<float>(p), sp.data, 128 * sizeof(float));
+            }
+            FreeSiftData(siftData);
+
+            // Cap to nfeatures by response, matching cv::SIFT's own internal
+            // top-nfeatures behavior (CudaSift's ExtractSift has no nfeatures
+            // parameter, only a raw contrast-style `thresh`).
+            if (static_cast<int>(_keypoints.size()) > nfeatures) {
+                std::vector<int> idx(_keypoints.size());
+                for (size_t i = 0; i < idx.size(); ++i) idx[i] = static_cast<int>(i);
+                std::partial_sort(idx.begin(), idx.begin() + nfeatures, idx.end(),
+                                   [&](int a, int b) { return _keypoints[a].response > _keypoints[b].response; });
+                idx.resize(nfeatures);
+                vector<KeyPoint> cappedKeypoints;
+                Mat cappedDescriptors(nfeatures, 128, CV_32F);
+                cappedKeypoints.reserve(nfeatures);
+                for (int i = 0; i < nfeatures; ++i) {
+                    cappedKeypoints.push_back(_keypoints[idx[i]]);
+                    descriptors.row(idx[i]).copyTo(cappedDescriptors.row(i));
+                }
+                _keypoints = std::move(cappedKeypoints);
+                descriptors = cappedDescriptors;
+            }
+
+            // RootSIFT (L1-normalize, sqrt, L2-normalize) -- same transform
+            // LightGlueMatcher.cc's toRootSift() applies on-the-fly for its
+            // own narrower call site; here it's applied once and stored
+            // permanently, so every consumer (matching, VLAD) benefits, not
+            // just one matcher. NOTE: this makes the stored descriptor format
+            // incompatible with any codebook/vocabulary trained on raw SIFT
+            // (e.g. the existing vocabulary_sift/vlad_codebook_all.yml) --
+            // retrain against a RootSIFT-enabled build before trusting VLAD
+            // loop-closure/relocalization scores.
+            const float eps = 1e-6f;
+            for (int r = 0; r < descriptors.rows; ++r) {
+                Mat row = descriptors.row(r);
+                double l1 = cv::norm(row, cv::NORM_L1) + eps;
+                row /= l1;
+                for (int c = 0; c < row.cols; ++c)
+                    row.at<float>(0, c) = std::sqrt(std::max(row.at<float>(0, c), eps));
+                double l2 = cv::norm(row, cv::NORM_L2) + eps;
+                row /= l2;
+            }
+        }
+#else
         mSift->detectAndCompute(image, cv::noArray(), _keypoints, descriptors);
 
         // Remap every keypoint's packed SIFT octave/layer into the flat
@@ -1220,6 +1326,7 @@ namespace ORB_SLAM3
             const int layer = (kp.octave >> 8) & 255;
             kp.octave = flatLevel(octave, layer, nOctaveLayers);
         }
+#endif
 
         if (_keypoints.empty())
             _descriptors.release();

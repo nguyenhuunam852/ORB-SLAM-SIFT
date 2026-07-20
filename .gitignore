@@ -18,3 +18,14 @@ vocabulary/ORBvoc.txt
 # copies) -- large, disposable, not project source. Already-tracked files
 # under scratchpad/ from earlier commits are unaffected by this entry.
 scratchpad/
+
+# Python bytecode cache from analyze/ scripts (verify_lightglue_onnx.py etc).
+__pycache__/
+
+# Kaggle-session-local build/download dirs (g2o, CudaSift, ONNX Runtime GPU,
+# the kaggle/ CMake build tree itself) -- all fetched/built fresh by
+# kaggle/setup_and_run.sh, never meant to be committed.
+kaggle/build/
+kaggle/g2o_build/
+kaggle/cudasift_src/
+kaggle/onnxruntime/

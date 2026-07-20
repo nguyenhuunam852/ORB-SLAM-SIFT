@@ -1,11 +1,43 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.18)
 project(orbslam3_sift_kaggle LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Minimal, Kaggle-clean build of just the SIFT+LightGlue ORB-SLAM3 fork's
-# headless KITTI benchmark (orbslam3_sift_kitti_ate) -- deliberately NOT the
+# GPU SIFT extraction via Celebrandil/CudaSift, replacing this session's
+# earlier (now-reverted, see Tracking.cc/DEBUGGING.md) LightGlue matcher
+# attempt -- that was a matcher-accuracy problem, not an extraction-speed
+# one, so this targets the extractor instead. Off by default so the plain
+# CPU cv::SIFT path (kaggle_build's original, still the default) is
+# untouched; setup_and_run.sh passes -DUSE_CUDASIFT=ON explicitly.
+option(USE_CUDASIFT "Build orbslam3_sift_ext with the GPU CudaSift extractor instead of CPU cv::SIFT" OFF)
+if(USE_CUDASIFT)
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        # Broad coverage for Kaggle's two GPU offerings (P100=sm_60, T4=sm_75)
+        # plus a few newer archs in case the notebook lands on something else.
+        set(CMAKE_CUDA_ARCHITECTURES 60 70 75 80 86)
+    endif()
+
+    # CudaSift's own CMakeLists.txt hardcodes an outdated -arch=sm_20 (pre-
+    # Kepler, unsupported by modern CUDA toolkits) and only builds a demo
+    # executable from mainSift.cpp -- no library or install rules at all.
+    # Rather than fight its build system, compile its .cu/.cpp sources
+    # directly into orbslam3_sift_ext below (same "vendor source, build it
+    # ourselves" pattern already used for DBoW2 in this same file), cloned
+    # fresh into CUDASIFT_SRC_DIR by setup_and_run.sh.
+    set(CUDASIFT_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cudasift_src" CACHE PATH
+        "Root of a fresh git clone of Celebrandil/CudaSift (cloned by setup_and_run.sh)")
+    file(GLOB CUDASIFT_SOURCES
+        "${CUDASIFT_SRC_DIR}/*.cu"
+        "${CUDASIFT_SRC_DIR}/*.cpp"
+    )
+    list(FILTER CUDASIFT_SOURCES EXCLUDE REGEX ".*mainSift\\.cpp$")
+endif()
+
+# Minimal, Kaggle-clean build of just the SIFT ORB-SLAM3 fork's headless
+# KITTI benchmark (orbslam3_sift_kitti_ate) -- deliberately NOT the
 # root CMakeLists.txt at the repo root, which unconditionally requires Qt6/
 # Qt5 (find_package(... REQUIRED ...)) and Ceres for the GUI/custom-pipeline
 # targets neither this binary nor a Kaggle container needs, and which
@@ -57,6 +89,7 @@ add_library(orbslam3_sift_ext STATIC
     ${DBOW2_DIR}/DBoW2/ScoringObject.cpp
     ${DBOW2_DIR}/DUtils/Random.cpp
     ${DBOW2_DIR}/DUtils/Timestamp.cpp
+    ${CUDASIFT_SOURCES}
 )
 # Deliberately built at the project default C++17 (NOT the C++14 override
 # the untouched original ORB-SLAM3 vendored copy needs) -- LoopClosing.cc's
@@ -84,6 +117,12 @@ target_link_libraries(orbslam3_sift_ext PUBLIC
     xml2
     boost_serialization
 )
+if(USE_CUDASIFT)
+    target_include_directories(orbslam3_sift_ext PUBLIC ${CUDASIFT_SRC_DIR})
+    target_link_libraries(orbslam3_sift_ext PUBLIC CUDA::cudart CUDA::cufft)
+    target_compile_definitions(orbslam3_sift_ext PUBLIC USE_CUDASIFT)
+    set_target_properties(orbslam3_sift_ext PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+endif()
 
 add_executable(orbslam3_sift_kitti_ate ${CMAKE_CURRENT_SOURCE_DIR}/../analyze/orbslam3_kitti_ate.cpp)
 target_include_directories(orbslam3_sift_kitti_ate PRIVATE ${OpenCV_INCLUDE_DIRS})
@@ -94,3 +133,16 @@ target_link_libraries(orbslam3_sift_kitti_ate PRIVATE orbslam3_sift_ext)
 set_target_properties(orbslam3_sift_kitti_ate PROPERTIES
     BUILD_RPATH "${ONNXRUNTIME_ROOT}/lib;${G2O_ROOT}/lib"
 )
+
+# Stage-0 probe (see analyze/cudasift_probe.cpp) -- measures CudaSift's real
+# scale/subsampling encoding against KITTI frames. Standalone (only needs
+# CudaSift + OpenCV, no g2o/ORB_SLAM3 dependency); only buildable/meaningful
+# with USE_CUDASIFT=ON. Run this FIRST on Kaggle and confirm the printed
+# octave/scale ranges before trusting ORBextractor.cc's USE_CUDASIFT path
+# (currently a placeholder pending this probe's real measurement).
+if(USE_CUDASIFT)
+    add_executable(cudasift_probe ${CMAKE_CURRENT_SOURCE_DIR}/../analyze/cudasift_probe.cpp ${CUDASIFT_SOURCES})
+    target_include_directories(cudasift_probe PRIVATE ${OpenCV_INCLUDE_DIRS} ${CUDASIFT_SRC_DIR})
+    target_link_libraries(cudasift_probe PRIVATE ${OpenCV_LIBS} CUDA::cudart CUDA::cufft)
+    set_target_properties(cudasift_probe PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+endif()

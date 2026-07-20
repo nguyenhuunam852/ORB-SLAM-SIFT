@@ -24,6 +24,17 @@
 #include <cmath>
 #include <opencv2/opencv.hpp>
 
+// GPU SIFT via Celebrandil/CudaSift, only compiled in for the Kaggle CUDA
+// build (see kaggle/CMakeLists.txt) -- the default/local build (this dev
+// machine has no NVIDIA GPU) stays on the cv::SIFT path below, byte-
+// identical to before. See DEBUGGING.md for why LightGlue (this fork's
+// prior GPU-acceleration attempt) was reverted: a matcher issue, not an
+// extraction-speed issue, so this targets the extractor instead.
+#ifdef USE_CUDASIFT
+#include <cudaImage.h>
+#include <cudaSift.h>
+#endif
+
 
 namespace ORB_SLAM3
 {
