@@ -3510,18 +3510,25 @@ bool Tracking::NeedNewKeyFrame()
             }
             else
             {
-                // [needkf-starved] TEMPORARY diagnostic, part 58 continued --
-                // testing the hypothesis that CudaSIFT+RootSIFT's much higher
-                // raw keypoint count (~1500-2000 vs ORB's ~1000) makes Local
-                // Mapping's per-KF work (culling/local BA/VLAD scoring) slow
-                // enough that AcceptKeyFrames() stays false through exactly
-                // the frames right after mono-init where the young 2-KF map's
-                // match count is free-falling (observed: 192->34 inliers over
-                // ~10 frames, id=2 to id=12, before the first replacement KF
-                // even lands at id=23) -- i.e. keyframe insertion is being
-                // starved by a busy Local Mapping thread, not refused by the
-                // c1/c2 insertion-need logic itself (which this log confirms
-                // was already true). See DEBUGGING.md part 58.
+                // [needkf-starved] CONFIRMED via live Kaggle full-sequence
+                // run, part 58 continued -- this branch's old unconditional
+                // "Local Mapping busy -> refuse" fired dozens of times
+                // (e.g. id=7..13 in a row, matches decaying 156->54 before
+                // Local Mapping finally freed up), and on EVERY single
+                // firing KeyframesInQueue()==0: Local Mapping was never
+                // backed up on a real queue, just slow processing the one
+                // prior KF (this fork's much higher CudaSIFT+RootSIFT
+                // keypoint density -- ~1500-2000 vs ORB's ~1000 -- makes
+                // per-KF culling/local BA/VLAD scoring slower than this
+                // gate was ever tuned against). The stereo/RGBD branch just
+                // above already tolerates a short queue (<3) instead of
+                // blocking outright; monocular had no such tolerance. Since
+                // the measured queue depth never justified the harder
+                // block, mirror the stereo/RGBD tolerance here too.
+                if(mpLocalMapper->KeyframesInQueue()<3)
+                {
+                    return true;
+                }
                 fprintf(stderr, "[needkf-starved] id=%lu wanted=true but LocalMapping busy (KFsInQueue=%d) -- c1a=%d c1b=%d c1c=%d c2=%d c3=%d c4=%d nRefMatches=%d mnMatchesInliers=%d\n",
                         mCurrentFrame.mnId, mpLocalMapper->KeyframesInQueue(),
                         c1a, c1b, c1c, c2, c3, c4, nRefMatches, mnMatchesInliers);
