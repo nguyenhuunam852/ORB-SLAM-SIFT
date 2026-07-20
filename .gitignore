@@ -5,6 +5,12 @@ build-*/
 # Raw KITTI download archives (multi-GB, not project source)
 *.zip
 
+# Pretrained DBoW2 vocabulary (139MB, exceeds GitHub's 100MB file limit) --
+# a standard downloadable ORB-SLAM3 asset, not project source. Get it from
+# the original ORB-SLAM3 repo's Vocabulary/ORBvoc.txt.tar.gz (or a local
+# copy) and place at vocabulary/ORBvoc.txt.
+vocabulary/ORBvoc.txt
+
 # Debug/analysis trajectory dumps written to the project root by ad hoc runs
 *_trajectory.txt
 
