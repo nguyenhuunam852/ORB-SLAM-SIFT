@@ -34,6 +34,15 @@ if(USE_CUDASIFT)
         "${CUDASIFT_SRC_DIR}/*.cpp"
     )
     list(FILTER CUDASIFT_SOURCES EXCLUDE REGEX ".*mainSift\\.cpp$")
+    # cudaSiftD.cu is NOT an independent translation unit -- confirmed via
+    # the upstream CMakeLists.txt's own source list, which compiles only
+    # cudaSiftH.cu (the host-side wrapper); cudaSiftD.cu (device kernels) is
+    # #included directly by cudaSiftH.cu. Compiling both as separate .cu
+    # files (as a naive glob does) produces duplicate-symbol nvlink errors
+    # for every kernel/global (LowPassBlock, FindPointsMulti,
+    # ExtractSiftDescriptors, d_MaxNumPoints, etc.) -- confirmed live on a
+    # Kaggle build attempt.
+    list(FILTER CUDASIFT_SOURCES EXCLUDE REGEX ".*cudaSiftD\\.cu$")
 endif()
 
 # Minimal, Kaggle-clean build of just the SIFT ORB-SLAM3 fork's headless
