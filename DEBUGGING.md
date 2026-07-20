@@ -1,5 +1,198 @@
 # Debugging log: homography fallback caused a permanent tracking lockup
 
+## Part 58 (2026-07-20, GPU session on Kaggle): LightGlue closed as a paper-grounded negative result, CudaSIFT+RootSIFT integrated and debugged live, final result -- best-ever per-match accepted rate (45%) but 0% scorable coverage due to a reset-timing artifact
+
+Continuation of part 57's LightGlue investigation, moved to a Kaggle T4 GPU
+session (this machine has no NVIDIA GPU, so nothing in this part was
+buildable/testable locally -- every fix here was designed from first
+principles/measurement, then verified live on Kaggle in a real
+edit-push-pull-rebuild loop).
+
+### 1. LightGlue closed as a NEGATIVE RESULT (paper-grounded, not just parameter search)
+
+`TwoViewReconstruction.cc` had no diagnostic logging at any of its
+`return false` sites -- `[mono-init] reconstruct FAILED` only said a call
+failed, not why. Added `[reconstruct-diag]` logging at every reject path in
+`Reconstruct()`/`ReconstructF()`/`ReconstructH()` (RANSAC-inlier count vs
+the required threshold, hypothesis ambiguity via `nsimilar`, parallax,
+degenerate SVD singular values). Result on a live LightGlue run: raw
+`nmatches` in the 700-1600 range collapsed to **N=20-60 RANSAC-F-consistent
+inliers (~3-5%)**, and of those, **`maxGood` (chirality-verified) was
+routinely 0** -- LightGlue's own 0.1 confidence filter passes matches that
+are ~95-97% geometrically wrong on this data, not just a few outliers.
+
+Built `analyze/verify_lightglue_onnx.py` to rule out an export bug first:
+ran the PyTorch cvg/LightGlue model and the project's exported ONNX model
+on the same real KITTI frame pair -- **2123/2123 matches identical**
+(Jaccard=1.0, max score diff 0.0002). The export is faithful; the problem
+is LightGlue itself on this data, not a translation bug.
+
+Built `analyze/lightglue_precision_gt.py` to measure precision against
+KITTI's exact ground-truth relative pose (no RANSAC estimation error) by
+symmetric epipolar distance, sweeping `filter_threshold` 0.0-0.9: precision
+stayed flat around 7-11% across the WHOLE sweep, ruling out "just raise the
+threshold" as a fix. A ratio-test control experiment on the same pair
+**also** scored only ~9% under this script's fixed-2px epipolar check
+(vs. ~82-94% established for ratio-test elsewhere in this project) --
+revealing the script's absolute numbers aren't trustworthy (likely KITTI's
+forward-motion near-degenerate epipolar geometry breaking a fixed-pixel-
+threshold check for both matchers equally), left undiagnosed per explicit
+user instruction. The threshold-sweep *shape* (flat, not improving) is
+still valid evidence; the live `[reconstruct-diag]` RANSAC finding above,
+measured directly from production code, is the trustworthy result.
+
+Fetched the actual LightGlue paper (Lindenberger et al., ICCV 2023) and
+its training/eval details: pretrained on synthetic homographies (planar
+warps, no real 3D motion parallax) then fine-tuned on **MegaDepth**
+(1M crowd-sourced tourist photos of 196 landmarks -- different
+photographers, times, angles: inherently wide-baseline by construction),
+evaluated only on HPatches/MegaDepth/Aachen Day-Night/IMC/InLoc -- **no
+benchmark anywhere resembling small-baseline consecutive video frames**.
+The paper does mention SLAM as a motivating application, but only for its
+*latency* (fast enough for real-time deployment), not as something it was
+trained or validated to be accurate on. Same shape of finding as the
+ASIFT negative result (part 57): a genuine, citable structural mismatch
+between the algorithm's design/training distribution and this project's
+actual small-baseline per-frame regime, not a tunable bug.
+
+**Reverted** LightGlue's wiring in `Tracking.cc` (`MonocularInitialization`'s
+and `TrackWithMotionModel`'s `GetLightGlueMatcher()->Match()` calls) back to
+the original `SearchForInitialization`/`SearchByProjection(Frame&,Frame&,...)`
+calls, confirmed via `git diff` against the pre-LightGlue baseline rather
+than reconstructed from memory. `LightGlueMatcher.cc`/`.h` and the ONNX
+weights stay in the tree as investigation artifacts, just unwired from the
+live path.
+
+### 2. New direction: GPU-accelerate the EXTRACTOR instead of the matcher
+
+LightGlue targeted the wrong stage -- the negative result was about match
+*quality* on small-baseline pairs, not extraction speed. Pivoted to
+**CudaSift** (Celebrandil/CudaSift, MIT-licensed GPU SIFT) + permanent
+**RootSIFT** descriptor normalization (L1-normalize/sqrt/L2-normalize,
+same transform `LightGlueMatcher.cc`'s `toRootSift()` already had, now
+applied at extraction time and stored, not just on-the-fly for one
+matcher) as the new extractor, behind a `USE_CUDASIFT` compile flag so the
+default/local (no-GPU) build stays byte-identical to before.
+
+Added `analyze/cudasift_probe.cpp`, a Stage-0 probe mirroring Session 14's
+original (which caught a real cv::SIFT layer-indexing off-by-one before it
+went live) -- CudaSift's `SiftPoint` has no packed octave/layer field the
+way `cv::SIFT` does (`subsampling`, an octave-downsample factor, and
+`scale`, a continuous sigma, instead), so the conversion into
+`flatLevel()`'s expected flat index had to be designed from scratch and
+explicitly flagged as an unvalidated placeholder pending real measurement,
+per this project's own repeatedly-learned lesson.
+
+### 3. Kaggle build: three real, live-debugged failures, none guessable in advance
+
+`kaggle/CMakeLists.txt` gained `USE_CUDASIFT`, CUDA language/toolkit
+detection, `CMAKE_CUDA_ARCHITECTURES` covering both Kaggle GPU types
+(P100=sm_60, T4=sm_75). CudaSift's own CMakeLists.txt hardcodes an outdated
+`-arch=sm_20` and only builds a demo executable (no library/install rules),
+so its sources are compiled directly into `orbslam3_sift_ext` instead of
+using its build system (same vendor-source pattern as DBoW2).
+
+- **nvlink duplicate-symbol errors**: an initial `file(GLOB *.cu)` compiled
+  both `cudaSiftH.cu` (host wrapper) and `cudaSiftD.cu` (device kernels) as
+  separate translation units -- but `cudaSiftD.cu` is `#include`d BY
+  `cudaSiftH.cu`, not independent (confirmed via CudaSift's own upstream
+  CMakeLists.txt, which only lists `cudaSiftH.cu`). Fixed by excluding it.
+- **A second nvlink error**, same class: a `match.cu` in the repo root has
+  its own `main()`, conflicting with this project's `main()` in
+  `orbslam3_kitti_ate.cpp`. The reactive "glob + exclude known-bad files"
+  approach was abandoned after this second failure in favor of an
+  **explicit allowlist**.
+- **A WebFetch-summarization trap**: the first allowlist attempt (based on
+  a WebFetch-summarized fetch of CudaSift's CMakeLists.txt) included a
+  `singular.cu` that turned out not to exist at all, and *also* missed that
+  CudaSift's own CMakeLists.txt is stale relative to the actual current
+  repo tree. Re-fetched via the GitHub API directly with `curl` (not a
+  summarized WebFetch) for ground truth. **Lesson for future sessions**:
+  WebFetch's small-model summarization can hallucinate exact filenames --
+  for anything requiring an exact file list, `curl` the GitHub API or raw
+  file content directly instead of trusting a summarized fetch. Final
+  source list: `cudaImage.cu`, `cudaSiftH.cu`, `matching.cu`, `geomFuncs.cpp`.
+
+Also added: an `nvcc` presence check (the script already checked
+`nvidia-smi` for the driver but never the toolkit/compiler), and a VLAD
+codebook auto-selection (`vlad_codebook_all_rootsift.yml` if it exists,
+else a loud warning + fallback to the raw-SIFT-trained
+`vlad_codebook_all.yml`, since RootSIFT permanently changes the stored
+descriptor format the VLAD codebook was trained against -- retraining
+deferred, not yet done, loop-closure/relocalization scores are unreliable
+until it is).
+
+### 4. A real, load-bearing bug found from a live symptom, not the probe
+
+First full Kaggle run (before running the Stage-0 probe) produced **exactly
+0 mono-init matches on literally every single attempt across all 1000
+frames** -- not fewer/lower-quality matches, zero, always. Traced
+mechanically (not guessed): `ORBmatcher::SearchForInitialization`'s
+`if(level1>=nOctaveLayers) continue` gate requires a candidate's flat
+octave/layer level to fall in `[0,nOctaveLayers)` -- i.e. exactly
+`flatLevel()`'s `kMinOctave==-1` finest octave -- to be eligible at all.
+The placeholder formula computed
+`octaveGuess = round(log2(std::max(1.0f, sp.subsampling)))`, which (a)
+floored the log argument at 1.0, making the result structurally always
+`>= 0`, never reaching the required `-1`, and (b) even without that floor,
+treated `log2(subsampling)` as an ABSOLUTE octave number in `flatLevel()`'s
+`kMinOctave`-based numbering when it's actually a RELATIVE step count from
+CudaSift's own finest octave, needing a `+ kMinOctave` shift. Every single
+keypoint was silently skipped, every frame, regardless of frame content --
+exactly matching the observed symptom. Fixed by removing the floor and
+adding the offset.
+
+**Then validated against real data** (the Stage-0 probe, finally run,
+200 KITTI frames, 320325 keypoints): `subsampling` takes exactly the
+assumed power-of-2 values `{1,2,4,8,16}` anchored at 1.0 (confirming
+CudaSift has no upsampled octave below its native resolution, unlike
+`cv::SIFT`'s `firstOctave=-1` default -- so `subsampling==1` is correctly
+the anchor for `kMinOctave==-1`), `scale` spans exactly one factor-of-2 per
+octave (confirming the layer formula's basis), and `orientation` is
+confirmed in degrees (`[0.0001,359.9999]`, no radian conversion needed).
+The fix was correct and is no longer a placeholder.
+
+### 5. Final result: real tracking now works, but 0% scorable coverage -- a reset-timing artifact, not a dead end
+
+Frames 0-1000, `USE_CUDASIFT=1`, raw-SIFT VLAD codebook (not yet retrained
+for RootSIFT). Mono-init now succeeds repeatedly throughout the run
+(`[mono-init] SUCCESS` at ids 2, 25, 34, 46, 57, 67, 77, 998, ...) with
+real map points and real `TrackLocalMap` inlier counts (up to 200+ at
+times). But tracking also fails and resets very frequently (`Fail to track
+local map!` -> `SYSTEM-> Reseting active map in monocular case`, which in
+monocular-without-IMU mode genuinely **erases** the current map's
+keyframes in place, not spawning a separately-preserved fragment) --
+dozens of times across the 1000 frames. The last reset landed at frame
+~990, just 10 frames before the sequence ended, leaving only 2 keyframes
+in the Atlas at shutdown:
+
+```
+[atlas-coverage] 1 map fragment(s) in Atlas at shutdown
+[atlas-coverage] total keyframes across all fragments: 2
+[fragment 0 (2 KFs)] Alignment failed -- too few matched points (2) or degenerate estimate.
+```
+
+**Coverage: effectively 0%, unscorable** -- but this is a timing artifact
+of *when* the last reset happened to land, not evidence the underlying
+matching is broken. The session-wide `[sbp-diag]` tells the opposite
+story:
+
+```
+[sbp-diag] total=107302 empty_window=50267 (46.8%) dist_reject=4482 (4.2%) ratio_reject=4210 (3.9%) accepted=48343 (45.0%)
+```
+
+**45.0% accepted-of-total is the best per-match acceptance rate measured
+anywhere this entire session** -- plain SIFT historically ran ~10-17%,
+even stock ORB only ~36% (part 56). CudaSift+RootSIFT's raw match quality
+is genuinely excellent; the open problem is **reset frequency**, not match
+quality -- tracking keeps finding good matches but still loses local-map
+tracking (`Fail to track local map!`) often enough that no single map
+fragment survives long enough to both (a) accumulate meaningfully and (b)
+still be alive when the sequence ends. This is a distinct, not-yet-
+investigated problem (why does `TrackLocalMap` fail so often despite high
+match quality?) rather than a dead end -- flagged as the clear next
+investigation thread rather than pursued further this session.
+
 ## Part 56 (2026-07-19, continued autonomously): chasing the 40.3% (ORB) vs
 ## 10.0% (SIFT) SearchLocalPoints match-rate gap found at the end of part 55
 
