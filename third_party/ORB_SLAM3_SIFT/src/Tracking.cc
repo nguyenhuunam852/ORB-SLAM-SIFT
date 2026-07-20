@@ -2039,6 +2039,15 @@ void Tracking::Track()
                         // the existing one.
                         const bool bDR = mbVelocity && TrackWithMotionModel();
                         bOK = bDR;
+                        // Part 58 continued -- try the cheaper KLT+RANSAC-PnP
+                        // recovery (TrackWithKLTRecovery(), see its own doc
+                        // comment in Tracking.h) before falling through to the
+                        // heavy VLAD-database Relocalization() below. Purely
+                        // additive: if it fails, bOK stays false and behavior
+                        // is identical to before this change. See
+                        // DEBUGGING.md part 58.
+                        if(!bOK)
+                            bOK = TrackWithKLTRecovery();
                         bool bRelocAttempted = false;
                         if(!bOK)
                         {
@@ -4088,6 +4097,125 @@ void Tracking::UpdateLocalKeyFrames()
         mpReferenceKF = pKFmax;
         mCurrentFrame.mpReferenceKF = mpReferenceKF;
     }
+}
+
+bool Tracking::TrackWithKLTRecovery()
+{
+    // Part 58 continued -- see Tracking.h's doc comment. Only viable if
+    // there's an actual previous image/frame to KLT from (e.g. skip
+    // cleanly right after a reset, before mono-init has produced a real
+    // mLastFrame).
+    if(mLastImGray.empty() || mImGray.empty())
+        return false;
+
+    std::vector<cv::Point2f> prevPts;
+    std::vector<cv::KeyPoint> prevKps;
+    std::vector<MapPoint*> prevMPs;
+    prevPts.reserve(mLastFrame.N);
+    prevKps.reserve(mLastFrame.N);
+    prevMPs.reserve(mLastFrame.N);
+    for(int i=0; i<mLastFrame.N; i++)
+    {
+        if(mLastFrame.mvpMapPoints[i] && !mLastFrame.mvbOutlier[i])
+        {
+            prevPts.push_back(mLastFrame.mvKeysUn[i].pt);
+            prevKps.push_back(mLastFrame.mvKeysUn[i]);
+            prevMPs.push_back(mLastFrame.mvpMapPoints[i]);
+        }
+    }
+
+    if(prevPts.size() < 6)
+    {
+        fprintf(stderr, "[klt-reloc-diag] id=%lu tooFewSourcePoints=%zu -- SKIP\n",
+                mCurrentFrame.mnId, prevPts.size());
+        return false;
+    }
+
+    std::vector<cv::Point2f> nextPts;
+    std::vector<uchar> status;
+    std::vector<float> err;
+    cv::calcOpticalFlowPyrLK(mLastImGray, mImGray, prevPts, nextPts, status, err);
+
+    // Append a synthetic keypoint for every successfully-tracked point,
+    // same mechanic as TrackWithMotionModel's SearchByProjection KLT
+    // fallback (see ORBmatcher.cc) -- MLPnPsolver reads 2D positions
+    // directly off F.mvKeysUn[i].pt (MLPnPsolver.h/.cc), it cannot take a
+    // standalone point list, so this is required, not optional. vpMatches
+    // starts pre-filled with nullptr for CurrentFrame's own already-
+    // extracted real keypoints (not part of this attempt) and grows in
+    // lockstep with the appends below to stay index-aligned.
+    vector<MapPoint*> vpMatches(mCurrentFrame.N, static_cast<MapPoint*>(nullptr));
+    int nKltTracked = 0;
+    for(size_t k=0; k<prevPts.size(); k++)
+    {
+        if(!status[k])
+            continue;
+        nKltTracked++;
+
+        cv::KeyPoint kpSynthetic = prevKps[k];
+        kpSynthetic.pt = nextPts[k];
+
+        mCurrentFrame.mvKeys.push_back(kpSynthetic);
+        mCurrentFrame.mvKeysUn.push_back(kpSynthetic);
+        mCurrentFrame.mDescriptors.push_back(prevMPs[k]->GetDescriptor());
+        mCurrentFrame.mvpMapPoints.push_back(prevMPs[k]);
+        mCurrentFrame.mvbOutlier.push_back(false);
+        vpMatches.push_back(prevMPs[k]);
+
+        const int newIdx = mCurrentFrame.N;
+        mCurrentFrame.N++;
+
+        int posX, posY;
+        if(mCurrentFrame.PosInGrid(kpSynthetic, posX, posY))
+            mCurrentFrame.mGrid[posX][posY].push_back(newIdx);
+    }
+
+    if(nKltTracked < 6)
+    {
+        fprintf(stderr, "[klt-reloc-diag] id=%lu kltTracked=%d<6 -- SKIP (not enough for PnP)\n",
+                mCurrentFrame.mnId, nKltTracked);
+        return false;
+    }
+
+    // Same RANSAC tuning Relocalization() already uses (Tracking.cc, see
+    // its own SetRansacParameters call) -- reuse, don't invent new numbers
+    // without a reason to.
+    MLPnPsolver solver(mCurrentFrame, vpMatches);
+    solver.SetRansacParameters(0.99,10,300,6,0.5,5.991);
+
+    bool bMatch = false;
+    int nGood = 0;
+    int nInliers = 0;
+    bool bNoMore = false;
+    while(!bNoMore && !bMatch)
+    {
+        vector<bool> vbInliers;
+        Eigen::Matrix4f eigTcw;
+        bool bTcw = solver.iterate(5,bNoMore,vbInliers,nInliers,eigTcw);
+
+        if(!bTcw)
+            continue;
+
+        Sophus::SE3f Tcw(eigTcw);
+        mCurrentFrame.SetPose(Tcw);
+
+        for(int j=0; j<(int)vbInliers.size(); j++)
+            mCurrentFrame.mvpMapPoints[j] = vbInliers[j] ? vpMatches[j] : static_cast<MapPoint*>(nullptr);
+
+        nGood = Optimizer::PoseOptimization(&mCurrentFrame);
+        if(nGood>=50)
+            bMatch = true;
+    }
+
+    // [klt-reloc-diag] part 58 continued -- measures this fallback
+    // directly: how often it's even attempted with enough source points,
+    // how many of those actually KLT-track, and whether the resulting
+    // RANSAC+PoseOptimization pose clears the same nGood>=50 bar
+    // Relocalization() uses. See DEBUGGING.md part 58.
+    fprintf(stderr, "[klt-reloc-diag] id=%lu kltTracked=%d ransacInliers=%d nGood=%d accept=%d\n",
+            mCurrentFrame.mnId, nKltTracked, nInliers, nGood, (int)bMatch);
+
+    return bMatch;
 }
 
 bool Tracking::Relocalization()

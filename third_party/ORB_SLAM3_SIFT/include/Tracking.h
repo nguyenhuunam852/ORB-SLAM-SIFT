@@ -227,6 +227,17 @@ protected:
 
     bool Relocalization();
 
+    // Part 58 continued -- short-term recovery attempted before the
+    // heavy, currently-often-failing VLAD-database Relocalization(): KLT-
+    // tracks mLastFrame's map points into mCurrentFrame (photometric
+    // alignment, no redetection needed) and solves a fresh RANSAC PnP
+    // (MLPnPsolver, same solver Relocalization() itself uses) on those
+    // correspondences. Only viable for short dropouts where mLastImGray
+    // is still the genuinely-last-good frame (see RECENTLY_LOST's ~0.1s
+    // budget) -- not a substitute for true place recognition. See
+    // DEBUGGING.md part 58.
+    bool TrackWithKLTRecovery();
+
     void UpdateLocalMap();
     void UpdateLocalPoints();
     void UpdateLocalKeyFrames();
