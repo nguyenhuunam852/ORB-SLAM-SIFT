@@ -63,10 +63,13 @@ namespace {
     long g_kltRescuedEmptyWindow = 0;
     long g_kltDisagreementSamples = 0;
     double g_kltDisagreementPxSum = 0.0;
+    // part 58 continued -- synthetic-point fallback counter, see the
+    // SearchByProjection(Frame&,const Frame&,...) empty-window branch.
+    long g_kltSyntheticAppended = 0;
     struct KltDiagPrinter {
         ~KltDiagPrinter() {
-            fprintf(stderr, "[klt-diag] tracked=%ld rescued_empty_window=%ld avg_disagreement_px=%.2f (n=%ld)\n",
-                    g_kltTracked, g_kltRescuedEmptyWindow,
+            fprintf(stderr, "[klt-diag] tracked=%ld rescued_empty_window=%ld synthetic_appended=%ld avg_disagreement_px=%.2f (n=%ld)\n",
+                    g_kltTracked, g_kltRescuedEmptyWindow, g_kltSyntheticAppended,
                     g_kltDisagreementSamples>0 ? g_kltDisagreementPxSum/g_kltDisagreementSamples : 0.0,
                     g_kltDisagreementSamples);
         }
@@ -1902,7 +1905,53 @@ namespace ORB_SLAM3
                     }
 
                     if(vIndices2.empty())
+                    {
+                        // [klt-diag] part 58 continued -- synthetic-point
+                        // fallback. Part 1's rescue above still requires an
+                        // independently-redetected CudaSIFT keypoint to
+                        // exist near either predicted position; the
+                        // measured ~0.2% rescue rate showed that's almost
+                        // never the real problem (KLT usually agrees with
+                        // the pose projection to within a few px, well
+                        // inside the search radius -- so if both windows
+                        // are empty, there's genuinely no redetected
+                        // keypoint there, not a bad search center). This
+                        // branch drops that requirement entirely: if KLT
+                        // itself tracked this point (photometric alignment,
+                        // no redetection needed), append it directly as a
+                        // synthetic keypoint on CurrentFrame, inheriting
+                        // LastFrame's octave/scale and the map point's own
+                        // representative descriptor (nothing new was
+                        // detected/described here, so there's nothing else
+                        // to copy). AssignFeaturesToGrid() is private and
+                        // already ran once at construction with no clear()
+                        // guard (confirmed via Frame.cc read) -- calling it
+                        // again would duplicate every existing grid entry,
+                        // so this inserts just the one new point via the
+                        // public PosInGrid()/mGrid instead. See
+                        // DEBUGGING.md part 58.
+                        if(pKltStatus && pKltPredicted && i < (int)pKltStatus->size() && (*pKltStatus)[i])
+                        {
+                            cv::KeyPoint kpSynthetic = (LastFrame.Nleft == -1) ? LastFrame.mvKeysUn[i] : LastFrame.mvKeys[i];
+                            kpSynthetic.pt = (*pKltPredicted)[i];
+
+                            CurrentFrame.mvKeys.push_back(kpSynthetic);
+                            CurrentFrame.mvKeysUn.push_back(kpSynthetic);
+                            CurrentFrame.mDescriptors.push_back(pMP->GetDescriptor());
+                            CurrentFrame.mvpMapPoints.push_back(pMP);
+                            CurrentFrame.mvbOutlier.push_back(false);
+                            const int newIdx = CurrentFrame.N;
+                            CurrentFrame.N++;
+
+                            int posX, posY;
+                            if(CurrentFrame.PosInGrid(kpSynthetic, posX, posY))
+                                CurrentFrame.mGrid[posX][posY].push_back(newIdx);
+
+                            g_kltSyntheticAppended++;
+                            nmatches++;
+                        }
                         continue;
+                    }
 
                     const cv::Mat dMP = pMP->GetDescriptor();
 
