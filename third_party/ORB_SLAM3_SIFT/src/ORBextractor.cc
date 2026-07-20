@@ -1249,26 +1249,29 @@ namespace ORB_SLAM3
                 kp.angle = sp.orientation; // CudaSift orientation is already in degrees, matching cv::KeyPoint's convention
                 kp.response = sp.score;
                 kp.size = sp.scale;
-                // *** PLACEHOLDER, NOT YET VALIDATED (see analyze/cudasift_probe.cpp's
-                // doc comment) *** -- CudaSift's SiftPoint has no packed
-                // octave/layer field the way cv::SIFT does; `subsampling` is
-                // its octave-downsample factor (assumed power-of-2: 1,2,4,...)
-                // and `scale` is a continuous sigma. Run analyze/cudasift_probe.cpp
-                // on real KITTI frames and correct this before trusting any
-                // live tracking result (this project's own repeated lesson,
-                // see Session 14 Stage 0's real off-by-one catch and
-                // flatLevel()'s doc comment above the constructor).
+                // VALIDATED against real KITTI data via analyze/cudasift_probe.cpp
+                // (200 frames, 320325 keypoints, run on Kaggle): subsampling
+                // takes exactly the assumed power-of-2 values {1,2,4,8,16}
+                // starting at 1.0 (CudaSift has no upsampled/finer-than-
+                // native octave the way cv::SIFT's firstOctave=-1 default
+                // does), confirming subsampling==1 is the correct anchor for
+                // flatLevel()'s kMinOctave==-1 finest-octave numbering below.
+                // scale spans exactly one factor-of-2 per octave (e.g.
+                // subsampling=1 -> scale in [0.933,1.866], ratio ~2.0),
+                // confirming the layer formula's log2(scale/subsampling)
+                // basis. orientation measured in [0.0001,359.9999], confirming
+                // it's already in degrees (matching cv::KeyPoint's own
+                // convention, no radian conversion needed).
                 //
                 // FIXED bug (found via live 0-matches-ever symptom on a real
-                // Kaggle run): log2(subsampling) is a RELATIVE step count
-                // from CudaSift's own finest octave (subsampling==1 is its
-                // baseline, no downsampling), NOT an absolute octave number
-                // in flatLevel()'s kMinOctave==-1-based numbering -- must
-                // add kMinOctave to shift into that numbering. The previous
-                // version also floored the log argument at 1.0
-                // (std::max(1.0f, sp.subsampling)), which made log2 >= 0
-                // ALWAYS, so octaveGuess could structurally never reach the
-                // finest flat level (kMinOctave==-1) that
+                // Kaggle run, before this validation): log2(subsampling) is a
+                // RELATIVE step count from CudaSift's own finest octave
+                // (subsampling==1), NOT an absolute octave number in
+                // flatLevel()'s kMinOctave==-1-based numbering -- needs a
+                // `+ kMinOctave` shift. The previous version also floored the
+                // log argument at 1.0 (std::max(1.0f, sp.subsampling)), which
+                // made log2 >= 0 ALWAYS, so octaveGuess could structurally
+                // never reach the finest flat level (kMinOctave==-1) that
                 // ORBmatcher::SearchForInitialization's `level1>=nOctaveLayers`
                 // gate requires to admit ANY candidate at all -- every single
                 // keypoint was silently skipped, every frame, hence exactly
