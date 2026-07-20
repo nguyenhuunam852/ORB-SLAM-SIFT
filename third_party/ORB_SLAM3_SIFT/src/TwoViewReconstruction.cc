@@ -24,6 +24,7 @@
 #include "Thirdparty/DBoW2/DUtils/Random.h"
 
 #include<thread>
+#include<cstdio>
 
 
 using namespace std;
@@ -110,10 +111,16 @@ namespace ORB_SLAM3
         threadF.join();
 
         // Compute ratio of scores
-        if(SH+SF == 0.f) return false;
+        if(SH+SF == 0.f) {
+            fprintf(stderr, "[reconstruct-diag] SH+SF==0 (degenerate: neither H nor F scored anything) -- reject\n");
+            return false;
+        }
         float RH = SH/(SH+SF);
 
         float minParallax = 1.0;
+
+        fprintf(stderr, "[reconstruct-diag] SH=%.1f SF=%.1f RH=%.3f -> trying %s\n",
+                SH, SF, RH, RH>0.50 ? "H" : "F");
 
         // Try to reconstruct from homography or fundamental depending on the ratio (0.40-0.45)
         if(RH>0.50) // if(RH>0.40)
@@ -519,6 +526,10 @@ namespace ORB_SLAM3
         // If there is not a clear winner or not enough triangulated points reject initialization
         if(maxGood<nMinGood || nsimilar>1)
         {
+            fprintf(stderr, "[reconstruct-diag][F] REJECT: N=%d maxGood=%d nMinGood=%d nsimilar=%d "
+                    "(good1..4=%d,%d,%d,%d) -- %s\n",
+                    N, maxGood, nMinGood, nsimilar, nGood1, nGood2, nGood3, nGood4,
+                    maxGood<nMinGood ? "not enough RANSAC-consistent inliers" : "ambiguous winner (multiple R/t hypotheses scored similarly)");
             return false;
         }
 
@@ -565,6 +576,9 @@ namespace ORB_SLAM3
             }
         }
 
+        fprintf(stderr, "[reconstruct-diag][F] REJECT: winner (good=%d) had insufficient parallax "
+                "(p1=%.3f p2=%.3f p3=%.3f p4=%.3f, need>%.3f)\n",
+                maxGood, parallax1, parallax2, parallax3, parallax4, minParallax);
         return false;
     }
 
@@ -596,6 +610,8 @@ namespace ORB_SLAM3
 
         if(d1/d2<1.00001 || d2/d3<1.00001)
         {
+            fprintf(stderr, "[reconstruct-diag][H] REJECT: degenerate SVD singular values "
+                    "d1/d2=%.6f d2/d3=%.6f (need both >1.00001)\n", d1/d2, d2/d3);
             return false;
         }
 
@@ -730,6 +746,13 @@ namespace ORB_SLAM3
             return true;
         }
 
+        fprintf(stderr, "[reconstruct-diag][H] REJECT: N=%d bestGood=%d secondBestGood=%d bestParallax=%.3f "
+                "(need>%.3f) minTriangulated=%d -- failed: %s%s%s%s\n",
+                N, bestGood, secondBestGood, bestParallax, minParallax, minTriangulated,
+                secondBestGood>=0.75*bestGood ? "[ambiguous 2nd-best] " : "",
+                bestParallax<minParallax ? "[insufficient parallax] " : "",
+                bestGood<=minTriangulated ? "[too few triangulated] " : "",
+                bestGood<=0.9*N ? "[too few RANSAC-consistent inliers] " : "");
         return false;
     }
 
