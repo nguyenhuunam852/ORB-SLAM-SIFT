@@ -29,6 +29,8 @@
 #include "MLPnPsolver.h"
 #include "GeometricTools.h"
 
+#include <opencv2/video/tracking.hpp>
+
 #include <iostream>
 
 #include <mutex>
@@ -1582,6 +1584,13 @@ Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, co
 
 Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp, string filename)
 {
+    // Snapshot the previous frame's image before mImGray gets overwritten
+    // below -- needed for KLT (see Tracking.h's mLastImGray doc comment,
+    // DEBUGGING.md part 58). Plain assignment (not .clone()): cv::Mat's
+    // shallow-copy/refcounting means the old buffer mLastImGray now points
+    // to is untouched once mImGray is reassigned to a new Mat just below,
+    // so this is both correct and free of an extra copy.
+    mLastImGray = mImGray;
     mImGray = im;
     if(mImGray.channels()==3)
     {
@@ -3101,7 +3110,53 @@ bool Tracking::TrackWithMotionModel()
     else
         th=15;
 
-    int nmatches = matcher.SearchByProjection(mCurrentFrame,mLastFrame,th,mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR);
+    // KLT optical-flow search-window prediction, part 58 -- [sbp-diag] has
+    // shown empty_window at ~48% of all SearchByProjection attempts across
+    // this session's Kaggle runs (nearly half find zero candidates), and
+    // this pose-projected search center relies entirely on the constant-
+    // velocity assumption (mVelocity * mLastFrame.GetPose() above), which
+    // KITTI's turns/braking/acceleration segments violate. KLT tracks the
+    // same points via actual photometric alignment between the previous
+    // and current images (not a motion-model assumption), giving
+    // SearchByProjection (below) a second, independent search center to
+    // try per point. Only monocular (mSensor==System::MONOCULAR) is
+    // exercised by this fork; not gated further since it degrades
+    // gracefully (empty vectors) if mLastImGray is ever unset.
+    std::vector<cv::Point2f> kltPredicted(mLastFrame.N);
+    std::vector<uchar> kltStatus(mLastFrame.N, 0);
+    if(!mLastImGray.empty() && !mImGray.empty())
+    {
+        std::vector<cv::Point2f> prevPts;
+        std::vector<int> origIdx;
+        prevPts.reserve(mLastFrame.N);
+        origIdx.reserve(mLastFrame.N);
+        for(int i=0; i<mLastFrame.N; i++)
+        {
+            if(mLastFrame.mvpMapPoints[i] && !mLastFrame.mvbOutlier[i])
+            {
+                prevPts.push_back(mLastFrame.mvKeysUn[i].pt);
+                origIdx.push_back(i);
+            }
+        }
+        if(!prevPts.empty())
+        {
+            std::vector<cv::Point2f> nextPts;
+            std::vector<uchar> status;
+            std::vector<float> err;
+            cv::calcOpticalFlowPyrLK(mLastImGray, mImGray, prevPts, nextPts, status, err);
+            for(size_t k=0; k<origIdx.size(); k++)
+            {
+                if(status[k])
+                {
+                    kltPredicted[origIdx[k]] = nextPts[k];
+                    kltStatus[origIdx[k]] = 1;
+                }
+            }
+        }
+    }
+
+    int nmatches = matcher.SearchByProjection(mCurrentFrame,mLastFrame,th,mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR,
+                                               &kltPredicted,&kltStatus);
 
     // If few matches, uses a wider window search
     if(nmatches<20)
@@ -3109,7 +3164,8 @@ bool Tracking::TrackWithMotionModel()
         Verbose::PrintMess("Not enough matches, wider window search!!", Verbose::VERBOSITY_NORMAL);
         fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(NULL));
 
-        nmatches = matcher.SearchByProjection(mCurrentFrame,mLastFrame,2*th,mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR);
+        nmatches = matcher.SearchByProjection(mCurrentFrame,mLastFrame,2*th,mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR,
+                                               &kltPredicted,&kltStatus);
         Verbose::PrintMess("Matches with wider search: " + to_string(nmatches), Verbose::VERBOSITY_NORMAL);
 
     }

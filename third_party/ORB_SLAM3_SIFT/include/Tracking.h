@@ -145,6 +145,15 @@ public:
 
     cv::Mat mImGray;
 
+    // Cache of the previous frame's grayscale image, needed for KLT optical
+    // flow (cv::calcOpticalFlowPyrLK requires the actual previous+current
+    // image pair, not just the derived keypoints -- mImGray alone is
+    // overwritten every GrabImageMonocular() call, so the prior frame's
+    // image would otherwise be gone by the time TrackWithMotionModel() runs
+    // KLT against it). See DEBUGGING.md part 58 (KLT search-window
+    // experiment) for why this was added.
+    cv::Mat mLastImGray;
+
     // Initialization Variables (Monocular)
     std::vector<int> mvIniLastMatches;
     std::vector<int> mvIniMatches;

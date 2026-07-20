@@ -51,7 +51,18 @@ namespace ORB_SLAM3
 
         // Project MapPoints tracked in last frame into the current frame and search matches.
         // Used to track from previous frame (Tracking)
-        int SearchByProjection(Frame &CurrentFrame, const Frame &LastFrame, const float th, const bool bMono);
+        // pKltPredicted/pKltStatus (part 58, KLT search-window experiment):
+        // optional, same-length-as-LastFrame.N arrays of an independent,
+        // photometric-alignment-based predicted 2D position per LastFrame
+        // keypoint (see Tracking::TrackWithMotionModel()'s KLT block for how
+        // these are built) -- when status is set for a given index, that
+        // position is ALSO searched (in addition to the usual pose-
+        // projected uv) before falling through to the descriptor-distance
+        // best-match loop. Both default to nullptr so every other call site
+        // is unaffected. See DEBUGGING.md part 58.
+        int SearchByProjection(Frame &CurrentFrame, const Frame &LastFrame, const float th, const bool bMono,
+                                const std::vector<cv::Point2f> *pKltPredicted = nullptr,
+                                const std::vector<uchar> *pKltStatus = nullptr);
 
         // Project MapPoints seen in KeyFrame into the Frame and search matches.
         // Used in relocalisation (Tracking)

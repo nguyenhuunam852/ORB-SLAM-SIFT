@@ -66,7 +66,7 @@ endif()
 # conda-vs-system library conflict that doesn't exist in a fresh Kaggle
 # container). See kaggle/setup_and_run.sh for the full build sequence this
 # file expects to run inside.
-find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio features2d calib3d)
+find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio features2d calib3d video)
 
 # Built fresh by setup_and_run.sh from the official ORB-SLAM3 Thirdparty/g2o
 # source (a small, ORB-SLAM3-specific g2o subset -- core/solvers/types/stuff

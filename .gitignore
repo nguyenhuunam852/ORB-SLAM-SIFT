@@ -29,3 +29,5 @@ kaggle/build/
 kaggle/g2o_build/
 kaggle/cudasift_src/
 kaggle/onnxruntime/
+
+/tmp

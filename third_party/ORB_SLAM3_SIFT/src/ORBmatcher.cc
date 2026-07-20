@@ -52,6 +52,25 @@ namespace {
                     g_sbpDiagAccepted.load());
         }
     } g_sbpDiagPrinter;
+
+    // [klt-diag] part 58 -- aggregate counters for the KLT search-window
+    // experiment in SearchByProjection(Frame&,const Frame&,...) (used by
+    // TrackWithMotionModel()). Namespace-scope (not function-local) so a
+    // single destructor-based printer can report the whole run's totals,
+    // same pattern as [sbp-diag] above. Only this one call site's Tracking
+    // thread ever touches these, so plain long/double (not atomic) is fine.
+    long g_kltTracked = 0;
+    long g_kltRescuedEmptyWindow = 0;
+    long g_kltDisagreementSamples = 0;
+    double g_kltDisagreementPxSum = 0.0;
+    struct KltDiagPrinter {
+        ~KltDiagPrinter() {
+            fprintf(stderr, "[klt-diag] tracked=%ld rescued_empty_window=%ld avg_disagreement_px=%.2f (n=%ld)\n",
+                    g_kltTracked, g_kltRescuedEmptyWindow,
+                    g_kltDisagreementSamples>0 ? g_kltDisagreementPxSum/g_kltDisagreementSamples : 0.0,
+                    g_kltDisagreementSamples);
+        }
+    } g_kltDiagPrinter;
 }
 
 namespace ORB_SLAM3
@@ -1775,7 +1794,9 @@ namespace ORB_SLAM3
         return nFound;
     }
 
-    int ORBmatcher::SearchByProjection(Frame &CurrentFrame, const Frame &LastFrame, const float th, const bool bMono)
+    int ORBmatcher::SearchByProjection(Frame &CurrentFrame, const Frame &LastFrame, const float th, const bool bMono,
+                                        const std::vector<cv::Point2f> *pKltPredicted,
+                                        const std::vector<uchar> *pKltStatus)
     {
         int nmatches = 0;
 
@@ -1848,6 +1869,37 @@ namespace ORB_SLAM3
                         vIndices2 = CurrentFrame.GetFeaturesInArea(uv(0),uv(1), radius, 0, nLastOctave);
                     else
                         vIndices2 = CurrentFrame.GetFeaturesInArea(uv(0),uv(1), radius, octaveBase, octaveBase+nOctaveLayers-1);
+
+                    // [klt-diag] part 58 -- also search around the KLT-
+                    // predicted position (independent of the constant-
+                    // velocity pose projection above) and merge candidates.
+                    // See this function's declaration comment in
+                    // ORBmatcher.h and DEBUGGING.md part 58.
+                    if(pKltStatus && pKltPredicted && i < (int)pKltStatus->size() && (*pKltStatus)[i])
+                    {
+                        g_kltTracked++;
+                        const cv::Point2f &kltPt = (*pKltPredicted)[i];
+                        const bool wasEmpty = vIndices2.empty();
+
+                        const float dpx = std::sqrt((kltPt.x-uv(0))*(kltPt.x-uv(0)) + (kltPt.y-uv(1))*(kltPt.y-uv(1)));
+                        g_kltDisagreementPxSum += dpx;
+                        g_kltDisagreementSamples++;
+
+                        vector<size_t> vIndicesKlt;
+                        if(bForward)
+                            vIndicesKlt = CurrentFrame.GetFeaturesInArea(kltPt.x,kltPt.y, radius, nLastOctave);
+                        else if(bBackward)
+                            vIndicesKlt = CurrentFrame.GetFeaturesInArea(kltPt.x,kltPt.y, radius, 0, nLastOctave);
+                        else
+                            vIndicesKlt = CurrentFrame.GetFeaturesInArea(kltPt.x,kltPt.y, radius, octaveBase, octaveBase+nOctaveLayers-1);
+
+                        if(!vIndicesKlt.empty())
+                        {
+                            if(wasEmpty)
+                                g_kltRescuedEmptyWindow++;
+                            vIndices2.insert(vIndices2.end(), vIndicesKlt.begin(), vIndicesKlt.end());
+                        }
+                    }
 
                     if(vIndices2.empty())
                         continue;

@@ -29,7 +29,7 @@ set(CMAKE_BUILD_RPATH "/usr/lib/x86_64-linux-gnu")
 
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets Concurrent)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Concurrent)
-find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio features2d calib3d)
+find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs videoio features2d calib3d video)
 find_package(Ceres REQUIRED)
 
 # DBoW2 (bag-of-words place recognition, ORB-SLAM2's own loop-closure
