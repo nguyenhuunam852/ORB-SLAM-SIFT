@@ -1341,6 +1341,24 @@ namespace ORB_SLAM3
             const int layer = (kp.octave >> 8) & 255;
             kp.octave = flatLevel(octave, layer, nOctaveLayers);
         }
+
+        // RootSIFT (L1-normalize, sqrt, L2-normalize) -- same transform the
+        // USE_CUDASIFT branch above applies, kept identical so the CPU
+        // cv::SIFT path (used for local, GPU-less verification builds)
+        // produces descriptors in the same space as the real CudaSIFT
+        // production build, not raw SIFT.
+        {
+            const float eps = 1e-6f;
+            for (int r = 0; r < descriptors.rows; ++r) {
+                Mat row = descriptors.row(r);
+                double l1 = cv::norm(row, cv::NORM_L1) + eps;
+                row /= l1;
+                for (int c = 0; c < row.cols; ++c)
+                    row.at<float>(0, c) = std::sqrt(std::max(row.at<float>(0, c), eps));
+                double l2 = cv::norm(row, cv::NORM_L2) + eps;
+                row /= l2;
+            }
+        }
 #endif
 
         if (_keypoints.empty())

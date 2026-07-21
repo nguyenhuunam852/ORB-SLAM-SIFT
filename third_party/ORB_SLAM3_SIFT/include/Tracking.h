@@ -227,11 +227,36 @@ protected:
 
     bool Relocalization();
 
-    // Part 58 continued -- KLT+RANSAC-PnP tracker: KLT-tracks mLastFrame's
-    // map points into mCurrentFrame (photometric alignment, no CudaSIFT
-    // redetection needed for the correspondence itself) and solves a fresh
-    // RANSAC PnP (MLPnPsolver, same solver Relocalization() uses) on those
-    // correspondences, then refines with Optimizer::PoseOptimization.
+    // Part 58 continued -- KLT+RANSAC-PnP tracker, two phases:
+    //   1) Bootstrap: KLT-tracks mLastFrame's map points into mCurrentFrame
+    //      (photometric alignment) and solves a RANSAC PnP (MLPnPsolver,
+    //      same solver Relocalization() uses) on those correspondences to
+    //      get an initial pose estimate. The KLT-derived keypoints are
+    //      synthetic/temporary -- appended to mCurrentFrame only long
+    //      enough for MLPnPsolver to read (it requires positions directly
+    //      off a Frame's own mvKeysUn), then stripped back off.
+    //   2) Real correspondence search: exactly TrackWithMotionModel()'s own
+    //      mechanism (ORBmatcher::SearchByProjection(Frame&,const Frame&,
+    //      th,bMono), widening th if <20 matches), reused unchanged --
+    //      projects mLastFrame's map points into mCurrentFrame under the
+    //      phase-1 bootstrap pose and verifies each candidate against
+    //      mCurrentFrame's OWN freshly CudaSIFT-extracted keypoints via
+    //      real descriptor ratio-test, not the synthetic KLT positions.
+    //      This is what the original KLT-only synthetic-injection design
+    //      (see git history / DEBUGGING.md part 58) was missing: no
+    //      appearance-based re-verification meant a drifted/wrong KLT
+    //      track had nothing but RANSAC's geometric check to catch it, and
+    //      the correspondence pool could only ever shrink frame-to-frame
+    //      (measured on Kaggle: 92 map resets across 1000 frames). Reusing
+    //      SearchByProjection here gives every one of mLastFrame's map
+    //      points a fresh chance each frame -- the same continuous reseed
+    //      TrackWithMotionModel()+TrackLocalMap() rely on -- not just
+    //      whichever ones KLT happened to still be tracking. Acceptance
+    //      bar is nmatchesMap>=10, matching TrackWithMotionModel()'s own
+    //      mono threshold (Tracking.cc) -- deliberately NOT Relocalization()'s
+    //      much stricter nGood>=50, since this runs every frame with
+    //      TrackLocalMap() as the real downstream quality gate afterward,
+    //      exactly as it is for TrackWithMotionModel().
     // Per explicit user instruction, this replaced BOTH
     // TrackWithMotionModel() (constant-velocity) and
     // TrackReferenceKeyFrame() (BoW/descriptor-matching) as the sole

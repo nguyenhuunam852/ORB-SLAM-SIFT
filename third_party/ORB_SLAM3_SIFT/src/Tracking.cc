@@ -4128,14 +4128,22 @@ bool Tracking::TrackWithKLT()
     std::vector<float> err;
     cv::calcOpticalFlowPyrLK(mLastImGray, mImGray, prevPts, nextPts, status, err);
 
-    // Append a synthetic keypoint for every successfully-tracked point,
-    // same mechanic as TrackWithMotionModel's SearchByProjection KLT
-    // fallback (see ORBmatcher.cc) -- MLPnPsolver reads 2D positions
+    // originalN: mCurrentFrame's own real, freshly CudaSIFT-extracted
+    // keypoint count, before any synthetic KLT point is appended below.
+    // Phase 2 (SearchByProjection) needs this to restore mCurrentFrame to
+    // a clean, all-real-keypoints state -- see the cleanup block below.
+    const int originalN = mCurrentFrame.N;
+
+    // Phase 1 (bootstrap pose only): append a synthetic keypoint for every
+    // successfully-tracked point -- MLPnPsolver reads 2D positions
     // directly off F.mvKeysUn[i].pt (MLPnPsolver.h/.cc), it cannot take a
     // standalone point list, so this is required, not optional. vpMatches
     // starts pre-filled with nullptr for CurrentFrame's own already-
     // extracted real keypoints (not part of this attempt) and grows in
-    // lockstep with the appends below to stay index-aligned.
+    // lockstep with the appends below to stay index-aligned. NOT inserted
+    // into mGrid: MLPnPsolver/Optimizer::PoseOptimization never read it
+    // (confirmed via Explore this session), and phase 2 below needs
+    // mGrid's real cells undisturbed for its own genuine-keypoint search.
     vector<MapPoint*> vpMatches(mCurrentFrame.N, static_cast<MapPoint*>(nullptr));
     int nKltTracked = 0;
     for(size_t k=0; k<prevPts.size(); k++)
@@ -4154,16 +4162,20 @@ bool Tracking::TrackWithKLT()
         mCurrentFrame.mvbOutlier.push_back(false);
         vpMatches.push_back(prevMPs[k]);
 
-        const int newIdx = mCurrentFrame.N;
         mCurrentFrame.N++;
-
-        int posX, posY;
-        if(mCurrentFrame.PosInGrid(kpSynthetic, posX, posY))
-            mCurrentFrame.mGrid[posX][posY].push_back(newIdx);
     }
 
     if(nKltTracked < 6)
     {
+        // Restore mCurrentFrame before bailing -- see the cleanup block
+        // below's own doc comment for why this must never be skipped once
+        // any synthetic point has been appended.
+        mCurrentFrame.mvKeys.resize(originalN);
+        mCurrentFrame.mvKeysUn.resize(originalN);
+        mCurrentFrame.mDescriptors = mCurrentFrame.mDescriptors.rowRange(0, originalN).clone();
+        mCurrentFrame.mvpMapPoints.resize(originalN);
+        mCurrentFrame.mvbOutlier.resize(originalN);
+        mCurrentFrame.N = originalN;
         fprintf(stderr, "[klt-reloc-diag] id=%lu kltTracked=%d<6 -- SKIP (not enough for PnP)\n",
                 mCurrentFrame.mnId, nKltTracked);
         return false;
@@ -4182,50 +4194,116 @@ bool Tracking::TrackWithKLT()
     MLPnPsolver* solver = new MLPnPsolver(mCurrentFrame, vpMatches);
     solver->SetRansacParameters(0.99,10,300,6,0.5,5.991);
 
-    bool bMatch = false;
-    int nGood = 0;
+    // Phase 1 (bootstrap pose only, see Tracking.h's doc comment): accept
+    // the first geometrically-plausible RANSAC pose (nInliers>=6, matching
+    // MLPnPsolver's own configured minimum set size above) -- this no
+    // longer has to be a GOOD pose on its own, since phase 2 below
+    // (SearchByProjection+PoseOptimization) is the real correspondence-
+    // and-quality step, exactly like TrackWithMotionModel()'s own
+    // constant-velocity estimate is just as unverified going in.
+    bool bBootstrap = false;
     int nInliers = 0;
     bool bNoMore = false;
-    while(!bNoMore && !bMatch)
+    while(!bNoMore && !bBootstrap)
     {
         vector<bool> vbInliers;
         Eigen::Matrix4f eigTcw;
         bool bTcw = solver->iterate(5,bNoMore,vbInliers,nInliers,eigTcw);
-
-        // Guard added per user request -- RANSAC iterations that return a
-        // pose backed by too few inliers (occasionally 0) were calling
-        // Optimizer::PoseOptimization() with an empty/near-empty vertex
-        // set, spamming g2o's own "0 vertices to optimize" stderr warning
-        // (confirmed pre-existing in this codebase, not introduced by
-        // TrackWithKLT() -- it already appeared 50-53 times in this
-        // session's earlier baseline logs -- just far more frequent now
-        // that this RANSAC loop runs every frame instead of only during
-        // Relocalization()). 6 matches MLPnPsolver's own configured
-        // minimum set size (SetRansacParameters's minSet=6 above) --
-        // below that, PoseOptimization has nothing meaningful to refine
-        // anyway. Purely a noise/efficiency fix, not a behavior change:
-        // these attempts could never have reached nGood>=50 regardless.
         if(!bTcw || nInliers<6)
             continue;
 
         Sophus::SE3f Tcw(eigTcw);
         mCurrentFrame.SetPose(Tcw);
-
-        for(int j=0; j<(int)vbInliers.size(); j++)
-            mCurrentFrame.mvpMapPoints[j] = vbInliers[j] ? vpMatches[j] : static_cast<MapPoint*>(nullptr);
-
-        nGood = Optimizer::PoseOptimization(&mCurrentFrame);
-        if(nGood>=50)
-            bMatch = true;
+        bBootstrap = true;
     }
 
-    // [klt-reloc-diag] part 58 continued -- measures this fallback
-    // directly: how often it's even attempted with enough source points,
-    // how many of those actually KLT-track, and whether the resulting
-    // RANSAC+PoseOptimization pose clears the same nGood>=50 bar
-    // Relocalization() uses. See DEBUGGING.md part 58.
-    fprintf(stderr, "[klt-reloc-diag] id=%lu kltTracked=%d ransacInliers=%d nGood=%d accept=%d\n",
-            mCurrentFrame.mnId, nKltTracked, nInliers, nGood, (int)bMatch);
+    // Strip the synthetic KLT points back off now that they've served
+    // their only purpose (bootstrapping a pose for MLPnPsolver to solve) --
+    // mCurrentFrame must contain ONLY its own real CudaSIFT keypoints from
+    // here on, since phase 2 (SearchByProjection) needs a clean, real
+    // keypoint grid to find genuine appearance-verified matches in, not
+    // fake self-matching synthetic entries carrying a copied descriptor.
+    mCurrentFrame.mvKeys.resize(originalN);
+    mCurrentFrame.mvKeysUn.resize(originalN);
+    mCurrentFrame.mDescriptors = mCurrentFrame.mDescriptors.rowRange(0, originalN).clone();
+    mCurrentFrame.mvpMapPoints.assign(originalN, static_cast<MapPoint*>(nullptr));
+    mCurrentFrame.mvbOutlier.assign(originalN, false);
+    mCurrentFrame.N = originalN;
+
+    if(!bBootstrap)
+    {
+        fprintf(stderr, "[klt-track-diag] id=%lu kltTracked=%d ransacInliers=%d bootstrap=FAIL\n",
+                mCurrentFrame.mnId, nKltTracked, nInliers);
+        return false;
+    }
+
+    // Phase 2 (part 58 continued -- "bóc cơ chế Velocity+SearchByProjection
+    // vào"): the KLT+RANSAC bootstrap above only plays the role
+    // mVelocity*mLastFrame.GetPose() plays in the original, real
+    // TrackWithMotionModel() -- an initial pose estimate, nothing more.
+    // From here, reuse that SAME proven ORB-SLAM3 mechanism unchanged:
+    // project mLastFrame's map points into mCurrentFrame under this pose
+    // and verify each candidate by real SIFT descriptor ratio-test against
+    // mCurrentFrame's own freshly CudaSIFT-extracted keypoints -- not the
+    // synthetic KLT positions, which now no longer exist in mCurrentFrame
+    // at all. Widen the window once if too few matches, exactly like
+    // TrackWithMotionModel() does.
+    ORBmatcher matcher(0.9,true);
+    const int th = 15;
+    int nmatches = matcher.SearchByProjection(mCurrentFrame,mLastFrame,th,true);
+    if(nmatches<20)
+    {
+        fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(nullptr));
+        nmatches = matcher.SearchByProjection(mCurrentFrame,mLastFrame,2*th,true);
+    }
+
+    if(nmatches<20)
+    {
+        fprintf(stderr, "[klt-track-diag] id=%lu kltTracked=%d ransacInliers=%d projMatches=%d<20 -- FAIL\n",
+                mCurrentFrame.mnId, nKltTracked, nInliers, nmatches);
+        return false;
+    }
+
+    int nGood = Optimizer::PoseOptimization(&mCurrentFrame);
+
+    // Discard outliers, count map-backed inliers -- identical bookkeeping
+    // to TrackWithMotionModel()'s own post-PoseOptimization block.
+    int nmatchesMap = 0;
+    for(int i=0; i<mCurrentFrame.N; i++)
+    {
+        if(mCurrentFrame.mvpMapPoints[i])
+        {
+            if(mCurrentFrame.mvbOutlier[i])
+            {
+                MapPoint* pMP = mCurrentFrame.mvpMapPoints[i];
+                mCurrentFrame.mvpMapPoints[i] = static_cast<MapPoint*>(nullptr);
+                mCurrentFrame.mvbOutlier[i] = false;
+                if(i < mCurrentFrame.Nleft)
+                    pMP->mbTrackInView = false;
+                else
+                    pMP->mbTrackInViewR = false;
+                pMP->mnLastFrameSeen = mCurrentFrame.mnId;
+                nmatches--;
+            }
+            else if(mCurrentFrame.mvpMapPoints[i]->Observations()>0)
+                nmatchesMap++;
+        }
+    }
+
+    // Same mono acceptance bar TrackWithMotionModel() itself uses
+    // (nmatchesMap>=10) -- deliberately NOT Relocalization()'s much
+    // stricter nGood>=50: this runs every frame with TrackLocalMap() as
+    // the real downstream quality gate afterward, exactly as it is for
+    // TrackWithMotionModel().
+    const bool bMatch = nmatchesMap>=10;
+
+    // [klt-track-diag] part 58 continued -- measures both phases: how
+    // often bootstrap succeeds, how many real (phase 2) matches it finds,
+    // and whether the final map-backed inlier count clears the same bar
+    // TrackWithMotionModel() uses. See DEBUGGING.md part 58.
+    fprintf(stderr, "[klt-track-diag] id=%lu kltTracked=%d ransacInliers=%d projMatches=%d nGood=%d "
+                     "nmatchesMap=%d accept=%d\n",
+            mCurrentFrame.mnId, nKltTracked, nInliers, nmatches, nGood, nmatchesMap, (int)bMatch);
 
     return bMatch;
 }
