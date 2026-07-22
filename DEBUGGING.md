@@ -1388,6 +1388,69 @@ a fundamentally different angle than "make it more like ORB-SLAM3"** --
 every variant of that angle has now been tried. v2 remains the best
 variant and stays in the code; `globalba` stays off by default.
 
+### 34. User asked directly whether real ORB-SLAM3's global BA mechanism differs further -- found it does (essential-graph Sim3 correction ALWAYS runs first, synchronously, before background GBA) -- tried the exact combination, WORST result of all 7 variants
+
+Read `LoopClosing.cc:969`'s `CorrectLoop()` directly: real ORB-SLAM3's
+actual per-loop-closure sequence is (1) `Optimizer::OptimizeEssentialGraph()`
+-- a fast, SYNCHRONOUS Sim3 pose-graph correction over the WHOLE map via
+the essential/covisibility graph, applied immediately -- THEN, only
+afterward, (2) spawn global BA in a background thread as a slower
+refinement on a map that's ALREADY been corrected. Global BA is never the
+sole/primary correction in real ORB-SLAM3, unlike every variant tried in
+items 30-33.
+
+The catch: step (1) -- essential-graph Sim3 pose-graph correction -- is
+functionally the SAME mechanism as this codebase's own
+`pose_graph::optimizePoseGraph()` (`PoseGraphOptimizer.cpp`), which was
+ALREADY independently tested 4 separate times pre-session and conclusively
+lost to live tracking every time (see this memo's own top-level summary).
+So real ORB-SLAM3's stage 1 had already failed standalone on this
+pipeline -- the untested piece was specifically the COMBINATION (stage 1
+immediately followed by stage 2, in that exact order, live at every loop
+closure), which had never been assembled together before.
+
+Implemented `SlamWorker::runPoseGraphThenGlobalBundleAdjustment()`
+(`setGlobalBaPoseGraphPolishEnabled()`, `globalbaposegraph` CLI flag):
+at each loop closure, builds the same keyframe-pose/sequential-edge/
+covisibility-edge/loop-edge snapshot `kitti_ate.cpp`'s existing one-shot
+`posegraph` CLI path already builds (reused verbatim, just invoked LIVE
+instead of once at the very end), solves via `optimizePoseGraph()`
+(`useSim3=true`, matching ORB-SLAM3's real Sim3 essential graph), writes
+the correction directly into `m_keyframeHistory`, THEN immediately calls
+`runGlobalBundleAdjustment()` (item 30's v2 warm-start fix) so its
+live-pose warm-start reads the just-corrected poses instead of raw
+drifted ones.
+
+**Measured (on top of v2, no async/soft-anchor/local-polish)**:
+**64.667m -> 174.369m** -- not just worse than v2, the WORST of all 7
+globalBA variants tried this session, worse even than v1's naive rigid
+warm-start (150.016m). Confirmed via `[posegraph][sim3][g2o]` log lines
+that the pose-graph stage genuinely converges each time it runs (e.g. one
+representative closure: cost 3895.977 -> 831.019 in 8 iterations) -- not a
+numerical failure, a real solve producing a real (but, per the 4
+pre-session confirmations, already-known-bad) correction. **Conclusion:
+combining two independently-negative mechanisms did not cancel out their
+individual weaknesses -- it compounded them.** The pose-graph stage's own
+known issue (its own Sim3 measurement/scale estimate is less reliable than
+live tracking's continuously-refined one) gets baked into the map BEFORE
+global BA even starts, so global BA's warm-start -- and every landmark
+position it reads -- inherits that error as its new "ground truth" instead
+of the better live-tracked positions v2 used to start from.
+
+**This closes the ORB-SLAM3-mechanism-matching investigation for
+`globalba` entirely.** Seven independently-designed variants (v1-v4, async,
+async+gapba, pose-graph+polish) covering every architectural difference
+identified between this codebase and real ORB-SLAM3's global BA (warm-start
+strategy, anchor hardness, background timing, spanning-tree propagation,
+continuous-refinement cadence, and now essential-graph pre-correction) all
+measured worse than simply leaving `globalba` off. This is conclusive, not
+suggestive: **do not revisit `globalba` again without a genuinely new
+mechanism outside everything ORB-SLAM3 itself does**, since matching
+ORB-SLAM3 more closely has now failed in every form tried. v2 remains the
+best variant (64.667m) and stays in the code for anyone who wants it; the
+default recommended config (`globalba` off, `fuse` + windowed `ba` +
+`localba` + VLAD) stays at **51.273m**.
+
 ### Queued next steps (not started this session, in priority order per the user's own direction)
 
 **IMPORTANT: the reference baseline changed this session** -- item 19's
