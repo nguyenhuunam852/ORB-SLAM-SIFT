@@ -492,6 +492,29 @@ constexpr double kLocalBaPosePriorTransWeight = 3.0; // world-units -- looser th
                                                       // bit) but still firmly bounded, unlike the prior
                                                       // attempt's unconstrained-until-window-exit scheme
 
+constexpr double kGlobalBaLoopPosePriorRotWeight = 50.0; // runGlobalBundleAdjustment()'s v3 (DEBUGGING.md
+                                                          // item 32): SOFT prior pulling newKfIdx toward
+                                                          // the independently PnP/Sim3Solver-verified loop
+                                                          // pose, replacing the original HARD anchor
+                                                          // (SetParameterBlockConstant) -- real ORB-SLAM3
+                                                          // never hard-pins a loop pose inside its global
+                                                          // BA (only the map's origin keyframe is fixed;
+                                                          // the loop correction is a separate essential-
+                                                          // graph propagation step this codebase doesn't
+                                                          // have). Stronger than kLocalBaPosePriorRotWeight
+                                                          // (20.0) since this is an independently verified
+                                                          // measurement, not just "stay close to your own
+                                                          // last live estimate" -- but finite, unlike the
+                                                          // old hard constant. Untuned.
+constexpr double kGlobalBaLoopPosePriorTransWeight = 50.0; // see kGlobalBaLoopPosePriorRotWeight. Unlike
+                                                            // kLocalBaPosePriorTransWeight's deliberately
+                                                            // LOOSER translation weight (real local
+                                                            // corrections need room to move translation),
+                                                            // kept equal to the rotation weight here since
+                                                            // the loop measurement's translation component
+                                                            // (Sim3Solver-derived) is just as directly
+                                                            // trusted as its rotation. Untuned.
+
 constexpr double kOxtsPnpStepToleranceMultiplier = 3.0; // trackFrame()'s OXTS-aware plausibility check
                                                           // (see setOxtsImuInPnpEnabled()): accept a PnP
                                                           // step within this factor of the OXTS-measured
@@ -3940,6 +3963,44 @@ bool SlamWorker::runLoopBundleAdjustment(int oldKfIdx, int newKfIdx, const cv::M
     return true;
 }
 
+bool SlamWorker::runPoseGraphThenGlobalBundleAdjustment(int newKfIdx, const cv::Mat &loopR, const cv::Mat &loopT,
+                                                          const std::unordered_set<long long> &loopVerifiedIds)
+{
+    const std::vector<pose_graph::LoopClosureRecord> &loops = loopClosureRecords();
+    if (loops.empty())
+        return runGlobalBundleAdjustment(newKfIdx, loopR, loopT, loopVerifiedIds); // nothing for the
+                                                                                     // pose graph to
+                                                                                     // correct yet
+
+    std::vector<pose_graph::KeyframePose> keyframes = keyframePoses();
+    std::vector<pose_graph::SequentialEdgeRecord> sequential = sequentialEdgeRecords();
+    const std::vector<pose_graph::SequentialEdgeRecord> covis = covisibilityEdgeRecords();
+    sequential.insert(sequential.end(), covis.begin(), covis.end());
+
+    pose_graph::PoseGraphOptions pgOptions;
+    pgOptions.useSim3 = true; // matches ORB-SLAM3's real essential-graph Sim3 correction (7-DOF,
+                              // scale-aware) -- see PoseGraphOptions::useSim3's own doc comment
+    std::vector<pose_graph::KeyframePose> warmStart;
+    if (pose_graph::optimizePoseGraph(keyframes, sequential, loops, pgOptions, &warmStart)) {
+        for (size_t i = 0; i < keyframes.size() && i < m_keyframeHistory.size(); ++i) {
+            m_keyframeHistory[i].R = keyframes[i].R.clone();
+            m_keyframeHistory[i].t = keyframes[i].t.clone();
+        }
+        std::fprintf(stderr,
+                      "[globalba][posegraph] essential-graph-style Sim3 correction applied to %zu keyframes "
+                      "(%zu sequential+covisibility edges, %zu loop edges), now polishing with global BA\n",
+                      keyframes.size(), sequential.size(), loops.size());
+    } else {
+        std::fprintf(stderr, "[globalba][posegraph] pose-graph solve failed, skipping straight to global BA\n");
+    }
+
+    // Global BA's own warm-start (item 30's v2 fix) reads m_keyframeHistory's
+    // CURRENT poses -- now the pose-graph-corrected ones if the solve above
+    // succeeded, so it polishes an already-corrected map instead of a raw
+    // drifted one, mirroring real ORB-SLAM3's CorrectLoop()-then-GBA order.
+    return runGlobalBundleAdjustment(newKfIdx, loopR, loopT, loopVerifiedIds);
+}
+
 bool SlamWorker::runGlobalBundleAdjustment(int newKfIdx, const cv::Mat &loopR, const cv::Mat &loopT,
                                             const std::unordered_set<long long> &loopVerifiedIds)
 {
@@ -4045,13 +4106,25 @@ bool SlamWorker::runGlobalBundleAdjustment(int newKfIdx, const cv::Mat &loopR, c
     if (residualCount == 0)
         return false;
 
-    // Two hard anchors spanning the whole graph: keyframe 0 (world origin)
-    // and newKfIdx (the independently PnP-verified loop pose) -- see
-    // kGlobalBaMaxWindowKeyframes's doc comment for why this, unlike
-    // continuous local BA's single self-referential anchor, doesn't risk
-    // the same scale-collapse failure mode.
+    // Hard anchor at keyframe 0 (world origin) always -- pure gauge-fixing,
+    // no ORB-SLAM3 analogue to diverge from. newKfIdx (the independently
+    // PnP-verified loop pose) is EITHER also hard-anchored (default,
+    // "two hard anchors spanning the whole graph" -- see
+    // kGlobalBaMaxWindowKeyframes's doc comment for why this doesn't risk
+    // continuous local BA's scale-collapse failure mode) OR, when
+    // setGlobalBaSoftLoopAnchorEnabled() is on (DEBUGGING.md item 32, v3),
+    // left FREE and pulled toward the same loop measurement by a soft
+    // PosePriorCost residual instead -- matching real ORB-SLAM3's own
+    // choice to never hard-pin a loop pose inside global BA itself (only
+    // the origin keyframe is fixed there).
     problem.SetParameterBlockConstant(poses.front().data());
-    problem.SetParameterBlockConstant(poses.back().data());
+    if (m_globalBaSoftLoopAnchorEnabled) {
+        problem.AddResidualBlock(
+            PosePriorCost::Create(poses.back(), kGlobalBaLoopPosePriorRotWeight, kGlobalBaLoopPosePriorTransWeight),
+            nullptr, poses.back().data());
+    } else {
+        problem.SetParameterBlockConstant(poses.back().data());
+    }
 
     ceres::Solver::Options options;
     options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
@@ -4142,6 +4215,25 @@ bool SlamWorker::runGlobalBundleAdjustment(int newKfIdx, const cv::Mat &loopR, c
             }
         }
     }
+
+    // DEBUGGING.md item 33 (v4): user's hypothesis -- continuous local BA
+    // re-solves the SAME trailing window many times over successive
+    // keyframe insertions before any given loop closure, so by the time it
+    // fires those poses are already well-converged; global BA gets exactly
+    // ONE shot at the WHOLE map, including old keyframes no optimizer has
+    // touched in a long time, and has to do in one solve what local BA
+    // achieves through dozens of incremental re-solves. Re-running
+    // literally the SAME residuals again is a no-op (Ceres LM already
+    // iterates internally to convergence) -- instead, immediately follow
+    // global BA with ONE call to the existing, independently-proven
+    // runLocalBundleAdjustment() over the trailing window, letting it
+    // "polish" the just-corrected recent keyframes with its own
+    // already-validated mechanism (pose-prior regularizer, its own
+    // observation density fix) rather than trusting global BA's one-shot
+    // result as final for the most tracking-critical (most recent) part of
+    // the map.
+    if (m_globalBaPolishEnabled)
+        runLocalBundleAdjustment();
 
     return true;
 }
@@ -5099,7 +5191,10 @@ void SlamWorker::tryLoopClosure(size_t newKeyframeIndex)
     // that's actually feasible for its own span, never just interpolation
     // when a real solve was available.
     bool baApplied = false;
-    if (m_globalBundleAdjustmentEnabled)
+    if (m_globalBundleAdjustmentEnabled && m_globalBaPoseGraphPolishEnabled)
+        baApplied = runPoseGraphThenGlobalBundleAdjustment(static_cast<int>(newKeyframeIndex), loopR, loopT,
+                                                             loopVerifiedIds);
+    else if (m_globalBundleAdjustmentEnabled)
         baApplied = runGlobalBundleAdjustment(static_cast<int>(newKeyframeIndex), loopR, loopT, loopVerifiedIds);
     if (!baApplied && m_loopBundleAdjustmentEnabled)
         baApplied = runLoopBundleAdjustment(bestIdx, static_cast<int>(newKeyframeIndex), loopR, loopT, loopVerifiedIds);

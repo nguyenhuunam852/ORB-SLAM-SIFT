@@ -1266,12 +1266,127 @@ handle the gap keyframes (e.g. re-running a small local BA over just the
 gap after integration, using the corrected anchor as a new prior, instead
 of a single rigid chain delta).
 
-**Overall globalBA conclusion this item**: baseline (off) 51.273m < v2
-warm-start-only 64.667m < async 136.095m < v1 original 150.016m. Warm-start
-is a real, load-bearing fix and should be kept in the code even though
-`globalba` stays off by default (the fix reduces harm if anyone re-enables
-it later); the async/propagation experiment is closed negative for this
-codebase's simplified architecture.
+### 31. User explicitly asked for globalBA to beat live tracking -- implemented the exact fix item 30 flagged as untried (real windowed BA over the async gap, not just a rigid patch) -- helped a lot, still not enough
+
+Direct follow-up to item 30's own closing recommendation ("re-running a
+small local BA over just the gap... instead of a single rigid chain
+delta"). Added `SlamWorker::runGapBundleAdjustment(anchorKfIdx, endKfIdx)`
+-- a new single-hard-anchor windowed BA (only `anchorKfIdx` fixed, at its
+just-integrated corrected pose; everything through `endKfIdx` is a FREE
+parameter, unlike loop-BA/global-BA's double anchor) that reuses the same
+dense `m_keyframeObservedLandmarkIds` observation-gathering pattern as
+loop/global BA. Wired into `tryIntegratePendingGlobalBa()`
+(`setGlobalBaGapRefinementEnabled()`, `gapba` CLI flag, requires
+`globalbaasync`): the rigid-delta chain propagation from item 30 still
+runs first as a WARM START (not trusted as final), then this actually
+re-optimizes the gap keyframes against real reprojection residuals.
+
+**Measured (`globalbaasync gapba`, on top of item 30's mechanism-1 warm-start
+fix)**: **async's 136.095m -> 98.154m**, a real ~28% improvement --
+confirms real re-optimization of gap keyframes genuinely helps over a bare
+rigid patch, exactly as hypothesized. **But still worse than both the
+51.273m baseline AND item 30's simple immediate-write v2 (64.667m).**
+**Conclusion: the DELAY itself (not just how gap keyframes are handled) is
+the dominant cost of the async simulation** -- even with a real, correctly-
+converging BA solve over the gap (cost dropped from the 1e12-1e15 range
+down to 1e7-1e8 range in every observed `[gapba]` log line, confirming
+genuine convergence, not a numerical failure), delaying the correction by
+`kGlobalBaIntegrationDelayKeyframes` (15) keyframes before applying ANY
+correction at all is worse than just applying it immediately. **Closed --
+the whole async/deferred-integration direction (items 30's mechanisms
+2+3) is now conclusively negative regardless of gap-keyframe handling
+sophistication; do not revisit without questioning the delay itself, not
+just the propagation method.**
+
+### 32. Tried replacing the hard loop-pose anchor with a soft prior (v3, matching ORB-SLAM3's real single-origin-anchor choice exactly) -- also negative
+
+User pushed further on item 30's mechanism-1 win (v2, 64.667m, still 13.4m/26%
+behind the 51.273m baseline): one remaining deliberate divergence from real
+ORB-SLAM3 was `runGlobalBundleAdjustment()`'s TWO hard anchors (keyframe 0
+AND newKfIdx, both `SetParameterBlockConstant`) vs. ORB-SLAM3's real
+`Optimizer::BundleAdjustment()`, which only ever fixes the map's origin
+keyframe -- it never hard-pins a loop pose inside global BA itself (that
+correction is a separate essential-graph propagation step this codebase
+doesn't have). Implemented `setGlobalBaSoftLoopAnchorEnabled()`
+(`softloopanchor` CLI flag): keyframe 0 stays hard-anchored (pure
+gauge-fixing, no ORB-SLAM3 analogue to diverge from), but newKfIdx becomes
+a FREE parameter pulled toward the same loop measurement via a new soft
+`PosePriorCost` residual (`kGlobalBaLoopPosePriorRotWeight`/
+`TransWeight`, both 50.0, untuned) instead of an equality constraint --
+reusing the same `PosePriorCost` struct `runLocalBundleAdjustment()`
+already established for its own single-anchor gauge-fixing.
+
+**Measured (on top of v2's warm-start fix, immediate write-back, no
+async)**: **64.667m -> 106.747m**, WORSE, not better. **Conclusion: for
+this pipeline, hard-anchoring the loop-verified pose is actually HELPING,
+not hurting** -- plausible explanation: the Sim3Solver/PnP-RANSAC loop
+measurement already carries strong internal evidence (many inliers, a
+real geometric verification pass), so treating it as authoritative (hard
+constraint) gives the optimizer a cleaner, better-conditioned problem than
+adding an extra soft degree of freedom that lets the solution drift away
+from a measurement that was already trustworthy. Matching ORB-SLAM3's
+literal mechanism more closely does NOT automatically transfer to this
+simplified pipeline -- the THIRD time this session a "more faithful to
+ORB-SLAM3" change measured negative (after items 30's async/propagation
+and this one). **Closed, negative.** Reverted to the double-hard-anchor
+default (`softloopanchor` stays off).
+
+**Final globalBA ranking, all 5 variants tried this session**: baseline
+(off) **51.273m** < v2 (live warm-start, 2 hard anchors) **64.667m** <
+async+gapba **98.154m** < v3 (live warm-start, soft loop prior)
+**106.747m** < async (rigid propagation only) **136.095m** < v1 (rigid
+warm-start, 2 hard anchors) **150.016m**. No variant of `globalba` beat
+live tracking. v2 (item 30's mechanism-1 fix alone, nothing else) remains
+the best of the 5 and the one worth keeping in code if `globalba` is ever
+revisited, but the flag stays off by default. Three independent
+experiments this session (async/spanning-tree simulation, soft loop
+anchor, and -- from item 27 -- Phase B's re-triangulation) all confirm the
+same pattern: changes that more faithfully replicate a specific ORB-SLAM3
+mechanism do not automatically transfer to this simplified,
+single-threaded, hand-rolled pipeline, and must always be re-measured, not
+assumed.
+
+### 33. User's 6th globalBA hypothesis: continuous local BA re-solves the same window many times before any given loop closure, so global BA's one-shot solve is structurally disadvantaged -- follow up with a local-BA "polish" pass -- also negative
+
+User's own hypothesis, well-reasoned: continuous local BA (when enabled)
+re-optimizes the SAME trailing `m_localBaWindowKeyframes`-sized window on
+EVERY keyframe insertion -- dozens of incremental re-solves by the time any
+given loop closure fires -- while global BA gets exactly ONE shot at the
+whole map in one Ceres solve. Re-running the identical residual set again
+would be a no-op (LM already iterates internally to convergence), so
+instead implemented `setGlobalBaPolishEnabled()` (`globalbapolish` CLI
+flag): immediately follows a successful `runGlobalBundleAdjustment()` with
+one call to the existing, independently-proven `runLocalBundleAdjustment()`
+over the trailing window, "polishing" the most recent/most
+tracking-critical keyframes with local BA's own already-validated
+mechanism instead of trusting global BA's one-shot result as final for
+them.
+
+**Measured (v2's warm-start fix + polish, no async/soft-anchor)**:
+**64.667m -> 122.565m**, WORSE. Also a real drop in tracked frames
+(4045/4541 matched vs v2's 4521/4541 -- 476 fewer), not just a worse
+alignment -- a genuine tracking-robustness regression, the same signature
+item 28's original globalBA v1 and other negative variants showed.
+**Closed, negative** -- the 6th independently-designed globalBA variant
+this session, and the 3rd built directly from a specific, well-reasoned
+user hypothesis (after async+gapba and soft-loop-anchor), to measure
+worse than simply leaving `globalba` off.
+
+**Session-final globalBA verdict**: 6/6 variants tried (v1 rigid
+warm-start, v2 live warm-start, v3 soft loop anchor, v4 polish, async
+rigid-only, async+gapba) all measured worse than the 51.273m baseline.
+Every specific, well-motivated hypothesis this session raised for closing
+the gap -- matching ORB-SLAM3's real warm-start, its real single-anchor
+choice, its real background-thread timing, and now its real continuous-
+refinement cadence -- was implemented and measured negative. This is now
+strong evidence of a genuine structural limitation of this specific
+codebase (continuous windowed local/loop BA is apparently already very
+well-suited to its own single-threaded, incremental-tracking architecture,
+and one-shot whole-map joint optimization doesn't compose well with it),
+not a tuning gap. **Recommend not investing further in `globalba` without
+a fundamentally different angle than "make it more like ORB-SLAM3"** --
+every variant of that angle has now been tried. v2 remains the best
+variant and stays in the code; `globalba` stays off by default.
 
 ### Queued next steps (not started this session, in priority order per the user's own direction)
 

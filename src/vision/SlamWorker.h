@@ -584,6 +584,37 @@ public slots:
     // real, anchored only at the just-corrected trigger keyframe.
     void setGlobalBaGapRefinementEnabled(bool enabled) { m_globalBaGapRefinementEnabled = enabled; }
 
+    // Default off: DEBUGGING.md item 32 (v3). runGlobalBundleAdjustment()
+    // normally hard-anchors BOTH kf#0 AND newKfIdx (the loop-verified
+    // pose) via SetParameterBlockConstant -- real ORB-SLAM3 only ever
+    // fixes the map's origin keyframe, never hard-pins a loop pose inside
+    // global BA itself. When this is on, newKfIdx is left as a FREE
+    // parameter, pulled toward the loop measurement by a soft
+    // PosePriorCost residual (kGlobalBaLoopPosePriorRotWeight/
+    // TransWeight) instead of an equality constraint -- lets the solver
+    // reconcile the loop measurement against the rest of the graph rather
+    // than treating it as gospel. kf#0 stays hard-anchored either way (a
+    // pure gauge-fixing choice, not a "trust this measurement" one, so it
+    // has no ORB-SLAM3 analogue to diverge from).
+    void setGlobalBaSoftLoopAnchorEnabled(bool enabled) { m_globalBaSoftLoopAnchorEnabled = enabled; }
+
+    // Default off: DEBUGGING.md item 33 (v4). Immediately follows a
+    // successful runGlobalBundleAdjustment() with ONE call to the existing
+    // runLocalBundleAdjustment() over the trailing window -- see
+    // runGlobalBundleAdjustment()'s own doc comment at the call site for
+    // the full hypothesis (continuous local BA re-solves the same window
+    // many times before any given loop closure; global BA only ever gets
+    // one shot at the whole map, so this "polishes" the most recent,
+    // most tracking-critical keyframes with local BA's own independently-
+    // proven mechanism instead of trusting global BA's one-shot result).
+    void setGlobalBaPolishEnabled(bool enabled) { m_globalBaPolishEnabled = enabled; }
+
+    // Default off, requires setGlobalBundleAdjustmentEnabled() to also be
+    // on: DEBUGGING.md item 34. See runPoseGraphThenGlobalBundleAdjustment()'s
+    // own doc comment. Takes priority over the plain runGlobalBundleAdjustment()
+    // path when both this and setGlobalBundleAdjustmentEnabled() are on.
+    void setGlobalBaPoseGraphPolishEnabled(bool enabled) { m_globalBaPoseGraphPolishEnabled = enabled; }
+
     // Default off: when on, trackFrame() matches against the covisibility-
     // driven local map (see buildCovisibilityLocalMap()) instead of the
     // flat rolling m_mapPoints/m_mapDescriptors -- more relevant candidate
@@ -1014,6 +1045,28 @@ private:
     // keyframes against actual observations while GBA solves in the
     // background.
     bool runGapBundleAdjustment(int anchorKfIdx, int endKfIdx);
+
+    // See setGlobalBaPoseGraphPolishEnabled()/DEBUGGING.md item 34: real
+    // ORB-SLAM3's LoopClosing::CorrectLoop() runs a fast, synchronous
+    // Optimizer::OptimizeEssentialGraph() (Sim3 pose-graph over the WHOLE
+    // map) FIRST, and only afterward spawns global BA in a background
+    // thread as a slower refinement on an ALREADY-corrected map --
+    // global BA is never the primary/only correction in real ORB-SLAM3,
+    // unlike every other variant tried this session. Builds a
+    // pose_graph::KeyframePose snapshot (keyframePoses()) + sequential
+    // (sequentialEdgeRecords() + covisibilityEdgeRecords()) + loop
+    // (loopClosureRecords()) edges -- exactly what kitti_ate.cpp's own
+    // one-shot end-of-run `posegraph` CLI path already builds, just
+    // invoked LIVE at this specific loop closure instead of once after
+    // the whole sequence finishes -- solves via pose_graph::
+    // optimizePoseGraph() (Sim3/useSim3=true, matching ORB-SLAM3's real
+    // essential graph), writes the correction directly into
+    // m_keyframeHistory on success, then calls
+    // runGlobalBundleAdjustment() immediately after (item 30's v2 warm-
+    // start fix, the best-measured globalBA variant, now warm-starting
+    // from the pose-graph-corrected poses instead of raw live ones).
+    bool runPoseGraphThenGlobalBundleAdjustment(int newKfIdx, const cv::Mat &loopR, const cv::Mat &loopT,
+                                                 const std::unordered_set<long long> &loopVerifiedIds);
 
     // See setCovisibilityLocalMapEnabled(). Rebuilds m_localMapPoints/
     // m_localMapDescriptors/m_localMapPointIds from the keyframes covisible
@@ -1492,6 +1545,9 @@ private:
     // See setGlobalBundleAdjustmentAsyncEnabled()/tryIntegratePendingGlobalBa().
     bool m_globalBundleAdjustmentAsyncEnabled = false;
     bool m_globalBaGapRefinementEnabled = false; // see setGlobalBaGapRefinementEnabled()
+    bool m_globalBaSoftLoopAnchorEnabled = false; // see setGlobalBaSoftLoopAnchorEnabled()
+    bool m_globalBaPolishEnabled = false; // see setGlobalBaPolishEnabled()
+    bool m_globalBaPoseGraphPolishEnabled = false; // see setGlobalBaPoseGraphPolishEnabled()
     bool m_pendingGlobalBaValid = false;
     int m_pendingGlobalBaTriggerKfIdx = -1;
     int m_pendingGlobalBaIntegrateAtKfIdx = -1;

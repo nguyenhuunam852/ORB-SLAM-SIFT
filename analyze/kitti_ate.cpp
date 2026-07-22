@@ -537,6 +537,36 @@ int main(int argc, char *argv[])
         std::fprintf(stderr, "[config] global BA async gap refinement enabled\n");
     }
 
+    // argv[45]: pass the literal word 'softloopanchor' (requires
+    // 'globalba') to enable SlamWorker::setGlobalBaSoftLoopAnchorEnabled()
+    // -- DEBUGGING.md item 32 (v3): replaces the hard anchor at newKfIdx
+    // with a soft PosePriorCost residual, matching real ORB-SLAM3's own
+    // choice to only ever hard-fix the map's origin keyframe.
+    if (argc > 45 && std::strcmp(argv[45], "softloopanchor") == 0) {
+        worker.setGlobalBaSoftLoopAnchorEnabled(true);
+        std::fprintf(stderr, "[config] global BA soft loop-pose anchor enabled\n");
+    }
+
+    // argv[46]: pass the literal word 'globalbapolish' (requires
+    // 'globalba') to enable SlamWorker::setGlobalBaPolishEnabled() --
+    // DEBUGGING.md item 33 (v4): follows global BA with one
+    // runLocalBundleAdjustment() pass over the trailing window.
+    if (argc > 46 && std::strcmp(argv[46], "globalbapolish") == 0) {
+        worker.setGlobalBaPolishEnabled(true);
+        std::fprintf(stderr, "[config] global BA polish (local BA pass after global BA) enabled\n");
+    }
+
+    // argv[47]: pass the literal word 'globalbaposegraph' (requires
+    // 'globalba') to enable SlamWorker::setGlobalBaPoseGraphPolishEnabled()
+    // -- DEBUGGING.md item 34: runs a live essential-graph-style Sim3
+    // pose-graph correction immediately before global BA at each loop
+    // closure, matching real ORB-SLAM3's CorrectLoop()-then-background-GBA
+    // order (global BA is never the sole/primary correction there).
+    if (argc > 47 && std::strcmp(argv[47], "globalbaposegraph") == 0) {
+        worker.setGlobalBaPoseGraphPolishEnabled(true);
+        std::fprintf(stderr, "[config] global BA pose-graph-first polish enabled\n");
+    }
+
     if (argc > 9 && std::strcmp(argv[9], "groundplane") == 0) {
         worker.setGroundPlaneEnabled(true);
         std::fprintf(stderr, "[config] ground-plane scale correction enabled (VISO2-M-style fallback)\n");
