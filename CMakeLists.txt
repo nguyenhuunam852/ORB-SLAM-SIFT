@@ -53,6 +53,7 @@ set(BOOST_INCLUDE_DIR "$ENV{HOME}/miniconda3/envs/myenv/include" CACHE PATH
 add_library(DBoW2 STATIC
     third_party/DBoW2/DBoW2/BowVector.cpp
     third_party/DBoW2/DBoW2/FORB.cpp
+    third_party/DBoW2/DBoW2/FRootSift.cpp
     third_party/DBoW2/DBoW2/FeatureVector.cpp
     third_party/DBoW2/DBoW2/ScoringObject.cpp
     third_party/DBoW2/DUtils/Random.cpp
@@ -295,6 +296,22 @@ add_executable(orbslam3_vlad_train analyze/orbslam3_vlad_train.cpp)
 target_include_directories(orbslam3_vlad_train PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(orbslam3_vlad_train PRIVATE orbslam3_sift_ext)
 
+# DBoW2 vocabulary trainer for THIS project's own SlamWorker/kitti_ate
+# pipeline's RootSIFT descriptor space (see analyze/train_sift_dbow_vocabulary.cpp
+# and third_party/DBoW2/DBoW2/FRootSift.h/.cpp) -- distinct from
+# orbslam3_vlad_train above, which targets the separate
+# third_party/ORB_SLAM3_SIFT fork's own VLAD codebook. Links FeatureDetector.cpp
+# directly (not the full SlamWorker/kitti_ate target) so the training-time
+# extraction path is the exact same compiled code SlamWorker::rebuildDetector()
+# uses, without pulling in Qt/Ceres/g2o at all.
+add_executable(train_sift_dbow_vocabulary
+    analyze/train_sift_dbow_vocabulary.cpp
+    src/vision/FeatureDetector.cpp
+    src/vision/FeatureDetector.h
+)
+target_include_directories(train_sift_dbow_vocabulary PRIVATE src ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(train_sift_dbow_vocabulary PRIVATE ${OpenCV_LIBS} DBoW2)
+
 # Stage 4 threshold-calibration tool (see analyze/orbslam3_sift_calibrate.cpp).
 add_executable(orbslam3_sift_calibrate analyze/orbslam3_sift_calibrate.cpp)
 target_include_directories(orbslam3_sift_calibrate PRIVATE ${OpenCV_INCLUDE_DIRS})
@@ -316,6 +333,7 @@ set(SOURCES
     src/vision/LoopEstimator.cpp
     src/vision/PoseGraphOptimizer.cpp
     src/vision/FeatureDetector.cpp
+    src/vision/VladVocabulary.cc
 )
 
 set(HEADERS
@@ -337,6 +355,7 @@ set(HEADERS
     src/vision/LoopEstimator.h
     src/vision/PoseGraphOptimizer.h
     src/vision/FeatureDetector.h
+    src/vision/VladVocabulary.h
 )
 
 add_executable(sift_vslam_gui ${SOURCES} ${HEADERS})
@@ -373,6 +392,8 @@ add_executable(sift_vslam_debug
     src/vision/PoseGraphOptimizer.h
     src/vision/FeatureDetector.cpp
     src/vision/FeatureDetector.h
+    src/vision/VladVocabulary.cc
+    src/vision/VladVocabulary.h
 )
 target_include_directories(sift_vslam_debug PRIVATE src ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(sift_vslam_debug PRIVATE
@@ -406,6 +427,8 @@ add_executable(kitti_ate
     src/vision/PoseGraphOptimizer.h
     src/vision/FeatureDetector.cpp
     src/vision/FeatureDetector.h
+    src/vision/VladVocabulary.cc
+    src/vision/VladVocabulary.h
 )
 target_include_directories(kitti_ate PRIVATE src ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(kitti_ate PRIVATE

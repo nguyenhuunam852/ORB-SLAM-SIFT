@@ -35,10 +35,12 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <random>
 
 namespace {
@@ -123,13 +125,14 @@ constexpr int kMaxFramesElapsedForRescale = 15; // cap how many frames' worth of
                                                  // cover -- otherwise a long stuck stretch inflates
                                                  // the rescaled step to an arbitrarily huge, made-up
                                                  // distance once something finally passes again
-constexpr double kDetectionScale = 0.5; // SIFT cost is dominated by scale-space pyramid
-                                         // construction over the image, not by nFeatures --
-                                         // detecting on a half-resolution copy cuts it from
-                                         // ~70ms/frame to ~18ms (measured on KITTI's 1240x376
-                                         // frames), which is what was starving the ~100ms
-                                         // per-frame budget. Keypoints are rescaled back to
-                                         // full-resolution pixel coordinates right after detection.
+// kDetectionScale moved to SlamWorker::m_detectionScale (see setDetectionScale()) -- was a fixed
+// constexpr here, default value (0.5) unchanged. SIFT cost is dominated by scale-space pyramid
+// construction over the image, not by nFeatures -- detecting on a half-resolution copy cuts it
+// from ~70ms/frame to ~18ms (measured on KITTI's 1240x376 frames), which is what was starving the
+// live GUI's ~100ms per-frame real-time budget. Keypoints are rescaled back to full-resolution
+// pixel coordinates right after detection. That real-time constraint doesn't apply to an offline,
+// unthrottled harness like kitti_ate (see its own startUnthrottled() call), which is why this
+// became overridable instead of staying fixed.
 constexpr double kMaxTriangulationDepth = 1000.0;
 constexpr double kFRansacSampsonThreshold = 1.0; // squared-pixel Sampson error -- still used by
                                                   // estimateEssentialRansac() to score E candidates
@@ -168,6 +171,80 @@ constexpr double kDbowMinScore = 0.015; // tryLoopClosure()'s DBoW2 branch (see 
                                          // simpler integration doesn't replicate), kept low deliberately so
                                          // a missed threshold shows up as too many false positives (visible
                                          // in the [loop] log) rather than silently finding zero loops at all.
+constexpr double kSiftDbowMinScore = 0.015; // tryLoopClosure()'s SIFT-DBoW2 branch (see
+                                             // setSiftDbowLoopClosureEnabled()): same L1-based score() range
+                                             // and same untuned-per-sequence-estimate spirit as kDbowMinScore
+                                             // (the ORB-DBoW2 threshold) -- kept as its own constant rather
+                                             // than reused directly since it's a different vocabulary trained
+                                             // on different data (RootSIFT, not ORB), so the two may need to
+                                             // diverge once real measurements exist.
+constexpr double kVladMinScore = 0.05; // tryLoopClosure()'s VLAD branch (see setVladLoopClosureEnabled()):
+                                        // minimum cosine-similarity score() between two keyframes' VLAD
+                                        // vectors to treat one as a loop candidate for the other. Reference
+                                        // data from this codebase's own VLAD sanity check (RootSIFT
+                                        // codebook, see vocabulary_sift/vlad_codebook_all_rootsift.yml's
+                                        // training log): adjacent-frame similarity ~0.45, distant-frame
+                                        // (frame0<->frame200) similarity ~0.006 -- 0.05 sits well above the
+                                        // distant-frame noise floor while staying well below a genuine
+                                        // revisit's score, same untuned-per-sequence-estimate spirit as
+                                        // kDbowMinScore above.
+constexpr double kLoopMaxCorrectionMagnitude = 100000.0; // tryLoopClosure()'s degenerate-solve guard
+                                                           // (see its own doc comment at the check site
+                                                           // for the full reasoning) -- world units,
+                                                           // ~50x the largest genuine loop correction
+                                                           // observed across sessions (~2000 units), so
+                                                           // it only ever engages for numerically
+                                                           // pathological PnP solves, never real drift.
+constexpr double kLoopMaxCorrectionAngleDeg = 90.0; // same guard, rotation component -- ~3x the largest
+                                                     // genuine correction observed (~30 degrees).
+constexpr int kLoopConsistencyRequiredCount = 3; // setLoopConsistencyGroupEnabled()'s own gate: matches
+                                                  // real ORB-SLAM3's mnLoopNumCoincidences>=3 threshold
+                                                  // exactly (LoopClosing.cc) -- not independently tuned.
+constexpr int kLoopConsistencyOldIdxWindow = 5; // how close two confirmations' matched old-keyframe
+                                                 // indices must be to count as "the same place" --
+                                                 // untuned-per-sequence estimate (this codebase has no
+                                                 // covisibility-group structure to check membership
+                                                 // against instead, see setLoopConsistencyGroupEnabled()'s
+                                                 // own doc comment for why this is a simplified stand-in).
+constexpr size_t kLoopConsistencyMaxGapKeyframes = 4; // how many new-keyframe insertions may pass between
+                                                       // two confirmations of the same pending candidate
+                                                       // before treating the streak as stale and
+                                                       // restarting it -- roughly half a kKeyframeEveryNFrames
+                                                       // cycle's worth of slack, untuned.
+constexpr int kSim3SolverMinCorrespondences = 8; // solveSim3Ransac()'s own call site in
+                                                  // tryLoopClosure(): below this many descriptor-matched
+                                                  // 3D-3D correspondences, don't even attempt RANSAC (the
+                                                  // minimal solve itself only needs 3, but a meaningful
+                                                  // inlier-consensus vote needs real headroom above that)
+constexpr int kSim3SolverMinInliers = 6; // matches ORB-SLAM3's own Sim3Solver default (minInliers=6,
+                                          // see Sim3Solver::SetRansacParameters()) -- below this many
+                                          // RANSAC inliers, don't trust the found Sim3 at all, fall back
+                                          // to the single-point ratio instead
+constexpr double kMinScaleMeasBaseline = 20.0; // world units -- tryLoopClosure()'s scaleMeas guard.
+                                                // scaleMeas = distLoop/distDrifted is a ratio of two
+                                                // camera-center distances that are often genuinely tiny
+                                                // for a real revisit (the whole point of a loop closure
+                                                // is the two keyframes are spatially close), which makes
+                                                // the ratio numerically ill-conditioned right when it
+                                                // matters most -- confirmed empirically (2026-07-21):
+                                                // measured scaleMeas swung 0.0058 to 16.27 across early
+                                                // closures, and the wild values consistently paired with
+                                                // at least one of distDrifted/distLoop being small, while
+                                                // measurements with both distances comfortably above this
+                                                // floor stayed tightly clustered near a plausible 0.99-1.23.
+                                                // Below this floor there simply isn't enough baseline to
+                                                // trust the ratio, so scaleMeas falls back to the neutral
+                                                // 1.0 (same as before this measurement existed) rather than
+                                                // propagating noise into the Sim3 solve.
+constexpr double kScaleMeasClampMin = 0.3; // even above the baseline floor, bound the trusted ratio to a
+constexpr double kScaleMeasClampMax = 3.0; // plausible range -- real monocular scale drift observed in
+                                            // this pipeline's own "clean" measurements never approached
+                                            // this, so anything beyond it is far more likely leftover
+                                            // numerical noise (e.g. from an already-huge PnP correction,
+                                            // see kLoopMaxCorrectionMagnitude) than genuine drift, and an
+                                            // unclamped outlier can otherwise dominate the DCS-weighted
+                                            // Sim3 solve (confirmed: an unclamped run produced a single
+                                            // loop edge with chi2=39M, swamping the rest of the graph).
 constexpr int kLocalRefineWindow = 6; // how many of the most-recent keyframes refineLocalKeyframes()
                                        // re-polishes via nonlinear reprojection-error minimization on
                                        // every new keyframe insertion
@@ -230,15 +307,21 @@ constexpr double kLoopVerifiedResidualWeight = 25.0; // squared-cost multiplier 
                                                       // constraint that would break if the loop
                                                       // measurement itself has any of its own noise.
 constexpr int kBaMaxIterations = 50;
-constexpr int kBaMaxWindowKeyframes = 200; // skip BA (fall back to the interpolated correction) for a
-                                            // loop window wider than this -- confirmed this session an
-                                            // end-of-sequence loop (car returns near its exact start)
-                                            // can span 400+ keyframes and 20000+ landmarks, and solving
-                                            // that is slow enough that several such windows firing in
-                                            // quick succession blew through kitti_ate's time budget
-                                            // entirely. Interpolation is fast and already reasonable
-                                            // for a window this large anyway (it's cheap regardless of
-                                            // size); BA's per-window cost is what doesn't scale.
+constexpr int kBaMaxWindowKeyframes = 600; // skip BA (fall back to the interpolated correction) for a
+                                            // loop window wider than this -- raised from 200 to 600
+                                            // (2026-07-21): confirmed the ORIGINAL 200 cap made EVERY
+                                            // end-of-sequence "return near start" closure (observed:
+                                            // 5 in a row, kf#0-9 <-> kf#471-479, span ~470) fall
+                                            // through to interpolation even after fixing the separate
+                                            // global-BA-doesn't-fall-back-to-windowed bug, since these
+                                            // spans exceed 200 too -- exactly the kind of correction
+                                            // where a real reprojection-error solve matters most (the
+                                            // whole sequence's accumulated drift, not a local
+                                            // discrepancy). 200 was chosen purely for kitti_ate's time
+                                            // budget, not solve quality -- see git history/this
+                                            // comment's prior text for the specific timeout observed;
+                                            // that's a harness concern (raise --seconds), not a reason
+                                            // to leave real drift uncorrected.
 // Full global BA (see setGlobalBundleAdjustmentEnabled()): unlike
 // kBaMaxWindowKeyframes's windowed loop BA (bounded to [oldKfIdx, newKfIdx]),
 // this spans [0, newKfIdx] -- every keyframe and every landmark in the
@@ -429,6 +512,151 @@ struct PosePriorCost
     std::array<double, 6> prior;
     double rotWeight, transWeight;
 };
+
+// Horn 1987 ("Closed-form solution of absolute orientation using unit
+// quaternions") closed-form solution for the minimal-3-point similarity
+// (Sim3) registration problem -- the exact algorithm ORB-SLAM2/3's own
+// Sim3Solver::ComputeSim3() uses (third_party/ORB_SLAM3/src/Sim3Solver.cc,
+// consulted directly rather than reconstructed from memory), ported here
+// from Eigen to this codebase's cv::Mat convention. P1/P2 are 3x3 (CV_64F),
+// each COLUMN one of exactly 3 points -- camera1's own local-frame
+// coordinates for P1, camera2's own local-frame coordinates for P2, both
+// columns referring to the SAME 3 real-world points. Solves for R12
+// (3x3 rotation), t12 (3x1), s12 (scalar) such that P1 ~= s12*R12*P2 + t12.
+void computeSim3Horn(const cv::Mat &P1, const cv::Mat &P2, cv::Mat &R12, cv::Mat &t12, double &s12)
+{
+    // Step 1: centroids + relative (centered) coordinates.
+    cv::Mat O1, O2;
+    cv::reduce(P1, O1, 1, cv::REDUCE_AVG);
+    cv::reduce(P2, O2, 1, cv::REDUCE_AVG);
+    const cv::Mat Pr1 = P1 - cv::repeat(O1, 1, 3);
+    const cv::Mat Pr2 = P2 - cv::repeat(O2, 1, 3);
+
+    // Step 2/3: cross-covariance M, then the 4x4 symmetric N built from M's
+    // entries -- N's eigenvector of largest eigenvalue is the quaternion of
+    // the optimal rotation (Horn's own closed-form result).
+    const cv::Mat M = Pr2 * Pr1.t();
+    const double m00 = M.at<double>(0, 0), m01 = M.at<double>(0, 1), m02 = M.at<double>(0, 2);
+    const double m10 = M.at<double>(1, 0), m11 = M.at<double>(1, 1), m12 = M.at<double>(1, 2);
+    const double m20 = M.at<double>(2, 0), m21 = M.at<double>(2, 1), m22 = M.at<double>(2, 2);
+    const cv::Mat N = (cv::Mat_<double>(4, 4) << m00 + m11 + m22, m12 - m21, m20 - m02, m01 - m10, m12 - m21,
+                        m00 - m11 - m22, m01 + m10, m20 + m02, m20 - m02, m01 + m10, -m00 + m11 - m22, m12 + m21,
+                        m01 - m10, m20 + m02, m12 + m21, -m00 - m11 + m22);
+
+    // cv::eigen() requires (and here gets, by construction) a real
+    // symmetric matrix, and returns eigenvalues/vectors in DESCENDING
+    // order -- row 0 of the eigenvector matrix is exactly the quaternion
+    // ORB-SLAM3's own eval.maxCoeff()-based selection picks out.
+    cv::Mat eigenvalues, eigenvectors;
+    cv::eigen(N, eigenvalues, eigenvectors);
+    const double qw = eigenvectors.at<double>(0, 0), qx = eigenvectors.at<double>(0, 1),
+                 qy = eigenvectors.at<double>(0, 2), qz = eigenvectors.at<double>(0, 3);
+    R12 = (cv::Mat_<double>(3, 3) << 1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qw * qz), 2 * (qx * qz + qw * qy),
+           2 * (qx * qy + qw * qz), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qw * qx), 2 * (qx * qz - qw * qy),
+           2 * (qy * qz + qw * qx), 1 - 2 * (qx * qx + qy * qy));
+
+    // Step 5/6: rotate set 2 by the found rotation, then the closed-form
+    // least-squares scale between the two (now co-rotated) point sets.
+    const cv::Mat P3 = R12 * Pr2;
+    const double nom = Pr1.dot(P3);
+    const double den = P3.dot(P3);
+    s12 = (den > 1e-9) ? (nom / den) : 1.0;
+
+    // Step 7: translation.
+    t12 = O1 - s12 * R12 * O2;
+}
+
+// RANSAC wrapper around computeSim3Horn(), matching ORB-SLAM3's own
+// Sim3Solver::iterate() -- see that function's doc comment for why a
+// minimal-3-point closed-form solve plus RANSAC (rather than, say, a
+// least-squares fit over all correspondences at once) is the right
+// approach: a handful of the descriptor-matched 3D-3D correspondences
+// below are typically wrong (visually similar but different real points),
+// and Horn's method has no built-in robustness against that on its own.
+// X3Dc1/X3Dc2 are PARALLEL arrays of matched points, each already expressed
+// in its own camera's local frame (see tryLoopClosure()'s own call site for
+// how these get built). Returns true with R12/t12/s12/inlierIndices filled
+// in if a solution with at least minInliers support was found.
+bool solveSim3Ransac(const std::vector<cv::Point3f> &X3Dc1, const std::vector<cv::Point3f> &X3Dc2, cv::Mat &R12,
+                      cv::Mat &t12, double &s12, std::vector<int> &inlierIndices, int minInliers = 6,
+                      int maxIterations = 300, double inlierRelativeThreshold = 0.1)
+{
+    const int n = static_cast<int>(X3Dc1.size());
+    if (n < 3 || n < minInliers)
+        return false;
+
+    std::mt19937 rng(kRansacSeed);
+    std::uniform_int_distribution<int> dist(0, n - 1);
+
+    cv::Mat bestR, bestT;
+    double bestS = 1.0;
+    std::vector<int> bestInliers;
+
+    for (int iter = 0; iter < maxIterations; ++iter) {
+        std::array<int, 3> sample{};
+        int filled = 0;
+        while (filled < 3) {
+            const int idx = dist(rng);
+            if (std::find(sample.begin(), sample.begin() + filled, idx) == sample.begin() + filled)
+                sample[static_cast<size_t>(filled++)] = idx;
+        }
+
+        cv::Mat P1(3, 3, CV_64F), P2(3, 3, CV_64F);
+        for (int c = 0; c < 3; ++c) {
+            const cv::Point3f &p1 = X3Dc1[static_cast<size_t>(sample[static_cast<size_t>(c)])];
+            const cv::Point3f &p2 = X3Dc2[static_cast<size_t>(sample[static_cast<size_t>(c)])];
+            P1.at<double>(0, c) = p1.x;
+            P1.at<double>(1, c) = p1.y;
+            P1.at<double>(2, c) = p1.z;
+            P2.at<double>(0, c) = p2.x;
+            P2.at<double>(1, c) = p2.y;
+            P2.at<double>(2, c) = p2.z;
+        }
+
+        cv::Mat R, t;
+        double s = 1.0;
+        computeSim3Horn(P1, P2, R, t, s);
+        if (s <= 0.0 || !std::isfinite(s))
+            continue;
+
+        // Inlier check: 3D distance between camera1's own observation and
+        // camera2's point mapped into camera1's frame, relative to that
+        // point's own distance from the origin (a stand-in for ORB-SLAM3's
+        // own pixel-reprojection check -- this codebase's loop 3D-3D
+        // correspondences don't carry a clean per-point 2D pixel the way
+        // ORB-SLAM3's KeyFrame-indexed ones do, since one side is matched
+        // against the rolling map, not a single keyframe's own keypoints).
+        std::vector<int> inliers;
+        inliers.reserve(static_cast<size_t>(n));
+        for (int i = 0; i < n; ++i) {
+            const cv::Mat X1 = (cv::Mat_<double>(3, 1) << X3Dc1[static_cast<size_t>(i)].x,
+                                 X3Dc1[static_cast<size_t>(i)].y, X3Dc1[static_cast<size_t>(i)].z);
+            const cv::Mat X2 = (cv::Mat_<double>(3, 1) << X3Dc2[static_cast<size_t>(i)].x,
+                                 X3Dc2[static_cast<size_t>(i)].y, X3Dc2[static_cast<size_t>(i)].z);
+            const cv::Mat predicted1 = s * R * X2 + t;
+            const double err = cv::norm(X1 - predicted1);
+            const double scale = std::max(cv::norm(X1), 1e-6);
+            if (err < inlierRelativeThreshold * scale)
+                inliers.push_back(i);
+        }
+
+        if (inliers.size() > bestInliers.size()) {
+            bestInliers = inliers;
+            bestR = R;
+            bestT = t;
+            bestS = s;
+        }
+    }
+
+    if (static_cast<int>(bestInliers.size()) < minInliers)
+        return false;
+
+    R12 = bestR;
+    t12 = bestT;
+    s12 = bestS;
+    inlierIndices = bestInliers;
+    return true;
+}
 
 // Hartley normalization: a similarity transform moving the point set's
 // centroid to the origin with mean distance sqrt(2) from it.
@@ -1381,6 +1609,7 @@ void SlamWorker::resetSlamState()
     m_trajectory.clear();
     m_trajectoryFrameIndex.clear();
     m_keyframeHistory.clear();
+    m_keyframeObservedLandmarkIds.clear();
     m_frameCount = 0;
     m_framesSinceKeyframe = 0;
     m_trackFailStreak = 0;
@@ -1563,6 +1792,33 @@ bool SlamWorker::loadOrbVocabulary(const QString &path)
     m_orbVocabulary = std::move(vocab);
     std::fprintf(stderr, "[config] ORB vocabulary loaded from %s (%u words)\n", qPrintable(path),
                  static_cast<unsigned>(m_orbVocabulary->size()));
+    return true;
+}
+
+bool SlamWorker::loadVladVocabulary(const QString &path)
+{
+    auto vocab = std::make_unique<vlad::VladVocabulary>();
+    if (!vocab->loadFromTextFile(path.toStdString())) {
+        std::fprintf(stderr, "[config] failed to load VLAD codebook from %s\n", qPrintable(path));
+        return false;
+    }
+    m_vladVocabulary = std::move(vocab);
+    std::fprintf(stderr, "[config] VLAD codebook loaded from %s (%u centroids)\n", qPrintable(path),
+                 static_cast<unsigned>(m_vladVocabulary->size()));
+    return true;
+}
+
+bool SlamWorker::loadSiftVocabulary(const QString &path)
+{
+    auto vocab = std::make_unique<SiftVocabulary>();
+    if (!vocab->loadFromTextFile(path.toStdString())) {
+        std::fprintf(stderr, "[config] failed to load SIFT (RootSIFT) DBoW2 vocabulary from %s\n",
+                     qPrintable(path));
+        return false;
+    }
+    m_siftVocabulary = std::move(vocab);
+    std::fprintf(stderr, "[config] SIFT DBoW2 vocabulary loaded from %s (%u words)\n", qPrintable(path),
+                 static_cast<unsigned>(m_siftVocabulary->size()));
     return true;
 }
 
@@ -2781,6 +3037,12 @@ void SlamWorker::insertKeyframe(const std::vector<cv::KeyPoint> &kps, const cv::
         m_landmarkObservations[id].emplace_back(newKeyframeIndex, newImagePoints[i]);
     }
 
+    // Seed this keyframe's own reverse-index entry (see
+    // m_keyframeObservedLandmarkIds's own doc comment) with its own
+    // just-triangulated points -- recordLandmarkObservations() below
+    // appends any further re-observed landmarks onto the SAME entry.
+    m_keyframeObservedLandmarkIds.push_back(newIds);
+
     // Before this keyframe's own new points join the global map below, see
     // whether this keyframe *also* re-observes any already-known landmark
     // (triangulated by some earlier keyframe) -- the cross-keyframe
@@ -2817,6 +3079,29 @@ void SlamWorker::insertKeyframe(const std::vector<cv::KeyPoint> &kps, const cv::
             descriptorRows.push_back(kf.descriptors.row(row));
         DBoW2::FeatureVector unusedFeatVec;
         m_orbVocabulary->transform(descriptorRows, kf.bowVec, unusedFeatVec, 4);
+    }
+
+    // VLAD place-recognition vector for tryLoopClosure()'s candidate search
+    // (see setVladLoopClosureEnabled()) -- the SIFT-compatible counterpart
+    // to the DBoW2 block above, only computed when a codebook is loaded and
+    // SIFT is the active detector.
+    if (m_vladVocabulary && m_detectorType == feature_detector::DetectorType::Sift)
+        kf.vladVector = m_vladVocabulary->computeVlad(kf.descriptors);
+
+    // SIFT DBoW2 place-recognition vector for tryLoopClosure()'s candidate
+    // search (see setSiftDbowLoopClosureEnabled()) -- a second SIFT-
+    // compatible option alongside the VLAD block above. kf.descriptors is
+    // already RootSIFT (toRootSift() applied right after detection, see
+    // this function's caller), matching what
+    // analyze/train_sift_dbow_vocabulary.cpp trained the vocabulary on.
+    // Same transform() levelsup=4 convention as the ORB DBoW2 block above.
+    if (m_siftVocabulary && m_detectorType == feature_detector::DetectorType::Sift) {
+        std::vector<cv::Mat> descriptorRows;
+        descriptorRows.reserve(static_cast<size_t>(kf.descriptors.rows));
+        for (int row = 0; row < kf.descriptors.rows; ++row)
+            descriptorRows.push_back(kf.descriptors.row(row));
+        DBoW2::FeatureVector unusedFeatVec;
+        m_siftVocabulary->transform(descriptorRows, kf.siftBowVec, unusedFeatVec, 4);
     }
 
     // Relative-pose measurement for pose_graph::optimizePoseGraph() (see
@@ -2906,6 +3191,7 @@ void SlamWorker::recordLandmarkObservations(int keyframeIndex, const std::vector
         if (du * du + dv * dv > kMaxObservationReprojErrorPixels * kMaxObservationReprojErrorPixels)
             continue;
         m_landmarkObservations[id].emplace_back(keyframeIndex, obs);
+        m_keyframeObservedLandmarkIds[static_cast<size_t>(keyframeIndex)].push_back(id);
     }
 }
 
@@ -2957,13 +3243,26 @@ bool SlamWorker::runLocalBundleAdjustment()
     if (windowSize < 2)
         return false;
 
-    // Same conservative landmark rule as runLoopBundleAdjustment(): only
-    // landmarks triangulated by an in-window keyframe, only observations
-    // from in-window keyframes -- keeps this strictly bounded to the window
-    // instead of pulling in arbitrarily-old keyframes as extra anchors.
+    // Any landmark with AT LEAST ONE observation from an in-window keyframe
+    // -- not just ones some in-window keyframe happens to be the ORIGINAL
+    // triangulator of (see m_keyframeObservedLandmarkIds's own doc comment
+    // for why the ownership-only rule this used to use silently starved
+    // this of real, already-recorded multi-view constraint density).
+    // Observations themselves are still strictly bounded to the window
+    // (the inner loop below), so this doesn't pull in any extra keyframe
+    // pose parameter blocks, only more per-landmark residuals among the
+    // ones already in the problem. processedLandmarkIds deduplicates: the
+    // SAME landmark can now legitimately appear in several different
+    // in-window keyframes' own observed-landmark lists (that's the whole
+    // point), so without this guard it would get its observations
+    // gathered -- and turned into duplicate residual blocks -- once per
+    // keyframe that lists it, not once overall.
     std::unordered_map<long long, std::vector<std::pair<int, cv::Point2f>>> windowObservations;
+    std::unordered_set<long long> processedLandmarkIds;
     for (int i = windowStart; i < n; ++i) {
-        for (long long id : m_keyframeHistory[static_cast<size_t>(i)].localMapPointIds) {
+        for (long long id : m_keyframeObservedLandmarkIds[static_cast<size_t>(i)]) {
+            if (!processedLandmarkIds.insert(id).second)
+                continue;
             const auto it = m_landmarkObservations.find(id);
             if (it == m_landmarkObservations.end())
                 continue;
@@ -3038,6 +3337,8 @@ bool SlamWorker::runLocalBundleAdjustment()
     options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
     options.max_num_iterations = kBaMaxIterations;
     options.minimizer_progress_to_stdout = false;
+    options.num_threads = 1; // pinned for run-to-run reproducibility -- see kitti_ate.cpp's
+    // own cv::setNumThreads(1) call for the matching OpenCV-side fix
     ceres::Solver::Summary summary;
     ceres::Solve(options, &problem, &summary);
     if (!summary.IsSolutionUsable()) {
@@ -3100,8 +3401,7 @@ bool SlamWorker::runLocalBundleAdjustment()
         m_trajectory.last() = QPointF(C.at<double>(0), C.at<double>(2));
     }
 
-    std::fprintf(stderr,
-                  "[localba] kf#%d..kf#%d, %d landmarks, %d observations, initial cost=%.3f final cost=%.3f\n",
+    std::fprintf(stderr, "[localba] kf#%d..kf#%d, %d landmarks, %d observations, initial cost=%.3f final cost=%.3f\n",
                   windowStart, n - 1, static_cast<int>(landmarks.size()), residualCount, summary.initial_cost,
                   summary.final_cost);
     return true;
@@ -3115,15 +3415,26 @@ bool SlamWorker::runLoopBundleAdjustment(int oldKfIdx, int newKfIdx, const cv::M
     if (newKfIdx - oldKfIdx + 1 > kBaMaxWindowKeyframes)
         return false; // too large to solve in reasonable time -- see kBaMaxWindowKeyframes
 
-    // Candidate landmarks: anything *triangulated by* a keyframe inside
-    // [oldKfIdx, newKfIdx] (a conservative choice -- a landmark created
-    // earlier but re-observed inside the window is skipped, to avoid
-    // pulling in keyframes outside the window just to anchor it), kept
-    // only if >= kBaMinObservationsPerLandmark of its observations also
-    // come from distinct keyframes inside the window.
+    // Any landmark with AT LEAST ONE observation from an in-window keyframe
+    // -- not just ones some in-window keyframe happens to be the ORIGINAL
+    // triangulator of. This function used to use the ownership-only rule
+    // (triangulated by a keyframe inside [oldKfIdx, newKfIdx]) that Session
+    // 15 item 8 found silently starving runLocalBundleAdjustment() of real,
+    // already-recorded multi-view constraint density -- same bug, same
+    // fix, applied here since loop closures are the highest-leverage
+    // moment for correcting drift (see DEBUGGING.md's queued next steps).
+    // Observations themselves are still strictly bounded to the window
+    // (the inner loop below), so this doesn't pull in any extra keyframe
+    // pose parameter blocks, only more per-landmark residuals among the
+    // ones already in the problem. processedLandmarkIds dedups: the SAME
+    // landmark can now legitimately appear in several in-window keyframes'
+    // own observed-landmark lists.
     std::unordered_map<long long, std::vector<std::pair<int, cv::Point2f>>> windowObservations;
+    std::unordered_set<long long> processedLandmarkIds;
     for (int i = oldKfIdx; i <= newKfIdx; ++i) {
-        for (long long id : m_keyframeHistory[static_cast<size_t>(i)].localMapPointIds) {
+        for (long long id : m_keyframeObservedLandmarkIds[static_cast<size_t>(i)]) {
+            if (!processedLandmarkIds.insert(id).second)
+                continue;
             const auto it = m_landmarkObservations.find(id);
             if (it == m_landmarkObservations.end())
                 continue;
@@ -3145,6 +3456,19 @@ bool SlamWorker::runLoopBundleAdjustment(int oldKfIdx, int newKfIdx, const cv::M
         for (int k = 0; k < 3; ++k)
             block[static_cast<size_t>(3 + k)] = t.at<double>(k);
     };
+    // NOTE: a "smooth warm-start" variant was tried here (spreading a
+    // fractional version of the endpoint's rigid correction across every
+    // intermediate keyframe's initial guess, matching
+    // runGlobalBundleAdjustment()'s own copy of this idea) and measured
+    // WORSE (142.586m vs this function's own 93.851m baseline) -- reverted.
+    // Root cause: for this function's SHORT window, each intermediate
+    // keyframe's raw live pose is already a good warm start (continuous
+    // local BA/guided search during live tracking keeps neighboring poses
+    // locally consistent); replacing it with a single global rigid-drift
+    // interpolation discards that real, already-accurate local structure
+    // in favor of a cruder uniform-drift assumption, which only pays off
+    // when the ORIGINAL warm start is itself badly inconsistent (confirmed
+    // true for runGlobalBundleAdjustment()'s much longer span, not here).
     for (int i = oldKfIdx; i <= newKfIdx; ++i) {
         const Keyframe &kf = m_keyframeHistory[static_cast<size_t>(i)];
         fillPose(poses[static_cast<size_t>(i - oldKfIdx)], kf.R, kf.t);
@@ -3199,6 +3523,8 @@ bool SlamWorker::runLoopBundleAdjustment(int oldKfIdx, int newKfIdx, const cv::M
     options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
     options.max_num_iterations = kBaMaxIterations;
     options.minimizer_progress_to_stdout = false;
+    options.num_threads = 1; // pinned for run-to-run reproducibility -- see kitti_ate.cpp's
+    // own cv::setNumThreads(1) call for the matching OpenCV-side fix
     ceres::Solver::Summary summary;
     ceres::Solve(options, &problem, &summary);
     if (!summary.IsSolutionUsable()) {
@@ -3304,11 +3630,37 @@ bool SlamWorker::runGlobalBundleAdjustment(int newKfIdx, const cv::Mat &loopR, c
         for (int k = 0; k < 3; ++k)
             block[static_cast<size_t>(3 + k)] = t.at<double>(k);
     };
-    for (int i = 0; i <= newKfIdx; ++i) {
-        const Keyframe &kf = m_keyframeHistory[static_cast<size_t>(i)];
-        fillPose(poses[static_cast<size_t>(i)], kf.R, kf.t);
+    // Smooth warm-start -- same technique and rationale as
+    // runLoopBundleAdjustment()'s own copy of this block (see its comment
+    // for the measured evidence: this exact double-rigid-anchor pattern
+    // gave 104.024m here vs 93.851m windowed on the same sequence before
+    // this fix, purely because this function's span is longer). alpha=0 at
+    // kf#0 reduces exactly to its own untouched live pose, alpha=1 at
+    // newKfIdx reduces exactly to loopR/loopT.
+    {
+        const Keyframe &endKf = m_keyframeHistory[static_cast<size_t>(newKfIdx)];
+        const cv::Mat RcwDrifted = endKf.R.t();
+        const cv::Mat CDrifted = -RcwDrifted * endKf.t;
+        const cv::Mat RcwLoop = loopR.t();
+        const cv::Mat CLoop = -RcwLoop * loopT;
+        const cv::Mat Rdelta = RcwLoop * RcwDrifted.t();
+        const cv::Mat tDelta = CLoop - Rdelta * CDrifted;
+        cv::Mat deltaRvec;
+        cv::Rodrigues(Rdelta, deltaRvec);
+        for (int i = 0; i <= newKfIdx; ++i) {
+            const double alpha = static_cast<double>(i) / static_cast<double>(newKfIdx);
+            cv::Mat Ralpha;
+            cv::Rodrigues(deltaRvec * alpha, Ralpha);
+            const Keyframe &kf = m_keyframeHistory[static_cast<size_t>(i)];
+            const cv::Mat Rcw = kf.R.t();
+            const cv::Mat C = -Rcw * kf.t;
+            const cv::Mat Cwarm = Ralpha * C + alpha * tDelta;
+            const cv::Mat RcwWarm = Ralpha * Rcw;
+            const cv::Mat Rwarm = RcwWarm.t();
+            const cv::Mat twarm = -Rwarm * Cwarm;
+            fillPose(poses[static_cast<size_t>(i)], Rwarm, twarm);
+        }
     }
-    fillPose(poses.back(), loopR, loopT); // endpoint anchored to the loop measurement, not its drifted pose
 
     const CameraIntrinsics &intr = m_intrinsics;
     std::unordered_map<long long, std::array<double, 3>> landmarks;
@@ -3356,6 +3708,8 @@ bool SlamWorker::runGlobalBundleAdjustment(int newKfIdx, const cv::Mat &loopR, c
     options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
     options.max_num_iterations = kBaMaxIterations;
     options.minimizer_progress_to_stdout = false;
+    options.num_threads = 1; // pinned for run-to-run reproducibility -- see kitti_ate.cpp's
+    // own cv::setNumThreads(1) call for the matching OpenCV-side fix
     ceres::Solver::Summary summary;
     ceres::Solve(options, &problem, &summary);
     if (!summary.IsSolutionUsable()) {
@@ -3421,6 +3775,51 @@ std::vector<pose_graph::KeyframePose> SlamWorker::keyframePoses() const
     for (const Keyframe &kf : m_keyframeHistory)
         out.push_back({kf.R.clone(), kf.t.clone(), kf.frameIndex});
     return out;
+}
+
+std::vector<pose_graph::SequentialEdgeRecord> SlamWorker::covisibilityEdgeRecords(int minSharedLandmarks) const
+{
+    // Same covisibility-graph construction as cullRedundantKeyframes() --
+    // see that function's own doc comment -- just without the culling
+    // side effects, and reading every keyframe's CURRENT pose (not an
+    // independent re-measurement) once at the end instead of feeding a
+    // live redundancy decision.
+    const int n = static_cast<int>(m_keyframeHistory.size());
+    std::unordered_map<int, std::unordered_map<int, int>> covisibility;
+    for (const auto &entry : m_landmarkObservations) {
+        std::unordered_set<int> distinctKfs;
+        for (const auto &obs : entry.second) {
+            if (obs.first >= 0 && obs.first < n)
+                distinctKfs.insert(obs.first);
+        }
+        for (auto it1 = distinctKfs.begin(); it1 != distinctKfs.end(); ++it1) {
+            for (auto it2 = std::next(it1); it2 != distinctKfs.end(); ++it2) {
+                covisibility[*it1][*it2]++;
+                covisibility[*it2][*it1]++;
+            }
+        }
+    }
+
+    std::vector<pose_graph::SequentialEdgeRecord> edges;
+    for (const auto &fromEntry : covisibility) {
+        const int i = fromEntry.first;
+        for (const auto &toEntry : fromEntry.second) {
+            const int j = toEntry.first;
+            // i<j once per pair (covisibility is symmetric, iterated both
+            // ways above); skip anything already covered by a real
+            // sequential edge (|i-j|==1) -- no need to duplicate it here.
+            if (j <= i + 1)
+                continue;
+            if (toEntry.second < minSharedLandmarks)
+                continue;
+            const Keyframe &kfI = m_keyframeHistory[static_cast<size_t>(i)];
+            const Keyframe &kfJ = m_keyframeHistory[static_cast<size_t>(j)];
+            const cv::Mat Rrel = kfJ.R * kfI.R.t();
+            const cv::Mat trel = kfJ.t - Rrel * kfI.t;
+            edges.push_back({i, j, Rrel.clone(), trel.clone()});
+        }
+    }
+    return edges;
 }
 
 LoopEstimateSnapshot SlamWorker::buildLoopEstimateSnapshot(
@@ -3599,21 +3998,74 @@ void SlamWorker::tryLoopClosure(size_t newKeyframeIndex)
     const size_t searchLimit = newKeyframeIndex - kLoopExclusionWindow;
 
     int bestIdx = -1;
-    // bestMatchCount/bestDbowScore/usedDbow: kept at this scope (not just
-    // inside their respective branch below) because the "[loop] closure"
-    // log further down reports whichever one actually drove candidate
-    // selection.
+    // bestMatchCount/bestDbowScore/bestVladScore/bestSiftDbowScore/usedDbow/
+    // usedVlad/usedSiftDbow: kept at this scope (not just inside their
+    // respective branch below) because the "[loop] closure" log further
+    // down reports whichever one actually drove candidate selection.
     size_t bestMatchCount = 0;
     double bestDbowScore = 0.0;
+    float bestVladScore = 0.0f;
+    double bestSiftDbowScore = 0.0;
     bool usedDbow = false;
+    bool usedVlad = false;
+    bool usedSiftDbow = false;
 
+    // SIFT DBoW2 place-recognition scoring (see
+    // setSiftDbowLoopClosureEnabled()) when available -- a second SIFT-
+    // compatible candidate search, alongside VLAD below, checked FIRST
+    // when both are enabled (real TF-IDF scoring over a proper vocabulary
+    // tree is expected to be the more discriminative of the two, per
+    // DEBUGGING.md's own DBoW2-vs-VLAD comparison -- not yet measured
+    // against each other on this pipeline, so this is a priority CHOICE,
+    // not a validated result). Falls through to VLAD, then the original
+    // raw-match-count search, whenever this is off, no vocabulary is
+    // loaded, or this particular keyframe has no siftBowVec.
+    if (m_siftDbowLoopClosureEnabled && m_siftVocabulary && !newKf.siftBowVec.empty()) {
+        usedSiftDbow = true;
+        for (size_t i = 0; i <= searchLimit; ++i) {
+            if (m_keyframeHistory[i].culled || m_keyframeHistory[i].siftBowVec.empty())
+                continue;
+            const double score = m_siftVocabulary->score(m_keyframeHistory[i].siftBowVec, newKf.siftBowVec);
+            if (score > bestSiftDbowScore) {
+                bestSiftDbowScore = score;
+                bestIdx = static_cast<int>(i);
+            }
+        }
+        if (bestIdx < 0 || bestSiftDbowScore < kSiftDbowMinScore)
+            return;
+        std::fprintf(stderr, "[loop][siftdbow] kf#%d candidate=kf#%d score=%.4f\n",
+                     static_cast<int>(newKeyframeIndex), bestIdx, bestSiftDbowScore);
+    }
+    // VLAD place-recognition scoring (see setVladLoopClosureEnabled()) when
+    // available -- the other SIFT-compatible counterpart to the DBoW2
+    // branch further below; checked after SIFT-DBoW2 (see its own comment
+    // just above) but before ORB-DBoW2, purely for ordering. Falls through
+    // to ORB-DBoW2, then the raw-match-count search, whenever VLAD is off,
+    // no codebook is loaded, or this particular keyframe has no vladVector
+    // (non-SIFT runs).
+    else if (m_vladLoopClosureEnabled && m_vladVocabulary && !newKf.vladVector.empty()) {
+        usedVlad = true;
+        for (size_t i = 0; i <= searchLimit; ++i) {
+            if (m_keyframeHistory[i].culled || m_keyframeHistory[i].vladVector.empty())
+                continue;
+            const float score = m_vladVocabulary->score(m_keyframeHistory[i].vladVector, newKf.vladVector);
+            if (score > bestVladScore) {
+                bestVladScore = score;
+                bestIdx = static_cast<int>(i);
+            }
+        }
+        if (bestIdx < 0 || bestVladScore < kVladMinScore)
+            return;
+        std::fprintf(stderr, "[loop][vlad] kf#%d candidate=kf#%d score=%.4f\n",
+                     static_cast<int>(newKeyframeIndex), bestIdx, bestVladScore);
+    }
     // DBoW2 place-recognition scoring (see setDbowLoopClosureEnabled()) when
     // available, replacing just this candidate-selection step -- everything
     // below (PnP re-measurement, inlier gating, the correction itself) is
     // unchanged either way. Falls through to the original raw-match-count
     // search whenever DBoW2 is off, no vocabulary is loaded, or this
     // particular keyframe has no BowVector (non-ORB runs).
-    if (m_dbowLoopClosureEnabled && m_orbVocabulary && !newKf.bowVec.empty()) {
+    else if (m_dbowLoopClosureEnabled && m_orbVocabulary && !newKf.bowVec.empty()) {
         usedDbow = true;
         for (size_t i = 0; i <= searchLimit; ++i) {
             if (m_keyframeHistory[i].culled || m_keyframeHistory[i].bowVec.empty())
@@ -3708,6 +4160,58 @@ void SlamWorker::tryLoopClosure(size_t newKeyframeIndex)
     cv::Mat loopR;
     cv::Rodrigues(rvec, loopR);
 
+    // Real, multi-point, RANSAC-robust scale measurement -- ORB-SLAM2/3's
+    // own Sim3Solver approach (Horn 1987 closed-form quaternion method +
+    // RANSAC, see solveSim3Ransac()'s own doc comment; ported directly from
+    // third_party/ORB_SLAM3/src/Sim3Solver.cc, not reconstructed from
+    // memory), replacing the earlier single-point camera-center-distance
+    // ratio (confirmed unstable this session: 0.0058-16.27 across early
+    // closures on real runs). oldKf.localMapPoints (its own trusted local
+    // map, small but reliable) matched via descriptor similarity against
+    // m_mapPoints (the current rolling map at newKf's own insertion time --
+    // this codebase's closest equivalent to ORB-SLAM3's own "current
+    // keyframe's local map", since m_mapPoints was just extended with
+    // newKf's own new points and covers its recent covisibility
+    // neighborhood) gives the 3D-3D correspondences Sim3Solver needs.
+    // Each side transformed into its OWN camera's local frame (oldKf's own
+    // trusted pose for X3Dc1, newKf's own DRIFTED pose for X3Dc2) -- the
+    // resulting s12 directly measures how far the drifted trajectory's own
+    // scale has diverged from oldKf's trusted one, exactly the quantity
+    // LoopClosureRecord::scale needs.
+    double scaleMeas = 1.0;
+    bool usedSim3Solver = false;
+    int sim3InlierCount = 0;
+    {
+        std::vector<cv::DMatch> sim3Matches;
+        if (matchDescriptors(oldKf.localMapDescriptors, m_mapDescriptors, sim3Matches) &&
+            static_cast<int>(sim3Matches.size()) >= kSim3SolverMinCorrespondences) {
+            std::vector<cv::Point3f> X3Dc1, X3Dc2;
+            X3Dc1.reserve(sim3Matches.size());
+            X3Dc2.reserve(sim3Matches.size());
+            for (const auto &m : sim3Matches) {
+                const cv::Mat P1w = (cv::Mat_<double>(3, 1) << oldKf.localMapPoints[m.queryIdx].x,
+                                      oldKf.localMapPoints[m.queryIdx].y, oldKf.localMapPoints[m.queryIdx].z);
+                const cv::Mat P1c = oldKfRAtDetection * P1w + oldKfTAtDetection;
+                const cv::Point3f &P2w = m_mapPoints[static_cast<size_t>(m.trainIdx)];
+                const cv::Mat P2wMat = (cv::Mat_<double>(3, 1) << P2w.x, P2w.y, P2w.z);
+                const cv::Mat P2c = newKf.R * P2wMat + newKf.t;
+                X3Dc1.emplace_back(static_cast<float>(P1c.at<double>(0)), static_cast<float>(P1c.at<double>(1)),
+                                    static_cast<float>(P1c.at<double>(2)));
+                X3Dc2.emplace_back(static_cast<float>(P2c.at<double>(0)), static_cast<float>(P2c.at<double>(1)),
+                                    static_cast<float>(P2c.at<double>(2)));
+            }
+            cv::Mat sim3R, sim3T;
+            double sim3S = 1.0;
+            std::vector<int> sim3Inliers;
+            if (solveSim3Ransac(X3Dc1, X3Dc2, sim3R, sim3T, sim3S, sim3Inliers, kSim3SolverMinInliers) &&
+                sim3S > 0.0) {
+                scaleMeas = std::clamp(sim3S, kScaleMeasClampMin, kScaleMeasClampMax);
+                usedSim3Solver = true;
+                sim3InlierCount = static_cast<int>(sim3Inliers.size());
+            }
+        }
+    }
+
     const int f0 = oldKf.frameIndex;
     const int f1 = newKf.frameIndex;
     if (f1 <= f0)
@@ -3726,6 +4230,24 @@ void SlamWorker::tryLoopClosure(size_t newKeyframeIndex)
     const cv::Mat RcwLoop = loopR.t();
     const cv::Mat CLoop = -RcwLoop * loopT;
 
+    // Fallback scale-drift measurement, only used when solveSim3Ransac()
+    // above didn't find enough 3D-3D correspondence support (e.g. too few
+    // points in oldKf's own local map, or too few survived descriptor
+    // matching against the current rolling map) -- the original single-
+    // point camera-center-distance ratio this session used before porting
+    // the real Sim3Solver. Kept as a fallback rather than removed: some
+    // real correction is better than none when the richer measurement
+    // isn't available (confirmed empirically this session that scaleMeas=1
+    // everywhere, i.e. no measurement at all, left the Sim3 pose-graph's
+    // scale DOF mathematically inert).
+    if (!usedSim3Solver) {
+        const cv::Mat ColdDrifted = -oldKfRAtDetection.t() * oldKfTAtDetection;
+        const double distDrifted = cv::norm(CDrifted - ColdDrifted);
+        const double distLoop = cv::norm(CLoop - ColdDrifted);
+        if (distDrifted > kMinScaleMeasBaseline && distLoop > kMinScaleMeasBaseline)
+            scaleMeas = std::clamp(distLoop / distDrifted, kScaleMeasClampMin, kScaleMeasClampMax);
+    }
+
     const cv::Mat Rdelta = RcwLoop * RcwDrifted.t();
     const cv::Mat tDelta = CLoop - Rdelta * CDrifted;
 
@@ -3736,28 +4258,92 @@ void SlamWorker::tryLoopClosure(size_t newKeyframeIndex)
 
     // NOTE: an attempt at a sanity cap on correction magnitude here (both
     // an isPlausibleStep-based version and a fixed/scale-adaptive
-    // threshold) was tried and reverted this session -- both made things
-    // worse. Rejecting a correction doesn't undo the drift it would have
-    // fixed, so drift keeps compounding unchecked, which makes every
-    // subsequent loop measurement look even larger and get rejected too: a
-    // vicious cycle that (confirmed empirically) drove every single
-    // closure in a run to rejection and made ATE worse, not better. A
-    // single bad ~2337-unit correction was observed once this session and
-    // is a real, open problem -- but the fix needs something
-    // more principled than a static threshold, e.g. requiring agreement
-    // from multiple independent loop candidates before trusting any one of
-    // them, not a magnitude cap. Left unguarded for now: accepting the
-    // occasional bad correction measurably beat rejecting it.
+    // threshold TUNED CLOSE TO NORMAL DRIFT MAGNITUDES) was tried and
+    // reverted in an earlier session -- both made things worse. Rejecting
+    // a correction doesn't undo the drift it would have fixed, so drift
+    // keeps compounding unchecked, which makes every subsequent loop
+    // measurement look even larger and get rejected too: a vicious cycle
+    // that (confirmed empirically) drove every single closure in a run to
+    // rejection and made ATE worse, not better. A single bad ~2337-unit
+    // correction was observed once that session; this VLAD-enabled run
+    // hit a far more extreme case -- pnpInliers=108 (well past
+    // kLoopMinPnpInliers) but a 9,809,633-unit / 179.8-degree correction,
+    // a degenerate PnP solve that happened to satisfy the reprojection-
+    // error inlier gate anyway. That's not "large drift", it's numerically
+    // pathological -- kLoopMaxCorrectionMagnitude/kLoopMaxCorrectionAngleDeg
+    // below are set roughly 50-90x past the largest genuine correction
+    // observed across both sessions (~2337 units, ~30 degrees) specifically
+    // so they never engage for real drift, however large, and only catch
+    // solves that are off by orders of magnitude -- deliberately not the
+    // same kind of threshold as the reverted attempts, which were tight
+    // enough to reject real corrections and trigger the vicious cycle
+    // above. Requiring multi-candidate agreement (as originally floated
+    // here) remains a more principled fix for the general case, just not
+    // attempted yet.
+    const double correctionMagnitude = cv::norm(tDelta);
+    const double correctionAngleDeg = cv::norm(deltaRvec) * 180.0 / CV_PI;
+    if (correctionMagnitude > kLoopMaxCorrectionMagnitude || correctionAngleDeg > kLoopMaxCorrectionAngleDeg) {
+        std::fprintf(stderr,
+                      "[loop] REJECTED degenerate correction: kf#%d (frame %d) <-> kf#%d (frame %d), "
+                      "pnpInliers=%d, translation=%.3f world units, rotation=%.3f deg (past sanity caps "
+                      "%.0f/%.0f -- treating as a degenerate PnP solve, not real drift)\n",
+                      bestIdx, f0, static_cast<int>(newKeyframeIndex), f1, static_cast<int>(inliers.size()),
+                      correctionMagnitude, correctionAngleDeg, kLoopMaxCorrectionMagnitude,
+                      kLoopMaxCorrectionAngleDeg);
+        return;
+    }
+
+    // Temporal-consistency gate (see setLoopConsistencyGroupEnabled()'s own
+    // doc comment for the full rationale and its relationship to real
+    // ORB-SLAM3's mnLoopNumCoincidences mechanism). Placed here, after
+    // every other verification gate above (candidate score, PnP inlier
+    // count, degenerate-solve sanity caps) has already passed -- this is
+    // the LAST thing standing between a real geometrically-verified
+    // candidate and actually applying its correction.
+    if (m_loopConsistencyGroupEnabled) {
+        const bool samePlace = m_pendingLoopOldIdx >= 0 &&
+                                std::abs(bestIdx - m_pendingLoopOldIdx) <= kLoopConsistencyOldIdxWindow &&
+                                newKeyframeIndex - m_pendingLoopNewKfIdx <= kLoopConsistencyMaxGapKeyframes;
+        if (samePlace) {
+            ++m_pendingLoopStreak;
+        } else {
+            m_pendingLoopOldIdx = bestIdx;
+            m_pendingLoopStreak = 1;
+        }
+        m_pendingLoopNewKfIdx = newKeyframeIndex;
+
+        if (m_pendingLoopStreak < kLoopConsistencyRequiredCount) {
+            std::fprintf(stderr,
+                          "[loop][consistency] kf#%d<->kf#%d verified but only %d/%d consecutive "
+                          "confirmations, waiting\n",
+                          bestIdx, static_cast<int>(newKeyframeIndex), m_pendingLoopStreak,
+                          kLoopConsistencyRequiredCount);
+            return;
+        }
+        // Confirmed: reset the pending state so the NEXT closure (whenever
+        // it happens) starts its own fresh streak, and fall through to
+        // commit using THIS call's own (latest, freshest) measurement.
+        m_pendingLoopOldIdx = -1;
+        m_pendingLoopStreak = 0;
+    }
+
     char candidateLabel[64];
-    if (usedDbow)
+    if (usedSiftDbow)
+        std::snprintf(candidateLabel, sizeof(candidateLabel), "siftDbowScore=%.4f", bestSiftDbowScore);
+    else if (usedVlad)
+        std::snprintf(candidateLabel, sizeof(candidateLabel), "vladScore=%.4f", bestVladScore);
+    else if (usedDbow)
         std::snprintf(candidateLabel, sizeof(candidateLabel), "dbowScore=%.4f", bestDbowScore);
     else
         std::snprintf(candidateLabel, sizeof(candidateLabel), "matches=%zu", bestMatchCount);
     std::fprintf(stderr,
                   "[loop] closure: kf#%d (frame %d) <-> kf#%d (frame %d), %s, pnpInliers=%d, "
-                  "translation correction=%.3f world units, rotation correction=%.3f deg\n",
+                  "translation correction=%.3f world units, rotation correction=%.3f deg, scaleMeas=%.4f "
+                  "(%s%s)\n",
                   bestIdx, f0, static_cast<int>(newKeyframeIndex), f1, candidateLabel,
-                  static_cast<int>(inliers.size()), cv::norm(tDelta), cv::norm(deltaRvec) * 180.0 / CV_PI);
+                  static_cast<int>(inliers.size()), cv::norm(tDelta), cv::norm(deltaRvec) * 180.0 / CV_PI, scaleMeas,
+                  usedSim3Solver ? "sim3solver, inliers=" : "fallback ratio",
+                  usedSim3Solver ? std::to_string(sim3InlierCount).c_str() : "");
 
     // Distribute the correction across every trajectory point and keyframe
     // between the two loop endpoints, proportional to how far along the
@@ -3835,14 +4421,30 @@ void SlamWorker::tryLoopClosure(size_t newKeyframeIndex)
     // (trajectory, map points, live/reference pose) is unaffected either
     // way. Falls through to the existing interpolation if BA is off, or
     // declines (e.g. too few jointly-observed landmarks in this window).
-    // Global BA (see kGlobalBaMaxWindowKeyframes's doc comment) takes
-    // priority over the windowed loop BA when both are enabled -- it's a
-    // strict superset (spans [0, newKfIdx] instead of [bestIdx, newKfIdx]),
-    // so there's nothing extra the windowed version would add.
+    //
+    // Global BA is tried FIRST when enabled (it's a strict superset of the
+    // windowed version's own window, [0, newKfIdx] vs [bestIdx, newKfIdx],
+    // so there's nothing extra windowed would add ON TOP of a successful
+    // global solve) -- but unlike windowed BA, global is also capped by
+    // kGlobalBaMaxWindowKeyframes (a real-time-cost bound, not a quality
+    // one) and DECLINES outright once newKfIdx exceeds it, which happens
+    // for every loop closure past the first ~400 keyframes on a long
+    // sequence. The comment that used to be here treated this as "nothing
+    // extra windowed would add", which was wrong for exactly that
+    // declined case: confirmed empirically (2026-07-21) that enabling
+    // global BA alone made LATE loop closures fall all the way through to
+    // the naive linear interpolation below (worse than windowed BA would
+    // have given them), regressing full-sequence ATE from 126.134m
+    // (windowed) to 169.465m (global-only) even though global BA's own
+    // successful early solves were fine. Falling back to windowed BA
+    // whenever global declines -- instead of only when global is off
+    // entirely -- fixes this: every loop closure now gets the best BA
+    // that's actually feasible for its own span, never just interpolation
+    // when a real solve was available.
     bool baApplied = false;
     if (m_globalBundleAdjustmentEnabled)
         baApplied = runGlobalBundleAdjustment(static_cast<int>(newKeyframeIndex), loopR, loopT, loopVerifiedIds);
-    else if (m_loopBundleAdjustmentEnabled)
+    if (!baApplied && m_loopBundleAdjustmentEnabled)
         baApplied = runLoopBundleAdjustment(bestIdx, static_cast<int>(newKeyframeIndex), loopR, loopT, loopVerifiedIds);
     if (!baApplied) {
         for (size_t i = static_cast<size_t>(bestIdx); i < m_keyframeHistory.size(); ++i) {
@@ -3895,7 +4497,7 @@ void SlamWorker::tryLoopClosure(size_t newKeyframeIndex)
                 loopRelR = imuRrel;
         }
         m_loopClosureRecords.push_back(
-            {bestIdx, static_cast<int>(newKeyframeIndex), loopRelR.clone(), loopRelT.clone()});
+            {bestIdx, static_cast<int>(newKeyframeIndex), loopRelR.clone(), loopRelT.clone(), scaleMeas});
     }
 
     // Fire off a background, off-thread re-estimate for this loop window --
@@ -4376,13 +4978,57 @@ void SlamWorker::processNext()
     cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
 
     cv::Mat detectGray;
-    cv::resize(gray, detectGray, cv::Size(), kDetectionScale, kDetectionScale, cv::INTER_AREA);
+    cv::resize(gray, detectGray, cv::Size(), m_detectionScale, m_detectionScale, cv::INTER_AREA);
 
     std::vector<cv::KeyPoint> kps;
     cv::Mat descriptors;
     m_detector->detectAndCompute(detectGray, cv::noArray(), kps, descriptors);
 
-    const float invDetectionScale = static_cast<float>(1.0 / kDetectionScale);
+    // Deterministic keypoint order: OpenCV's detectAndCompute() can run
+    // keypoint detection through cv::parallel_for_ internally (across
+    // pyramid octaves/layers when built with a threading backend), so the
+    // SET of keypoints found is identical run-to-run but their ORDER in
+    // kps/descriptors is not -- confirmed this session as the root cause of
+    // ATE varying by up to ~60m across otherwise-identical full-sequence
+    // runs: a different order feeds a different actual correspondence
+    // subset to the fixed-seed (kRansacSeed) RANSAC below (same seed,
+    // different index-to-point mapping), which can flip a threshold-
+    // boundary accept/reject decision (loop-closure inlier gate, sanity
+    // caps, etc.) and cascade through thousands of downstream frames.
+    // Sorting into a fixed, position-based order after detection keeps
+    // multi-threaded detection speed (measured >2x faster per frame than
+    // forcing cv::setNumThreads(1) globally) while restoring
+    // reproducibility -- ties (rare at float precision) fall back to
+    // octave, which is itself deterministic per point.
+    if (!kps.empty()) {
+        std::vector<int> order(kps.size());
+        std::iota(order.begin(), order.end(), 0);
+        std::sort(order.begin(), order.end(), [&kps](int a, int b) {
+            if (kps[static_cast<size_t>(a)].pt.y != kps[static_cast<size_t>(b)].pt.y)
+                return kps[static_cast<size_t>(a)].pt.y < kps[static_cast<size_t>(b)].pt.y;
+            if (kps[static_cast<size_t>(a)].pt.x != kps[static_cast<size_t>(b)].pt.x)
+                return kps[static_cast<size_t>(a)].pt.x < kps[static_cast<size_t>(b)].pt.x;
+            return kps[static_cast<size_t>(a)].octave < kps[static_cast<size_t>(b)].octave;
+        });
+        std::vector<cv::KeyPoint> sortedKps(kps.size());
+        cv::Mat sortedDescriptors(descriptors.rows, descriptors.cols, descriptors.type());
+        for (size_t i = 0; i < order.size(); ++i) {
+            sortedKps[i] = kps[static_cast<size_t>(order[i])];
+            descriptors.row(order[static_cast<int>(i)]).copyTo(sortedDescriptors.row(static_cast<int>(i)));
+        }
+        kps = std::move(sortedKps);
+        descriptors = std::move(sortedDescriptors);
+    }
+
+    // RootSIFT (see FeatureDetector.h's own doc comment) -- only meaningful
+    // for SIFT's float descriptors, not ORB's binary ones. Matches the
+    // transform third_party/ORB_SLAM3_SIFT/src/ORBextractor.cc applies, so
+    // this codebase's own SIFT path uses the same, better-performing
+    // descriptor space rather than raw SIFT.
+    if (m_detectorType == feature_detector::DetectorType::Sift && !descriptors.empty())
+        descriptors = feature_detector::toRootSift(descriptors);
+
+    const float invDetectionScale = static_cast<float>(1.0 / m_detectionScale);
     for (auto &kp : kps) {
         kp.pt.x *= invDetectionScale;
         kp.pt.y *= invDetectionScale;

@@ -1,5 +1,8 @@
 #include "vision/FeatureDetector.h"
 
+#include <algorithm>
+#include <cmath>
+
 namespace feature_detector {
 
 cv::Ptr<cv::Feature2D> createDetector(DetectorType type, const SiftSettings &sift, const OrbSettings &orb)
@@ -16,6 +19,23 @@ cv::Ptr<cv::Feature2D> createDetector(DetectorType type, const SiftSettings &sif
 int normTypeFor(DetectorType type)
 {
     return type == DetectorType::Orb ? cv::NORM_HAMMING : cv::NORM_L2;
+}
+
+cv::Mat toRootSift(const cv::Mat &descriptors)
+{
+    cv::Mat out = descriptors.clone();
+    CV_Assert(out.empty() || out.type() == CV_32F);
+    const float eps = 1e-6f;
+    for (int r = 0; r < out.rows; ++r) {
+        cv::Mat row = out.row(r);
+        double l1 = cv::norm(row, cv::NORM_L1) + eps;
+        row /= l1;
+        for (int c = 0; c < row.cols; ++c)
+            row.at<float>(0, c) = std::sqrt(std::max(row.at<float>(0, c), eps));
+        double l2 = cv::norm(row, cv::NORM_L2) + eps;
+        row /= l2;
+    }
+    return out;
 }
 
 float defaultRatioFor(DetectorType type)

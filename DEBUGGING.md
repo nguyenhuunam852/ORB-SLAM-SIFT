@@ -1,5 +1,592 @@
 # Debugging log: homography fallback caused a permanent tracking lockup
 
+## Session 15 (2026-07-22): fixed a real run-to-run non-determinism bug, then an exhaustive (and ultimately negative) push to make offline Sim3 pose-graph correction beat live tracking, before finding the actual real wins -- a local-BA observation-density bug (later also applied to loop-BA, the session's biggest single win), and SQPnP -- best real result 72.550m (was ~93-195m, unreliably, before the determinism fix)
+
+Long session on the custom `SlamWorker`/`kitti_ate` pipeline (not
+`third_party/ORB_SLAM3_SIFT`/Kaggle -- see Part 58 etc. for that track).
+Started from a Kaggle-notebook side-question (`MAX_FRAMES` env var
+defaulting to 1000 in `kaggle/setup_and_run.sh` -- not a bug, just the
+default) that pivoted into a full day on `SlamWorker`'s own accuracy.
+
+### 1. Found and fixed a REAL run-to-run non-determinism bug (prerequisite for everything after)
+
+Repeated full-sequence runs of the nominally-identical "best known" config
+produced wildly different ATE (93.851m / 127.412m / 138.464m / 150.514m)
+across separate invocations of the SAME binary on the SAME input. Root-
+caused to `cv::SIFT::detectAndCompute()`'s internal `cv::parallel_for_`
+returning keypoints in a run-dependent order (set found is identical, order
+isn't) -- a different order feeds a different actual correspondence subset
+to the fixed-seed (`kRansacSeed=42`) RANSAC in `estimateTwoViewPose()`/PnP,
+which can flip a threshold-boundary accept/reject decision (loop-closure
+inlier gate, `isPlausibleStep`, etc.) and cascade through thousands of
+downstream frames -- classic sensitive-dependence, not measurement noise.
+
+**Fix**: `processNext()` (`SlamWorker.cpp`) now sorts `kps`/`descriptors`
+into a fixed position-based order (`(y, x, octave)`) immediately after
+`detectAndCompute()` returns, before anything else touches them. Keeps
+multi-threaded detection speed (a blanket `cv::setNumThreads(1)` was tried
+first, measured >2x slower per frame, reverted). Verified: two full runs of
+the identical config now produce byte-identical ATE (195.288m both times,
+4318/4541 matched both times) -- confirmed via `diff` on the full stdout.
+Also pinned `ceres::Solver::Options::num_threads = 1` in all 4
+`ceres::Solve()` call sites (`SlamWorker.cpp` x3, `PoseGraphOptimizer.cpp`
+x1) as cheap additional insurance against Ceres's own reduction-order
+sensitivity -- negligible cost since BA isn't the per-frame bottleneck.
+
+**Caveat surfaced by this fix**: once runs became reproducible, it became
+clear that DIFFERENT configs (not just the same one) still show real,
+larger-than-expected spread from run to run in absolute terms depending on
+exactly which code path changes were active (e.g. 118-195m range seen for
+what should be "the same" VLAD+windowed-BA config across different points
+in this session) -- this is NOT the keypoint-order bug (that's fixed and
+verified), it's a reminder that this pipeline's own live-tracking chain
+(PnP inlier gates, keyframe-insertion timing, loop-candidate thresholds)
+is inherently a long chain of hard threshold decisions, each one a small
+step away from flipping under a differently-scaled floating-point path.
+Single-run comparisons should still be treated with some caution;
+differences smaller than ~10-15m are not yet trustworthy signal.
+
+### 2. Real scale measurement added to loop closures (`scaleMeas`, `LoopClosureRecord::scale`)
+
+Before this session, every Sim3 pose-graph edge (sequential AND loop) had
+`sMeas` hardcoded to `1.0` -- confirmed empirically that this made the
+Sim3 free-scale DOF mathematically inert (`scaleWeight` sweep 8-1000
+produced byte-identical output). Added a real scale measurement in
+`tryLoopClosure()`: initially a single camera-center-distance ratio
+(`distLoop/distDrifted`), which was itself found to be wildly unstable
+(0.0058-16.27 across early closures) -- root-caused to baseline instability
+when the two keyframes are spatially close (the normal case for a real
+revisit) -- fixed with a minimum-baseline floor + clamp
+(`kMinScaleMeasBaseline`, `kScaleMeasClampMin/Max`).
+
+**Superseded later in this same session** by a genuine `Sim3Solver` port
+(see item 6 below) -- the single-point ratio is now only a fallback for
+when the richer measurement doesn't have enough data.
+
+### 3. Stereo scale-anchor: implemented, measured a real ~35% improvement, then REMOVED after a factual correction
+
+Implemented `StereoScaleAnchor.h/.cpp` (SAD block-matching disparity search
+using KITTI's `image_1` right camera + calib.txt baseline) and wired it
+into `SlamWorker` two ways: (a) a periodic, damped, whole-map rescale
+(`applyStereoScaleAnchor()`, called every keyframe) using ground-plane-
+region points' stereo-vs-monocular depth ratio, and (b) later, a root-cause
+fix injecting a real stereo-measured distance directly into
+`recoverViaEpipolar()` (the fallback path when PnP fails -- diagnosed as
+the ACTUAL point where fresh monocular scale ambiguity re-enters the
+pipeline repeatedly, since `insertKeyframe()`'s regular triangulation uses
+two already-PnP-derived/metric poses and has no fresh ambiguity of its own).
+
+Measured real improvement: VLAD-only baseline 195.288m (reproducible) ->
+VLAD+stereo-anchor 126.134m (~35% better), "Recovered scale" landing at
+0.7490-0.9930 (much closer to 1.0 than the 0.05-3.0 spread seen without it.
+
+**Then removed entirely** (`StereoScaleAnchor.h/.cpp` deleted,
+`SlamWorker.cpp`/`.h` reverted, `recoverViaEpipolar()`'s stereo branch
+reverted to plain OXTS/`m_avgStepScale`) after a factual correction: the
+"~5.33m ORB-SLAM3 reference on KITTI seq00" cited earlier in this session
+turned out to be ORB-SLAM2's **monocular** result (7-DOF-aligned), not
+stereo -- stereo ORB-SLAM2 gets 1.3m (6-DOF-aligned). Source: [ORB-SLAM2
+paper](https://arxiv.org/pdf/1610.06475). This means the real gap-closer
+to a ~5m-class result is NOT stereo depth -- it's a mature monocular
+Sim3 Essential Graph + loop-closing system, which real ORB-SLAM2 achieves
+with zero stereo input at all. Effort redirected accordingly (items 5-6).
+
+### 4. BA structural fixes that were CORRECT but did not move ATE
+
+- **Global-BA-doesn't-fall-back-to-windowed-BA bug**: `insertKeyframe()`'s
+  BA selection used `else if (m_loopBundleAdjustmentEnabled)`, meaning
+  whenever `runGlobalBundleAdjustment()` declined (e.g. `newKfIdx` past
+  `kGlobalBaMaxWindowKeyframes=400`), it fell all the way through to plain
+  linear interpolation instead of trying windowed BA -- confirmed this
+  regressed late-sequence "return to origin" loop closures. Fixed
+  (`if (!baApplied && m_loopBundleAdjustmentEnabled)`). Real, correct fix;
+  measured no ATE change in the one test run (all the specific closures
+  observed there had span > `kBaMaxWindowKeyframes` too, so the fallback
+  path never actually got exercised in that particular run).
+- **`kBaMaxWindowKeyframes` raised 200 -> 600** to let the ~470-span
+  "return near start" loop closures get real windowed BA instead of
+  interpolation. Confirmed running and converging dramatically (cost
+  3.5 billion -> 1.28 million on one such window) -- but ATE barely moved
+  (126.134m -> 125.195m). Diagnosed why: BA minimizes REPROJECTION error
+  (local pixel self-consistency), which a systematically-drifted
+  reconstruction can satisfy perfectly while still being globally wrong in
+  scale/rotation -- confirmed by "Recovered scale" swinging to 2.6442 (very
+  different) while ATE stayed roughly flat.
+
+### 5. Essential-Graph-style covisibility edges for the offline Sim3 pose-graph -- structurally correct, still lost to live tracking
+
+Added `SlamWorker::covisibilityEdgeRecords()` (any two keyframes sharing
+>=100 jointly-observed landmarks, ORB-SLAM2's own covisibility-graph
+definition, reusing `cullRedundantKeyframes()`'s own graph-construction
+logic) and wired it into `kitti_ate.cpp`'s posegraph block (new `covis`
+CLI flag) as extra edges alongside the sequential chain (both types share
+`pose_graph::SequentialEdgeRecord`, which the Sim3 solve already treats as
+a generic Huber-robustified relative-pose edge for any `(i,j)`, not just
+`j=i+1` -- confirmed safe by checking `optimizePoseGraphSim3()`'s
+warm-start-chain loop, which already filters for `j==i+1` and silently
+ignores non-adjacent edges there).
+
+**Real, measured structural fix**: previously EVERY sequential edge's chi2
+measured exactly `0.000` (a pure sequential-only graph has zero real
+internal constraint -- the warm-start chain is built directly from those
+same edges, so they're automatically satisfied). With covisibility edges
+added, `seqEdges chi2 sum=57.649` (no longer zero) -- confirmed the
+Essential Graph now carries real internal-consistency information for the
+first time this project has had it.
+
+**Still lost to live tracking**: 125.195m (live) vs 152.480m (posegraph-
+corrected with covisibility edges). Loop-edge chi2 (1034.759) still
+outweighed sequential+covisibility chi2 (57.649) by ~18x -- the graph
+remained almost entirely loop-edge-driven. Added
+`PoseGraphOptions::sequentialWeightMultiplier` and swept it (1/5/20/100/500)
+x `dcsPhi` (8 values) x `scaleWeight` (4 values) = 160 combinations against
+the SAME already-tracked keyframes (no re-tracking needed, matching the
+existing `sweep` CLI mode's pattern) -- **0/160 combinations beat live
+tracking** (best: 145.901m). Conclusive: the imbalance is not a tuning
+problem at this point, it's that live tracking's continuous local BA
+already does a better job than any offline correction over this graph
+structure can achieve, regardless of edge weight.
+
+### 6. Ported ORB-SLAM3's real `Sim3Solver` (Horn 1987 + RANSAC) -- genuinely better measurement, STILL lost offline
+
+Read `third_party/ORB_SLAM3/src/Sim3Solver.cc`/`.h` directly (not
+reconstructed from memory) and ported the exact algorithm (Horn 1987
+closed-form quaternion solution for the minimal-3-point similarity
+registration, wrapped in RANSAC) from Eigen to this codebase's `cv::Mat`
+convention: `computeSim3Horn()` (the closed-form solve, using `cv::eigen()`
+on the same 4x4 symmetric N-matrix construction ORB-SLAM3 uses) +
+`solveSim3Ransac()` (RANSAC wrapper, same `kRansacSeed=42` for
+reproducibility). Wired into `tryLoopClosure()`: matches
+`oldKf.localMapDescriptors` (oldKf's own small trusted local map) against
+`m_mapDescriptors` (the CURRENT rolling map at newKf's insertion time --
+this codebase's closest equivalent to ORB-SLAM3's own "current keyframe's
+local map", since it was just extended with newKf's own new points and
+covers its recent covisibility neighborhood) to get 3D-3D correspondences,
+transforms each side into its own camera's local frame, and solves for a
+real multi-point RANSAC-robust Sim3 (rotation+translation+scale).
+
+**Confirmed firing successfully on every tested loop closure** (10/10 in
+one run, 6-35 RANSAC inliers each) with measured scale values now
+clustering sensibly (1.2-1.9 typical, few clamp-boundary outliers) instead
+of the old single-point measurement's wild 0.0058-16.27 swings -- a real,
+verified improvement in measurement quality.
+
+**Still lost to live tracking**: 120.085m (live) vs 183.142m (posegraph-
+corrected). Loop-edge chi2 (3680.9) vs sequential+covis chi2 (42.8) --
+imbalance actually WORSE than with the noisy measurement (86x vs 18x)
+because the now-stable measurement pushes corrections more consistently
+hard in a real direction, rather than sometimes-cancelling noise. This is
+the fourth independent confirmation (sections 4/5/6 + the earlier
+scaleWeight-inert finding) that offline Sim3 pose-graph correction cannot
+beat this pipeline's live tracking, regardless of edge density, edge
+weight, or measurement quality -- the live tracking's own continuous local
+BA is simply doing a better job already. **Recommend not investing further
+in the offline pose-graph direction** unless the underlying live-tracking
+local BA itself is first made significantly more accurate (see item 8),
+which might change the baseline this comparison is against.
+
+### 7. Per-landmark stereo-depth-anchor residual in local BA -- FOUR genuine attempts, all negative, reverted
+
+Before settling on item 3's periodic-rescale-only approach, tried injecting
+stereo depth as a direct Ceres residual in `runLocalBundleAdjustment()`
+(giving BA independent 3D evidence instead of only reprojection self-
+consistency). All four attempts regressed ATE vs the 125.195m baseline:
+
+1. Unweighted, `(pose, point)` residual pulling camera-frame depth directly:
+   180.945m, "Recovered scale" jumped to an implausible 2.99.
+2. Weight lowered to 0.05 + Huber loss added: 170.777m -- scale excellent
+   (0.9930, best of the whole session) but ATE still worse. Diagnosed:
+   letting the residual touch the POSE parameter let Ceres "cheat" by
+   rotating/translating the camera to satisfy the depth residual instead of
+   moving the landmark, distorting trajectory shape even as scale improved.
+3. Refactored to a POINT-ONLY residual (`PointPriorCost`, no pose parameter
+   at all -- structurally cannot cause rotation distortion): 168.470m --
+   barely moved, ruling out the pose-coupling theory as the (sole) cause.
+4. Added `m_landmarkStereoDepth.erase()` right after first use, making it a
+   true one-time nudge (a landmark can stay in-window for many overlapping
+   local-BA calls; repeatedly re-imposing the SAME stale stereo snapshot
+   every time was suspected to compound): 162.674m -- improved each
+   attempt (180.9 -> 170.8 -> 168.5 -> 162.7) but never beat baseline.
+
+**Reverted entirely** alongside item 3's stereo removal. The four-attempt
+trend (each fix addressing a real, correctly-diagnosed issue, each still
+net negative) suggests this specific integration point (per-landmark prior
+inside the SAME optimization that's also solving for pose via reprojection)
+is fighting itself in a way that's hard to fully resolve without a deeper
+rethink -- not recommended to pick back up without a genuinely new
+hypothesis for why.
+
+### 8. Local BA was silently starved of real observation density -- fixed, small real improvement
+
+Found via direct code reading (prompted by "why isn't local BA as dense as
+it should be"): `runLocalBundleAdjustment()`'s landmark-selection loop only
+considered landmarks whose OWNING/triangulating keyframe was inside the
+current window (`for (long long id : m_keyframeHistory[i].localMapPointIds)`)
+-- silently excluding landmarks that are still being actively re-observed
+by in-window keyframes but were originally triangulated by a keyframe that
+has since scrolled just outside the window. Those re-observations WERE
+already being recorded (`recordLandmarkObservations()`, called every
+keyframe) into `m_landmarkObservations`, just never surfaced to local BA's
+landmark-selection step.
+
+**Fix**: new reverse index `m_keyframeObservedLandmarkIds` (parallel to
+`m_keyframeHistory`, ALL landmark IDs each keyframe has any observation of,
+not just ones it originated), populated in `insertKeyframe()` (seeded with
+the keyframe's own new IDs) and `recordLandmarkObservations()` (appends
+re-observed IDs). `runLocalBundleAdjustment()` now iterates this instead,
+with a `processedLandmarkIds` dedup guard (the same landmark can now
+legitimately appear in several in-window keyframes' lists, which would
+otherwise produce duplicate residual blocks for the same keyframe-landmark
+pair). Confirmed mechanically: local BA windows now show ~1234
+landmarks/3256 observations vs tens-of-landmarks/~200-observations for
+similar window sizes before this fix.
+
+**Measured real improvement**: 125.195m -> 118.450m (live, VLAD+windowed-BA,
+P3P). Modest but real (in the expected direction, larger than the run-to-
+run noise floor established in item 1's caveat).
+
+### 9. SQPnP beat P3P -- best real result of the session
+
+Swapping the PnP method from `p3p` to `sqpnp` (with items 6+8's fixes
+already active): 118.450m -> **107.676m**. Consistent with an older,
+pre-this-session historical hint that SQPnP outperforms P3P on this
+sequence, now re-verified under today's reproducibility fix.
+
+### 10. Applied item 8's observation-density fix to `runLoopBundleAdjustment()` too -- the session's biggest single win
+
+Follow-up conversation (same day): `runLoopBundleAdjustment()`
+(`SlamWorker.cpp`) still had the exact ownership-only landmark rule item 8
+found and fixed in `runLocalBundleAdjustment()` -- its candidate-landmark
+loop walked each in-window keyframe's `localMapPointIds` (points that
+keyframe itself triangulated) instead of `m_keyframeObservedLandmarkIds`
+(every landmark it has ANY recorded observation of, including
+re-observations of points triangulated by a keyframe now outside the
+window). This was the top item on this session's own queued-next-steps
+list, on the reasoning that loop closures are the highest-leverage moment
+for correcting drift. Before touching the code, cross-checked against
+`third_party/ORB_SLAM3/src/Optimizer.cc`'s real `LocalBundleAdjustment()`
+(line 1145): it collects landmarks via `pKFi->GetMapPointMatches()` --
+every point a keyframe CURRENTLY observes, not just ones it originated --
+confirming this is the correct pattern, not just an internal-consistency
+fix.
+
+**Fix**: same mechanism as item 8 -- swapped the `kf.localMapPointIds`
+iteration for `m_keyframeObservedLandmarkIds`, with a
+`processedLandmarkIds` dedup guard (a landmark can now legitimately appear
+in several in-window keyframes' own observed-landmark lists). Write-back
+logic (which keyframe's `localMapPoints` copy gets the refined position)
+left untouched -- it already correctly no-ops for a landmark whose owning
+keyframe falls outside the window, same as the already-fixed local-BA
+function.
+
+**Measured effect, dramatic**: loop bundle adjustment window density went
+from a few hundred landmarks/observations (ownership-only) to real
+multi-thousand-scale density -- e.g. one representative closure log line
+from this run: `kf#7..kf#509, 16571 landmarks, 47930 observations (53
+loop-verified)`, vs. the kind of sparse windows item 8's local-BA writeup
+described before its own fix. Full-sequence re-run of the session's
+known-good reference command (SQPnP + VLAD + windowed-BA + guided + denser
+local BA, single variable changed vs. item 9's 107.676m baseline):
+**107.676m -> 72.550m** (ATE RMSE), a ~32.6% improvement -- comfortably
+above the ~10-15m run-to-run noise floor established in item 1's caveat,
+so this is real signal, not variance. Also: `Recovered scale` 0.2679 (a
+regression vs. item 9's presumably-tighter scale, not yet explained --
+worth checking next) and 4519/4541 frames matched (unchanged coverage).
+
+### Current best real, reproducible result: 72.550m live (SQPnP + VLAD + windowed-BA + guided + denser local BA + denser loop BA)
+
+Still ~3.6x away from the user's stated goal of ATE RMSE < 20m (was
+~5.4x before this fix). Real ORB-SLAM2 monocular reference on the same
+sequence: 5.33m (see item 3) -- the gap is now understood to be primarily
+about Essential Graph/loop-closing maturity, not stereo, not raw BA
+correctness (both were tried exhaustively this session).
+
+### Also this session: pySLAM (SIFT, monocular) Kaggle notebook for an external reference point
+
+`kaggle/pyslam_sift_kitti.ipynb` -- clones
+[luigifreda/pyslam](https://github.com/luigifreda/pyslam), runs its
+`VisualOdometryEducational` class (the lightweight classic 2-view VO
+`main_vo.py` uses, not the full `main_slam.py` SLAM stack) with SIFT,
+headless (custom minimal driver script, since `main_vo.py` itself assumes
+an interactive display). Important caveat documented in the notebook
+itself: this VO class reads REAL ground-truth translation scale at every
+single frame (`kUseGroundTruthScale = True` in `visual_odometry.py`) to
+resolve monocular scale ambiguity -- confirmed by reading the source
+directly. So its eventual ATE is NOT a fair scale-accuracy comparison,
+only a fair ROTATION/DIRECTION accuracy one (from its Essential Matrix
+estimate). Not yet run (must be run interactively on Kaggle by the user;
+not executable from this environment). Earlier consideration of
+`farhad-dalirani/StereoVision-SLAM` was dropped after reading its source
+and finding it has no SIFT support at all (GFTT/ORB + pure KLT optical-flow
+tracking only).
+
+### 11. Item 10's "scale regression" investigated -- NOT a bug, real measured drift, no action needed
+
+Checked whether `Recovered scale` dropping to 0.2679 after the loop-BA
+density fix was a symptom of something the fix broke. Key fact confirmed
+by reading the call site (`insertKeyframe()`, around the
+`runGlobalBundleAdjustment()`/`runLoopBundleAdjustment()` call): `scaleMeas`
+(the `Sim3Solver` RANSAC measurement) is computed in `tryLoopClosure()`
+BEFORE either BA function runs, so it's mathematically independent of
+item 10's fix -- the fix only changes which landmarks the SUBSEQUENT joint
+optimization gets to use, not the scale measurement itself.
+
+Extracted every `scaleMeas` value logged this run (66 loop closures) and
+looked at the tail, which covers the sequence's actual loop-back-to-start
+closures (frame ~4459-4526 matching kf#0/4/5/6/7/9/10, i.e. the very first
+keyframes): **six consecutive, independent, high-inlier-count (12-26
+RANSAC inliers each) Sim3Solver measurements all agree tightly in the
+0.41-0.50 range** (0.4456, 0.4548, 0.4330, 0.5032, 0.4147, 0.4474, 0.4133).
+That's real, mutually-consistent evidence that by the end of this
+~4500-frame sequence, the estimated trajectory has genuinely drifted to
+roughly 2-2.4x too large -- not fix-induced noise.
+
+**What the fix actually changed**: before item 10, the loop-BA window
+(`kf#7..kf#509`, spanning ~502 keyframes) was landmark-starved, so this
+real, verified scale correction could only partially propagate through the
+window (the old sparse graph was under-constrained). With dense
+observations (16571 landmarks/47930 observations), the joint optimization
+can now actually distribute the true measured correction consistently
+across the whole span, so the corrected trajectory more HONESTLY reflects
+the real accumulated drift end-to-end -- which is exactly why the single
+GLOBAL Umeyama-fit scale (which has to summarize the WHOLE trajectory in
+one number) lands further from 1.0 than before, while ATE (the metric that
+actually matters, and is grounded directly against ground truth rather
+than being a single rigid-similarity summary statistic) improved by 32.6%.
+Consistent with item 4's already-established finding that `Recovered
+scale` and ATE are only loosely coupled and shouldn't be read as a
+correctness signal on their own. **No fix needed; not a regression.**
+
+Secondary observation (not investigated further, noted for later): a
+separate mid-sequence stretch (`kf#101`/`kf#104`/frames ~3804-3828) hit the
+upper scale clamp (`kScaleMeasClampMax=3.0`) three times in six closures --
+worth a look sometime if that region's accuracy is ever specifically
+suspect, but unrelated to this investigation.
+
+### 12. Tried increasing SIFT `nFeatures` (2000 -> 5000) -- ZERO effect, negative result, real bottleneck identified
+
+Added a CLI override (`argv[33]`, SIFT-only, mirrors ORB's existing
+`argv[16]`) so `kitti_ate` can set `SiftSettings::nFeatures` without a
+recompile. Re-ran the exact item-10 reference config with `nFeatures=5000`:
+result was **byte-identical** to the 2000-default run in every respect
+(72.550m ATE, `Recovered scale` 0.2679, identical per-frame keypoint counts
+throughout, identical trajectory file) -- confirmed via `diff` on the full
+stdout logs, only the `[config] SIFT nFeatures=5000` line differs.
+
+**Root cause**: `nFeatures` is a cap OpenCV's SIFT applies AFTER detection
+(keeps the top-N by response if more than N are found) -- it was never the
+actual bottleneck. Checked the real per-frame yield across the whole
+4541-frame run: max 1591 keypoints, average 754.9, **never once
+approaching even the existing 2000 cap**, so raising the cap to 5000 (or
+any value >= ~1600) is mathematically guaranteed to change nothing. The
+real limiting factors are `kDetectionScale = 0.5` (detection runs on a
+half-resolution copy of the image -- its own doc comment already says this
+was a deliberate real-time-budget tradeoff, ~70ms/frame at full res vs
+~18ms at half) and/or `SiftSettings::contrastThreshold`/`edgeThreshold`
+(0.04/10.0, OpenCV's stock defaults, never tuned for this project). Denser
+per-frame features would need one of THOSE changed, not `nFeatures` --
+which also means it's no longer a free lever: loosening the contrast
+threshold or raising detection resolution has a real speed cost this CLI
+override doesn't. **Not changed pending user direction** (a real-time
+budget tradeoff, not a pure quality-vs-nothing call like `nFeatures` would
+have been). The new `argv[33]` override itself is harmless and kept in the
+tree (matches the existing pattern of opt-in CLI overrides for future
+sweeps), it's just confirmed inert on this pipeline's own detection path
+as currently tuned.
+
+### 13. Tried the REAL lever -- `kDetectionScale` 0.5 -> 1.0 (full-res) -- measured WORSE, reverted to default
+
+Per the user's explicit direction (speed not a concern, only ATE matters):
+moved `kDetectionScale` from a fixed `constexpr` to a runtime-overridable
+`SlamWorker::m_detectionScale` member (`setDetectionScale()`, mirrors how
+`kMinTrackInliers` was migrated earlier), default unchanged at 0.5 so the
+live GUI's real-time budget is untouched. Added `argv[34]` (SIFT-only) to
+`kitti_ate` alongside item 12's `argv[33]` (`nFeatures`, set to 5000 in
+this run too, so a real yield increase wouldn't be capped).
+
+**Confirmed the resolution bump genuinely produces denser keypoints**:
+per-frame counts moved from item 10's ~755 average (max 1591) up into the
+1200-5000 range throughout the run, with `nFeatures=5000` actually binding
+on some frames (unlike item 12's inert 2000->5000 bump). Effective
+throughput dropped from ~13.8fps to ~6.6fps (~72ms/frame -> ~151ms/frame)
+as expected from the doc comment's own ~18ms/~70ms detection-only figures
+-- confirmed harmless for this offline, unthrottled harness (full run
+still finished in well under the 1200s cutoff, reached frame 4541/4541,
+not truncated).
+
+**Result: WORSE, not better.** 72.550m (item 10 baseline) -> **105.692m**
+(+45.7%). Also: `Matched points` dropped (4519->4459/4541, more
+tracking-loss/recovery events), `Recovered scale` moved to 0.5558 (closer
+to 1.0 than item 10's 0.2679, but that's not informative on its own per
+item 11's established finding that this number isn't a quality signal).
+Not root-caused further (out of scope of what was asked -- the lever
+itself was the thing being tested, not why it regressed), but the
+likely mechanism: full-resolution SIFT detects substantially more
+high-frequency/fine-scale keypoints (foliage, distant repeated texture,
+noise) that are individually less stable to triangulate and match across
+frames than the coarser, more structurally-salient set half-res detection
+already found -- i.e. this pipeline's issue was never raw keypoint COUNT,
+consistent with item 12 already showing the existing count wasn't even
+hitting its own cap. **Reverted the run config back to `kDetectionScale`
+default (0.5)** for the current best-known reference command; the
+`setDetectionScale()`/`argv[34]` plumbing itself is kept (harmless,
+opt-in, same rationale as item 12's kept-but-inert `argv[33]`) in case a
+future session wants to sweep intermediate values (e.g. 0.6-0.8) rather
+than the two extremes tested so far. **Current best real, reproducible
+result stays 72.550m** (item 10's config, unchanged by this negative
+result).
+
+### 14. Reviewed `third_party/ORB_SLAM3` for unported mechanisms (user-requested), then started building a real DBoW2 vocabulary for RootSIFT -- found and fixed a genuine non-convergence bug along the way
+
+User asked what else from the real ORB-SLAM3 source could still be applied
+to this custom pipeline, and separately offered to train a proper DBoW2
+vocabulary on Kaggle if one made sense. Read `LoopClosing.cc`/
+`LocalMapping.cc`/`ORBmatcher.cc`/`Optimizer.cc` directly (not from memory)
+and found 3 concrete, unported mechanisms:
+
+1. **Loop closure requires >=3 consecutive keyframe confirmations before
+   committing** (`LoopClosing.cc`, `mnLoopNumCoincidences >= 3` --
+   `DetectCommonRegionsFromBoW()`). `tryLoopClosure()` currently commits on
+   the FIRST geometrically-verified candidate, no temporal-consistency gate
+   at all. Cheapest of the three to try (no training needed), and targets
+   the "loop-closing maturity" gap this session's own summary (item 9) had
+   already flagged as the main remaining accuracy gap vs real ORB-SLAM2.
+   **Queued as this session's next implementation step.**
+2. **`LocalMapping::SearchInNeighbors()` + `ORBmatcher::Fuse()`** -- merges
+   duplicate landmarks across covisible keyframes after every keyframe
+   insertion. `SlamWorker` has NO map-point dedup mechanism at all
+   (confirmed via grep, zero hits). If independently-triangulated
+   near-duplicate landmarks exist for the same physical point, real
+   observation density is fragmented across separate IDs even after items
+   8/10's fixes (which only unify observations already sharing one ID).
+   Not started this session.
+3. **A real DBoW2 vocabulary for RootSIFT** (rather than VLAD) -- see
+   below, started this session at the user's initiative.
+
+**DBoW2-for-SIFT infrastructure built this session** (not yet a measured
+accuracy result -- infrastructure only):
+- `third_party/DBoW2/DBoW2/FRootSift.h`/`.cpp`: a new `DBoW2::FClass`
+  descriptor adapter for RootSIFT (128-dim `CV_32F` rows, squared-L2
+  distance, per-dimension arithmetic mean) -- the vendored DBoW2 only ever
+  shipped `FORB.h` (ORB, Hamming distance). Mirrors `FORB.h/.cpp`'s exact
+  structure. Wired into the `DBoW2` CMake target (`CMakeLists.txt`).
+- `analyze/train_sift_dbow_vocabulary.cpp` (new `train_sift_dbow_vocabulary`
+  CMake target): extracts RootSIFT via the SAME
+  `feature_detector::createDetector()`/`toRootSift()` path `SlamWorker`
+  itself uses (train/runtime descriptor-space parity, same rationale
+  `analyze/orbslam3_vlad_train.cpp` already established for VLAD), builds a
+  `DBoW2::TemplatedVocabulary<cv::Mat, DBoW2::FRootSift>` via `create()`,
+  saves via `saveToTextFile()`.
+- `SlamWorker`: `SiftVocabulary` typedef, `loadSiftVocabulary()`,
+  `setSiftDbowLoopClosureEnabled()`, `Keyframe::siftBowVec` (separate field
+  from the ORB-only `bowVec`, deliberately not reused, so the two
+  vocabulary types can never be cross-scored by mistake),
+  `insertKeyframe()`'s new SIFT-DBoW2 BowVector computation block, and a
+  new highest-priority candidate-search branch in `tryLoopClosure()`
+  (checked before VLAD when both are loaded+enabled -- an ordering choice,
+  not yet a measured comparison). `kitti_ate.cpp` `argv[36]`/`argv[37]`
+  (`siftdbow <vocab-path>`) CLI wiring. All additive/opt-in -- VLAD's own
+  wiring is completely untouched.
+
+**Real bug found and fixed while smoke-testing the trainer**: even a tiny
+vocabulary (k=8, L=3 -- 3 tree levels, well under the theoretical 512-word
+max) over a small sample (91 images, 169,960 descriptors) did not finish
+in 400+ seconds. Root-caused by reading `TemplatedVocabulary.h`'s
+`HKmeansStep()` directly: its k-means convergence loop
+(`while(goon) { ... }`) has **no iteration cap at all** -- it only stops
+once cluster assignment is bit-for-bit IDENTICAL between consecutive
+iterations. That's fine for `FORB`'s coarse integer Hamming distances (few
+near-ties in practice), but pathological for `FRootSift`'s continuous
+float L2 distances: a point sitting near an almost-equidistant boundary
+between two clusters can keep flipping assignment indefinitely as the
+floating-point centroids shift by a tiny amount every iteration, with no
+tolerance threshold to absorb that. **Fix**: added a `kMaxHKmeansIterations
+= 50` cap to the `while` loop condition, the same standard fix this
+project's own `cv::kmeans` call (`orbslam3_vlad_train.cpp`) already applies
+via `cv::TermCriteria`'s own max-iteration bound. This is a real,
+documented modification to vendored third-party code (same file already
+had ORB-SLAM3's own text-format serialization additions layered onto
+upstream DBoW2, so this isn't unprecedented for this file specifically).
+
+**Verified the fix**: the identical k=8/L=3/91-image smoke test that never
+finished before now completes in **30 seconds**, producing a 210-word
+vocabulary. Sanity check (adjacent vs. distant frame BoW score, same
+pattern `orbslam3_vlad_train.cpp`'s own end-of-run check uses): frame0<->1
+(adjacent) scored 0.7135, frame0<->200 (distant) scored 0.3214 -- adjacent
+notably higher, as expected, confirming the vocabulary captures real
+appearance similarity, not noise.
+
+**Not yet done**: a real, full-size vocabulary (larger k/L, more training
+images) has not been trained -- this smoke test used a deliberately tiny
+k/L/stride just to validate the pipeline end-to-end. The user is preparing
+to run real training on Kaggle; a Kaggle notebook for this was queued as
+the next step. No ATE measurement with a trained SIFT-DBoW2 vocabulary
+exists yet -- VLAD remains the only measured SIFT loop-closure candidate
+search on this pipeline (see item 9's 107.676m and item 10's 72.550m,
+both VLAD-based).
+
+### Queued next steps (not started this session, in priority order per the user's own direction)
+
+0. **Prepare and run a real (non-smoke-test) DBoW2/RootSIFT vocabulary
+   training job on Kaggle** (item 14) -- notebook not yet created. Then
+   measure `siftdbow` vs `vlad` head-to-head on the same 72.550m-baseline
+   config (single-variable swap). User's explicit instruction: do this
+   BEFORE item 1 below.
+1. **Loop closure requires >=3 consecutive keyframe confirmations before
+   committing** (item 14's finding #1, from reading `LoopClosing.cc`
+   directly -- `mnLoopNumCoincidences >= 3`) -- `tryLoopClosure()`
+   currently commits on the first verified candidate, no temporal-
+   consistency gate. Cheapest of item 14's three findings to try (no
+   training needed), directly targets the "loop-closing maturity" gap
+   already diagnosed as the main remaining accuracy gap. **User's explicit
+   instruction: re-run the current best baseline (72.550m config) fresh
+   right before implementing this**, so the comparison is against a
+   just-confirmed number, not a stale one from earlier in the session.
+2. **Increase `kLocalBaWindowKeyframes` (currently 8)** -- previously a
+   larger window wouldn't have helped much under the old ownership-only
+   rule (most landmarks in a big window were still "owned" by only a few
+   early keyframes in it); now that observation density is unlocked (item
+   8, and now item 10's loop-BA equivalent), a larger window may capture
+   meaningfully more real multi-view constraint. Not yet tested.
+3. `LocalMapping::SearchInNeighbors()`/`ORBmatcher::Fuse()`-style map-point
+   dedup across covisible keyframes (item 14's finding #2) -- SlamWorker
+   has none at all currently; may be fragmenting real observation density
+   across duplicate landmark IDs for the same physical point. Not started.
+4. **Denser SIFT features via raw count is now a CLOSED, negative direction**
+   -- item 12 showed `nFeatures` alone is inert (never hit its own cap),
+   item 13 tested the real lever (`kDetectionScale` 0.5->1.0, full-res) and
+   measured it WORSE (72.550m->105.692m), likely because full-res adds
+   less-stable high-frequency keypoints rather than more of the useful
+   kind. Not recommended to revisit via detection scale/resolution again
+   without a new hypothesis; `contrastThreshold`/`edgeThreshold` remain
+   untested (a stricter, not looser, threshold might be the more promising
+   direction given item 13's finding -- fewer but higher-quality
+   keypoints -- but that's speculative, not yet tried).
+5. Re-test SQPnP + posegraph/Sim3Solver combined (todo, not yet measured
+   whether Sim3Solver's improved measurement changes anything about
+   SQPnP's own trajectory specifically, as opposed to the P3P baseline it
+   was tested against in item 9). Note the offline-posegraph-vs-live-
+   tracking comparison in items 5/6 was run against a live-tracking
+   baseline that predates item 10's fix -- if this direction is revisited,
+   re-measure against the new 72.550m baseline, not the old 120-125m one.
+6. `runGlobalBundleAdjustment()` still has the identical ownership-only
+   landmark rule (`SlamWorker.cpp`, its own comment says "same conservative
+   landmark rule as runLoopBundleAdjustment()", now stale after item 10) --
+   not yet fixed or measured. Lower priority than the above since global BA
+   fires less often than loop BA, but the same mechanism may apply.
+
+### Known-good reference command (this session's best config, SQPnP)
+
+```
+kitti_ate <left-pattern> <poses> 1200 sqpnp <out-prefix> fivepoint - - - ba \
+  - - - - - - - - - - - - - - localba - - guided - vlad <vlad-codebook-path>
+```
+(argv positions: 4=pnp-method, 10=ba/windowed-loop-BA, 25=localba, 28=guided,
+30/31=vlad+codebook-path -- see `kitti_ate.cpp`'s own usage text for the
+full, current list; several argv slots shifted this session after the
+stereo flag's removal, so old recorded commands from before this session
+may no longer line up with current positions.)
+
 ## Part 58 (2026-07-20, GPU session on Kaggle): LightGlue closed as a paper-grounded negative result, CudaSIFT+RootSIFT integrated and debugged live, final result -- best-ever per-match accepted rate (45%) but 0% scorable coverage due to a reset-timing artifact
 
 Continuation of part 57's LightGlue investigation, moved to a Kaggle T4 GPU

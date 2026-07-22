@@ -66,6 +66,24 @@ struct LoopClosureRecord
     int oldKfIdx = -1;
     int newKfIdx = -1;
     cv::Mat R, t;
+
+    // Real scale-drift measurement: the ratio (PnP-loop-measured
+    // oldKf<->newKf camera-center distance) / (live/drifted oldKf<->newKf
+    // camera-center distance), both computed at observation time in
+    // SlamWorker::tryLoopClosure(). loopR/loopT (which R/t above derive
+    // from) is a PnP solve against oldKf's own already-triangulated,
+    // real-scale 3D points -- PnP has no scale ambiguity of its own, so
+    // this ratio isolates exactly how far the live trajectory's own
+    // internal scale has drifted from real scale by the time it looped
+    // back around, without needing a separate re-triangulated 3D-3D
+    // similarity solve (which would only re-derive a noisier version of
+    // the rotation/translation this file already trusts). Only loop edges
+    // carry a real value here -- sequential edges have no independent
+    // scale evidence (see SequentialEdgeRecord, which has no such field)
+    // and PoseGraphOptimizer.cpp's Sim(3) path keeps sMeas=1 for those,
+    // same as before. Defaults to 1.0 (scale-neutral) so any caller that
+    // doesn't set it explicitly gets the old SE(3)-equivalent behavior.
+    double scale = 1.0;
 };
 
 // The RELATIVE transform from keyframe i to keyframe i+1 (i = index into
@@ -85,7 +103,7 @@ struct SequentialEdgeRecord
 struct PoseGraphOptions
 {
     int outerIterations = 5; // DCS/IRLS re-weight-then-re-solve rounds
-    double dcsPhi = 1.0;     // DCS tuning constant -- NOT chi-square-calibrated by default, see
+    double dcsPhi = 1000.0;     // DCS tuning constant -- NOT chi-square-calibrated by default, see
                              // PoseGraphOptimizer.cpp's calibration note; must be tuned empirically
     double rotationWeight = 8.0;  // world-units-per-radian scale so rotation/translation residuals
                                   // are comparable in one combined chi-square
@@ -133,6 +151,23 @@ struct PoseGraphOptions
                               // (closer to the rigid SE(3) behavior); smaller values let scale drift
                               // more freely between what the loop edges' own absolute measurements
                               // pin down. Not chi-square-calibrated, same caveat as rotationWeight.
+
+    // useSim3 only: multiplies the information matrix (i.e. inverse
+    // covariance -- NOT chi2 directly, chi2 scales with the SQUARE of this)
+    // for every sequential AND covisibility edge (SlamWorker::
+    // covisibilityEdgeRecords(), see its own doc comment), relative to loop
+    // edges which always use weight 1.0. Added 2026-07-21 after confirming
+    // Essential-Graph-style covisibility edges give sequential+covisibility
+    // edges real, nonzero internal constraint for the first time (previously
+    // every sequential edge's chi2 measured exactly 0.000 with no
+    // covisibility edges at all) -- but even so, loop-edge chi2 still
+    // outweighed sequential+covisibility chi2 by ~18x (1034.8 vs 57.6 on a
+    // real run), meaning the graph was still almost entirely loop-edge-
+    // driven and posegraph correction still underperformed live tracking
+    // (152.480m vs 125.195m). This lets that imbalance be corrected without
+    // touching dcsPhi/scaleWeight (which only affect the loop-edge side).
+    // Defaults to 1.0 (no change from before this option existed).
+    double sequentialWeightMultiplier = 1.0;
 };
 
 // Mutates keyframes[i].R/.t in place on success (left untouched on failure).

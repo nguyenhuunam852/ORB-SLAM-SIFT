@@ -114,6 +114,9 @@ struct EdgeMeasurement
 struct LoopEdge : EdgeMeasurement
 {
     double weight = 1.0; // DCS s^2, recomputed every outer iteration
+    double scaleMeas = 1.0; // Sim3 path only -- see LoopClosureRecord::scale's own doc comment.
+                             // Unused by the SE(3)/Ceres path above (SimilarityPoseCost isn't
+                             // reachable from rigid SE(3) edges at all).
 };
 
 void fillParamsFromPose(std::array<double, 6> &block, const cv::Mat &R, const cv::Mat &t)
@@ -304,6 +307,7 @@ bool optimizePoseGraphSim3(std::vector<KeyframePose> &keyframes,
             continue;
         LoopEdge e;
         static_cast<EdgeMeasurement &>(e) = {lc.oldKfIdx, lc.newKfIdx, lc.R, lc.t};
+        e.scaleMeas = lc.scale; // real scale-drift measurement -- see LoopClosureRecord::scale's doc comment
         loopEdges.push_back(std::move(e));
     }
 
@@ -322,11 +326,47 @@ bool optimizePoseGraphSim3(std::vector<KeyframePose> &keyframes,
     // rotationWeight existed for in the Ceres version: these three
     // quantities have unrelated natural units (radians, world-units,
     // log-scale) and aren't comparable in one combined chi-square without it.
+    //
+    // translationScale: root-cause fix for a real bug found by direct
+    // reproduction (see [posegraph][sim3][g2o] logs) -- EdgeSim3 has no
+    // analytic linearizeOplus(), so g2o falls back to numeric
+    // differentiation with a FIXED absolute perturbation (delta=1e-9, see
+    // g2o's base_binary_edge.hpp) applied directly to the manifold update,
+    // i.e. to translation in this codebase's own raw "world units" (NOT
+    // metric -- recovered scale this session was ~0.15, so world-units run
+    // roughly 6-7x larger than meters, and a monocular trajectory's own
+    // vertex translations reach into the thousands to tens of thousands by
+    // the end of a long sequence). At that magnitude, delta/|t| approaches
+    // double-precision round-off (~2.2e-16) closely enough that the
+    // finite-difference translation columns of the Jacobian are dominated
+    // by floating-point noise, not signal -- confirmed via reproduction:
+    // g2o's Levenberg-Marquardt solver rejected every single proposed step
+    // (chi2 never improved, lambda ballooned to ~1e17, exhausted
+    // maxTrialsAfterFailure=10, returned with vertices completely
+    // unmoved), regardless of dcsPhi tuning (also tried, ruled out
+    // separately). Real ORB-SLAM2/3 never hits this because ITS Essential
+    // Graph runs on metric-scale keyframe translations (already real
+    // meters, typically O(1-100) for the scenes it targets) where a 1e-9
+    // absolute perturbation is comfortably resolvable. Fix: rescale every
+    // translation fed into g2o (vertices AND edge measurements) into a
+    // similarly well-conditioned range before optimizing, then rescale the
+    // result back -- a pure unit-system change (like meters vs
+    // millimeters), mathematically inert for a similarity transform since
+    // rotation/scale don't depend on the translation unit. infoDiag's
+    // translation weighting is scaled by translationScale^2 to exactly
+    // compensate, so the same real-world discrepancy still contributes the
+    // same chi2 as before this fix -- only the numeric conditioning changes.
+    double translationScale = 1.0;
+    for (const auto &p : params)
+        translationScale = std::max({translationScale, std::fabs(p[3]), std::fabs(p[4]), std::fabs(p[5])});
+    translationScale /= 100.0; // land typical translation magnitudes around O(1-100)
+    std::fprintf(stderr, "[posegraph][sim3][diag] translationScale=%.6f (n=%d vertices)\n", translationScale, n);
+
     Eigen::Matrix<double, 7, 7> infoDiag = Eigen::Matrix<double, 7, 7>::Zero();
     for (int d = 0; d < 3; ++d)
         infoDiag(d, d) = opts.rotationWeight * opts.rotationWeight;
     for (int d = 3; d < 6; ++d)
-        infoDiag(d, d) = 1.0;
+        infoDiag(d, d) = translationScale * translationScale;
     infoDiag(6, 6) = opts.scaleWeight * opts.scaleWeight;
 
     auto toEigenR = [](const cv::Mat &R) {
@@ -336,7 +376,9 @@ bool optimizePoseGraphSim3(std::vector<KeyframePose> &keyframes,
                 Reig(r, c) = R.at<double>(r, c);
         return Reig;
     };
-    auto toEigenT = [](const cv::Mat &t) { return Eigen::Vector3d(t.at<double>(0), t.at<double>(1), t.at<double>(2)); };
+    auto toEigenT = [translationScale](const cv::Mat &t) {
+        return Eigen::Vector3d(t.at<double>(0), t.at<double>(1), t.at<double>(2)) / translationScale;
+    };
 
     // Heap-allocated and deliberately never destroyed (leaked): g2o's
     // SparseOptimizer/OptimizableGraph destructor (HyperGraph::clear())
@@ -372,19 +414,28 @@ bool optimizePoseGraphSim3(std::vector<KeyframePose> &keyframes,
         vertices[static_cast<size_t>(i)] = v;
     }
 
-    auto makeEdge = [&](const EdgeMeasurement &e) {
-        g2o::Sim3 measurement(toEigenR(e.R), toEigenT(e.t), 1.0); // sMeas=1 -- see
-                                                                    // PoseGraphOptions::useSim3's doc comment
+    // sMeas defaults to 1.0 (sequential edges, and any loop edge with no
+    // real scale evidence -- see PoseGraphOptions::useSim3's doc comment
+    // for why sMeas=1 was the ONLY option before LoopClosureRecord::scale
+    // existed). Loop edges now pass their own real measured value (see the
+    // loop-edge call site below and LoopClosureRecord::scale's own doc
+    // comment) -- this is what actually gives Sim(3)'s extra scale DOF
+    // something to correct, instead of it sitting inert at exactly 1.0
+    // everywhere (confirmed empirically this session: with every edge at
+    // sMeas=1, scaleWeight had ZERO effect on the solve, any value from
+    // 8 to 1000 produced byte-identical output).
+    auto makeEdge = [&](const EdgeMeasurement &e, double sMeas = 1.0, double weightMultiplier = 1.0) {
+        g2o::Sim3 measurement(toEigenR(e.R), toEigenT(e.t), sMeas);
         auto *edge = new g2o::EdgeSim3();
         edge->setVertex(0, vertices[static_cast<size_t>(e.i)]);
         edge->setVertex(1, vertices[static_cast<size_t>(e.j)]);
         edge->setMeasurement(measurement);
-        edge->information() = infoDiag;
+        edge->information() = infoDiag * weightMultiplier;
         return edge;
     };
 
     for (const EdgeMeasurement &e : sequentialEdges) {
-        g2o::EdgeSim3 *edge = makeEdge(e);
+        g2o::EdgeSim3 *edge = makeEdge(e, 1.0, opts.sequentialWeightMultiplier);
         auto *rk = new g2o::RobustKernelHuber();
         rk->setDelta(opts.sequentialHuberDelta);
         edge->setRobustKernel(rk);
@@ -401,7 +452,7 @@ bool optimizePoseGraphSim3(std::vector<KeyframePose> &keyframes,
     // so a single optimize() call now does what used to take
     // opts.outerIterations full rebuild-and-resolve passes.
     for (const LoopEdge &e : loopEdges) {
-        g2o::EdgeSim3 *edge = makeEdge(e);
+        g2o::EdgeSim3 *edge = makeEdge(e, e.scaleMeas);
         auto *rk = new g2o::RobustKernelDCS();
         rk->setDelta(opts.dcsPhi);
         edge->setRobustKernel(rk);
@@ -411,6 +462,64 @@ bool optimizePoseGraphSim3(std::vector<KeyframePose> &keyframes,
     optimizer->initializeOptimization();
     optimizer->computeActiveErrors(); // must run before activeChi2() below has anything to read --
                                        // without it activeChi2() reports a stale/inf value
+
+    // Non-finite-edge guard: found by direct reproduction (see git history/
+    // DEBUGGING.md for the full investigation trail) that a small,
+    // non-deterministic fraction of runs produce ONE edge whose measurement
+    // and vertex estimates are individually finite and well-formed, but
+    // whose g2o::Sim3::log() error vector still comes out non-finite --
+    // e.g. a rotation/translation pairing that lands exactly on (or very
+    // near) one of log()'s internal piecewise-branch boundaries (see
+    // sim3.h's own `if (fabs(sigma)<eps)` / `if (d>1-eps)` branches and the
+    // `W.lu().solve(t)` linear solve inside them). Root-caused down to
+    // g2o's own numerics, not this file's edge construction (confirmed:
+    // e.R/e.t and the warm-start chain both check finite right up to the
+    // point of construction). Left unresolved at that level (a genuine g2o
+    // library edge case, not something worth patching upstream for a
+    // batch offline tool) -- instead, guard defensively: any edge whose
+    // computed error is non-finite gets DROPPED from the graph before
+    // solving, exactly like DCS/Huber already drop the WEIGHT of an edge
+    // whose residual is merely large. One bad edge silently poisoning
+    // chi2/lambda for the entire graph (confirmed: this alone made the
+    // whole solve return "1 iteration, cost unchanged" every time it hit)
+    // is worse than just not using that one edge's evidence this run.
+    std::vector<g2o::EdgeSim3 *> badEdges;
+    {
+        double seqSum = 0.0, loopSum = 0.0;
+        double seqMax = 0.0, loopMax = 0.0;
+        int nanCount = 0;
+        for (auto *e : optimizer->edges()) {
+            auto *se = dynamic_cast<g2o::EdgeSim3 *>(e);
+            if (!se)
+                continue;
+            se->computeError();
+            const double c = se->chi2();
+            const bool finite = std::isfinite(c);
+            if (!finite) {
+                ++nanCount;
+                badEdges.push_back(se);
+                continue;
+            }
+            // Loop edges use RobustKernelDCS, sequential use RobustKernelHuber --
+            // distinguish by robust kernel type since that's how they were added.
+            if (dynamic_cast<g2o::RobustKernelDCS *>(se->robustKernel()) != nullptr) {
+                loopSum += c;
+                loopMax = std::max(loopMax, c);
+            } else {
+                seqSum += c;
+                seqMax = std::max(seqMax, c);
+            }
+        }
+        std::fprintf(stderr,
+                      "[posegraph][sim3][diag] seqEdges chi2 sum=%.3f max=%.3f | loopEdges chi2 sum=%.3f "
+                      "max=%.3f | nonFiniteEdges=%d (dropped)\n",
+                      seqSum, seqMax, loopSum, loopMax, nanCount);
+    }
+    for (g2o::EdgeSim3 *se : badEdges)
+        optimizer->removeEdge(se);
+    if (!badEdges.empty())
+        optimizer->initializeOptimization(); // active-edge set changed -- must rebuild before solving
+
     const double initialChi2 = optimizer->activeChi2();
     const int totalIterations = std::max(1, opts.outerIterations) * opts.maxSolverIterations;
     const int iterationsRun = optimizer->optimize(totalIterations);
@@ -428,7 +537,11 @@ bool optimizePoseGraphSim3(std::vector<KeyframePose> &keyframes,
         for (int r = 0; r < 3; ++r)
             for (int c = 0; c < 3; ++c)
                 R.at<double>(r, c) = Reig(r, c);
-        const cv::Mat t = (cv::Mat_<double>(3, 1) << est.translation()(0), est.translation()(1), est.translation()(2));
+        // Undo translationScale (see its own doc comment above) -- g2o's
+        // vertex estimate is in the rescaled unit system, not this
+        // codebase's own world units.
+        const cv::Mat t = (cv::Mat_<double>(3, 1) << est.translation()(0) * translationScale,
+                            est.translation()(1) * translationScale, est.translation()(2) * translationScale);
         keyframes[static_cast<size_t>(i)].R = R;
         keyframes[static_cast<size_t>(i)].t = t;
     }
@@ -551,6 +664,8 @@ bool optimizePoseGraph(std::vector<KeyframePose> &keyframes, const std::vector<S
         options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
         options.max_num_iterations = opts.maxSolverIterations;
         options.minimizer_progress_to_stdout = false;
+        options.num_threads = 1; // pinned for run-to-run reproducibility -- see kitti_ate.cpp's
+        // own cv::setNumThreads(1) call for the matching OpenCV-side fix
         ceres::Solver::Summary summary;
         ceres::Solve(options, &problem, &summary);
         if (!summary.IsSolutionUsable()) {

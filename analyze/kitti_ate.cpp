@@ -100,6 +100,24 @@ bool umeyama2D(const std::vector<Point2> &src, const std::vector<Point2> &dst, d
 
 int main(int argc, char *argv[])
 {
+    // NOTE: this session (2026-07-21) confirmed the SAME binary/config/
+    // input on full KITTI seq00 produced materially different ATE across
+    // separate runs (93.851m, 127.412m, 138.464m, 150.514m). Root cause:
+    // OpenCV's SIFT detection runs cv::parallel_for_ internally (across
+    // pyramid octaves), so the ORDER kps/descriptors come back in was
+    // run-dependent even though the SET found was identical -- a different
+    // order fed a different actual correspondence subset to the
+    // fixed-seed (kRansacSeed) RANSAC, which could flip a threshold-
+    // boundary loop-closure accept/reject decision and cascade through
+    // thousands of downstream frames. Fixed at the source instead of here:
+    // SlamWorker.cpp's processNext() now sorts kps/descriptors into a
+    // fixed, position-based order right after detectAndCompute(), so
+    // multi-threaded detection speed is kept (a blanket
+    // cv::setNumThreads(1) here measured >2x slower per frame and was
+    // reverted). ceres::Solver::Options::num_threads is still pinned to 1
+    // in SlamWorker.cpp/PoseGraphOptimizer.cpp as cheap extra insurance
+    // against BA's own reduction-order sensitivity, which costs
+    // negligible speed since BA isn't the per-frame bottleneck.
     QCoreApplication app(argc, argv);
 
     if (argc < 3) {
@@ -162,7 +180,27 @@ int main(int argc, char *argv[])
                       "PnpSettings::reprojectionError (default 8.0px) / iterationsCount (default 100) "
                       "for trackFrame()'s live PnP RANSAC.\n"
                       "  [argv24] min-track-inliers: overrides trackFrame()'s minimum-accepted-inlier-"
-                      "count gate (default 10, see SlamWorker::setMinTrackInliers()).\n");
+                      "count gate (default 10, see SlamWorker::setMinTrackInliers()).\n"
+                      "  [argv30]/[argv31] vlad <codebook-path>: SIFT only, pass the literal word 'vlad' "
+                      "followed by a VLAD codebook path (e.g. "
+                      "vocabulary_sift/vlad_codebook_all_rootsift.yml) to enable VLAD place-recognition "
+                      "scoring for the loop-closure candidate search (see "
+                      "SlamWorker::setVladLoopClosureEnabled()) instead of the default raw-match-count "
+                      "search.\n"
+                      "  [argv33] sift-features: SIFT only, overrides SiftSettings::nFeatures (default "
+                      "2000).\n"
+                      "  [argv34] sift-detection-scale: SIFT only, overrides SlamWorker's detection "
+                      "resolution fraction (default 0.5, half-res; 1.0 = full-res).\n"
+                      "  [argv36]/[argv37] siftdbow <vocab-path>: SIFT only, pass the literal word "
+                      "'siftdbow' followed by a DBoW2 vocabulary path trained via "
+                      "analyze/train_sift_dbow_vocabulary.cpp to enable real TF-IDF place-recognition "
+                      "scoring for the loop-closure candidate search (see "
+                      "SlamWorker::setSiftDbowLoopClosureEnabled()) -- checked before 'vlad' when both "
+                      "are passed.\n"
+                      "  [argv38] loopconsistency: pass the literal word 'loopconsistency' to require a "
+                      "loop candidate be re-verified across several consecutive-ish keyframe insertions "
+                      "before its correction is applied (see "
+                      "SlamWorker::setLoopConsistencyGroupEnabled()).\n");
         return 1;
     }
     const QString imagePattern = QString::fromLocal8Bit(argv[1]);
@@ -261,6 +299,42 @@ int main(int argc, char *argv[])
         }
     } else {
         std::fprintf(stderr, "[config] feature detector=SIFT (default)\n");
+
+        // argv[33], SIFT only: override SiftSettings::nFeatures (default
+        // 2000). Same lever as argv[16]'s ORB equivalent -- denser
+        // per-frame keypoints feed denser PnP/BA constraints (queued next
+        // step after Session 15's local-BA/loop-BA observation-density
+        // fixes, which unlocked real multi-view constraint density but are
+        // still capped by how many candidate keypoints exist per frame in
+        // the first place).
+        if (argc > 33) {
+            const int nFeatures = std::atoi(argv[33]);
+            if (nFeatures > 0) {
+                SiftSettings siftSettings;
+                siftSettings.nFeatures = nFeatures;
+                worker.setSiftSettings(siftSettings);
+                std::fprintf(stderr, "[config] SIFT nFeatures=%d\n", nFeatures);
+            }
+        }
+
+        // argv[34], SIFT only (ORB's own detector already runs at full
+        // resolution -- see FeatureDetector.h): overrides
+        // SlamWorker::setDetectionScale() (default 0.5, half-resolution).
+        // argv[33]'s nFeatures bump was confirmed inert -- per-frame
+        // detection never approached even the 2000 default cap (max 1591,
+        // avg 754.9 over full seq00) -- so this is the actual lever for
+        // denser keypoints: raising resolution toward 1.0 (full-res) gives
+        // the pyramid more real image detail to find candidates in. Only
+        // safe to try in an unthrottled harness like this one (see
+        // startUnthrottled() below) -- the live GUI's default stays 0.5
+        // for its own real-time budget, untouched by this override.
+        if (argc > 34) {
+            const double detectionScale = std::atof(argv[34]);
+            if (detectionScale > 0.0 && detectionScale <= 1.0) {
+                worker.setDetectionScale(detectionScale);
+                std::fprintf(stderr, "[config] SIFT detectionScale=%.2f\n", detectionScale);
+            }
+        }
     }
 
     if (argc > 15 && std::strcmp(argv[15], "mutualmatch") == 0) {
@@ -328,6 +402,58 @@ int main(int argc, char *argv[])
         worker.setQualityDrivenKeyframesEnabled(true);
         std::fprintf(stderr, "[config] quality-driven keyframe insertion enabled\n");
     }
+
+    // argv[30]/argv[31]: pass the literal word 'vlad' followed by a VLAD
+    // codebook path (e.g. vocabulary_sift/vlad_codebook_all_rootsift.yml,
+    // see SlamWorker::loadVladVocabulary()) to enable VLAD place-recognition
+    // scoring for tryLoopClosure()'s candidate search (see
+    // SlamWorker::setVladLoopClosureEnabled()) -- the SIFT-compatible
+    // counterpart to 'dbow' above. Detector-specific like dbow: meaningful
+    // only when SIFT (the default) is the active detector, and only if the
+    // codebook was trained on the same descriptor space this build produces
+    // (RootSIFT after FeatureDetector.h's toRootSift() -- the
+    // "_rootsift" codebook, not the plain vlad_codebook_all.yml).
+    if (argc > 31 && std::strcmp(argv[30], "vlad") == 0) {
+        if (worker.loadVladVocabulary(QString::fromLocal8Bit(argv[31]))) {
+            worker.setVladLoopClosureEnabled(true);
+            std::fprintf(stderr, "[config] VLAD loop-closure candidate search enabled\n");
+        } else {
+            std::fprintf(stderr, "[config] WARNING: failed to load VLAD codebook from %s -- "
+                                  "continuing with the raw-match-count loop search\n", argv[31]);
+        }
+    }
+
+    // argv[36]/argv[37]: pass the literal word 'siftdbow' followed by a
+    // vocabulary path (see analyze/train_sift_dbow_vocabulary.cpp,
+    // SlamWorker::loadSiftVocabulary()) to enable real DBoW2/TF-IDF
+    // place-recognition scoring for tryLoopClosure()'s candidate search,
+    // as a second SIFT-compatible alternative to 'vlad' above (checked
+    // first when both are passed, see setSiftDbowLoopClosureEnabled()'s
+    // own doc comment). Detector-specific like vlad/dbow: meaningful only
+    // when SIFT is the active detector, and only if the vocabulary was
+    // trained on this build's own RootSIFT descriptor space.
+    if (argc > 37 && std::strcmp(argv[36], "siftdbow") == 0) {
+        if (worker.loadSiftVocabulary(QString::fromLocal8Bit(argv[37]))) {
+            worker.setSiftDbowLoopClosureEnabled(true);
+            std::fprintf(stderr, "[config] SIFT DBoW2 loop-closure candidate search enabled\n");
+        } else {
+            std::fprintf(stderr, "[config] WARNING: failed to load SIFT DBoW2 vocabulary from %s -- "
+                                  "continuing with VLAD/raw-match-count loop search\n", argv[37]);
+        }
+    }
+
+    // argv[38]: pass the literal word 'loopconsistency' to require a loop
+    // candidate be independently re-verified across several consecutive-ish
+    // keyframe insertions before its correction is actually applied (see
+    // SlamWorker::setLoopConsistencyGroupEnabled() -- a simplified
+    // adaptation of real ORB-SLAM3's mnLoopNumCoincidences>=3 gate).
+    // Detector-agnostic: applies to whichever candidate-search backend
+    // (siftdbow/vlad/dbow/raw-match-count) is active.
+    if (argc > 38 && std::strcmp(argv[38], "loopconsistency") == 0) {
+        worker.setLoopConsistencyGroupEnabled(true);
+        std::fprintf(stderr, "[config] loop-closure temporal-consistency gate enabled\n");
+    }
+
 
     if (argc > 9 && std::strcmp(argv[9], "groundplane") == 0) {
         worker.setGroundPlaneEnabled(true);
@@ -528,11 +654,100 @@ int main(int argc, char *argv[])
         return 1;
 
     if (argc > 13 && std::strcmp(argv[13], "posegraph") == 0) {
-        std::vector<pose_graph::KeyframePose> optimized = worker.keyframePoses(); // mutated in place on success
-        const std::vector<pose_graph::SequentialEdgeRecord> &sequential = worker.sequentialEdgeRecords();
+        // [argv35] covis: pass the literal word 'covis' to add Essential-
+        // Graph-style covisibility edges (any two keyframes sharing >=100
+        // jointly-observed landmarks, see SlamWorker::covisibilityEdgeRecords())
+        // alongside the plain sequential chain -- see that function's own
+        // doc comment for why a sequential-only graph has essentially zero
+        // internal constraint (every sequential edge's chi2 was measured
+        // at exactly 0.000 this session).
+        std::vector<pose_graph::SequentialEdgeRecord> sequential = worker.sequentialEdgeRecords();
+        const size_t sequentialOnlyCount = sequential.size();
+        if (argc > 35 && std::strcmp(argv[35], "covis") == 0) {
+            const std::vector<pose_graph::SequentialEdgeRecord> covis = worker.covisibilityEdgeRecords();
+            sequential.insert(sequential.end(), covis.begin(), covis.end());
+        }
         const std::vector<pose_graph::LoopClosureRecord> &loops = worker.loopClosureRecords();
-        std::fprintf(stderr, "[posegraph] starting: %zu keyframes, %zu sequential edges, %zu loop closures\n",
-                     optimized.size(), sequential.size(), loops.size());
+        std::fprintf(stderr,
+                     "[posegraph] starting: %zu keyframes, %zu sequential edges (%zu covisibility), %zu loop closures\n",
+                     worker.keyframePoses().size(), sequential.size(), sequential.size() - sequentialOnlyCount,
+                     loops.size());
+
+        // argv[32] 'sweep': instead of a single solve, try a grid of
+        // (dcsPhi, scaleWeight) combinations against the SAME already-
+        // tracked keyframes/edges (re-fetching a fresh worker.keyframePoses()
+        // copy each time, since optimizePoseGraph() mutates its `keyframes`
+        // argument in place) -- avoids a full ~4-13 minute re-track per
+        // parameter combination tried. Sim3 always on (a sweep of SE(3)'s
+        // rigid path wouldn't need dcsPhi/scaleWeight tuning the same way).
+        // Prints one compact line per combo instead of the usual full
+        // multi-line ATE report; does not write any trajectory files.
+        if (argc > 32 && std::strcmp(argv[32], "sweep") == 0) {
+            auto quickAte = [&](const QVector<QPointF> &trajIn, const QVector<int> &framesIn) -> double {
+                std::vector<Point2> src, dst;
+                for (int i = 0; i < trajIn.size(); ++i) {
+                    const int gtIdx = framesIn[i] - 1;
+                    if (gtIdx < 0 || gtIdx >= static_cast<int>(gt.size()))
+                        continue;
+                    src.push_back({trajIn[i].x(), trajIn[i].y()});
+                    dst.push_back(gt[gtIdx]);
+                }
+                double scale = 1.0, cosT = 1.0, sinT = 0.0, tx = 0.0, tz = 0.0;
+                if (!umeyama2D(src, dst, scale, cosT, sinT, tx, tz))
+                    return -1.0;
+                double sumSq = 0.0;
+                for (size_t i = 0; i < src.size(); ++i) {
+                    const double ax = scale * (cosT * src[i].x - sinT * src[i].z) + tx;
+                    const double az = scale * (sinT * src[i].x + cosT * src[i].z) + tz;
+                    const double dx = ax - dst[i].x, dz = az - dst[i].z;
+                    sumSq += dx * dx + dz * dz;
+                }
+                return std::sqrt(sumSq / static_cast<double>(src.size()));
+            };
+
+            const double liveAte = quickAte(traj, frames);
+            std::fprintf(stderr, "[posegraph][sweep] live (uncorrected) ATE RMSE=%.3f\n", liveAte);
+
+            const double dcsPhiValues[] = {1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0};
+            const double scaleWeightValues[] = {8.0, 50.0, 200.0, 1000.0};
+            // sequentialWeightMultiplier: added 2026-07-21 alongside the
+            // covisibility edges themselves -- see PoseGraphOptions's own
+            // doc comment for why (loop-edge chi2 outweighed sequential+
+            // covisibility chi2 ~18x even with covisibility edges present,
+            // 1034.8 vs 57.6 on a real run, so the graph was still almost
+            // entirely loop-edge-driven). Swept alongside dcsPhi/scaleWeight
+            // to see whether rebalancing this fixes what covisibility edges
+            // alone didn't.
+            const double seqWeightValues[] = {1.0, 5.0, 20.0, 100.0, 500.0};
+            for (double seqWeight : seqWeightValues) {
+                for (double dcsPhi : dcsPhiValues) {
+                    for (double scaleWeight : scaleWeightValues) {
+                        std::vector<pose_graph::KeyframePose> trial = worker.keyframePoses();
+                        std::vector<pose_graph::KeyframePose> trialWarmStart;
+                        pose_graph::PoseGraphOptions trialOptions;
+                        trialOptions.useSim3 = true;
+                        trialOptions.dcsPhi = dcsPhi;
+                        trialOptions.scaleWeight = scaleWeight;
+                        trialOptions.sequentialWeightMultiplier = seqWeight;
+                        if (!pose_graph::optimizePoseGraph(trial, sequential, loops, trialOptions, &trialWarmStart)) {
+                            std::fprintf(stderr,
+                                         "[posegraph][sweep] seqWeight=%.1f dcsPhi=%.1f scaleWeight=%.1f solve FAILED\n",
+                                         seqWeight, dcsPhi, scaleWeight);
+                            continue;
+                        }
+                        const QVector<QPointF> trajCorrected =
+                            pose_graph::applyPoseGraphCorrection(trialWarmStart, trial, traj, frames, loops);
+                        const double ate = quickAte(trajCorrected, frames);
+                        std::fprintf(stderr, "[posegraph][sweep] seqWeight=%.1f dcsPhi=%.1f scaleWeight=%.1f ATE RMSE=%.3f%s\n",
+                                     seqWeight, dcsPhi, scaleWeight, ate,
+                                     (liveAte > 0 && ate > 0 && ate < liveAte) ? "  <-- BETTER" : "");
+                    }
+                }
+            }
+            return 0;
+        }
+
+        std::vector<pose_graph::KeyframePose> optimized = worker.keyframePoses(); // mutated in place on success
         std::vector<pose_graph::KeyframePose> warmStart; // the poses actually optimized FROM -- see
                                                            // optimizePoseGraph()'s doc comment for why this,
                                                            // not worker.keyframePoses(), is the correct

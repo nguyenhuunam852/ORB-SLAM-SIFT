@@ -671,14 +671,34 @@ void TemplatedVocabulary<TDescriptor,F>::HKmeansStep(NodeId parent_id,
   else
   {
     // select clusters and groups with kmeans
-    
+
     bool first_time = true;
     bool goon = true;
-    
+
     // to check if clusters move after iterations
     vector<int> last_association, current_association;
 
-    while(goon)
+    // Iteration cap added for this project (2026-07-22, see
+    // analyze/train_sift_dbow_vocabulary.cpp and DEBUGGING.md): the
+    // original loop below has NO iteration limit at all -- it only stops
+    // once cluster assignment is bit-for-bit IDENTICAL between consecutive
+    // iterations. That's fine for FORB's coarse Hamming distances (integer,
+    // few near-ties, converges fast in practice), but was measured to never
+    // finish within several minutes for FRootSift's continuous float L2
+    // distances even at a tiny k=8/L=3 -- floating-point cluster centroids
+    // shift by a small amount every iteration (F::meanValue()), which can
+    // make a point sitting near a near-equidistant boundary between two
+    // clusters keep flipping assignment indefinitely, with no tolerance
+    // threshold to absorb that. Capped the same way this project's own
+    // cv::kmeans call (analyze/orbslam3_vlad_train.cpp) already caps ITS
+    // k-means: a fixed max-iteration bound is the standard fix for exactly
+    // this class of non-guaranteed-exact-convergence problem. Left high
+    // enough to not truncate a normal Hamming-distance run early (FORB
+    // vocabularies converge in single digits of iterations in practice).
+    const int kMaxHKmeansIterations = 50;
+    int hkmeansIteration = 0;
+
+    while(goon && hkmeansIteration++ < kMaxHKmeansIterations)
     {
       // 1. Calculate clusters
 

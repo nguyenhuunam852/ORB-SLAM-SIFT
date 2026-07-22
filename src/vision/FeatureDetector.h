@@ -44,6 +44,18 @@ cv::Ptr<cv::Feature2D> createDetector(DetectorType type, const SiftSettings &sif
 // binary ones -- whichever matchDescriptors() below must be called with.
 int normTypeFor(DetectorType type);
 
+// RootSIFT (Arandjelovic & Zisserman, CVPR 2012): L1-normalize, sqrt,
+// L2-normalize each descriptor row -- turns SIFT's Euclidean-distance
+// matching into the Hellinger-kernel-equivalent comparison the paper shows
+// is a strictly better match-quality metric for the same underlying
+// histogram descriptor, at zero extra extraction cost. Only meaningful for
+// SIFT's float descriptors (CV_32F) -- callers must not apply this to ORB's
+// binary ones. Same transform third_party/ORB_SLAM3_SIFT/src/ORBextractor.cc
+// applies (both branches, CudaSIFT and CPU cv::SIFT), kept identical here so
+// this codebase's own SIFT path (SlamWorker) matches that fork's descriptor
+// space instead of using raw SIFT.
+cv::Mat toRootSift(const cv::Mat &descriptors);
+
 // Lowe's ratio test was calibrated (0.75) against SIFT's continuous L2
 // distances. ORB's Hamming distances are coarse integers over a small range
 // (typically 0-256 for a 32-byte descriptor), so the same ratio threshold

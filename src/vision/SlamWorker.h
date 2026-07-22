@@ -11,6 +11,7 @@
 
 #include "DBoW2/BowVector.h"
 #include "DBoW2/FORB.h"
+#include "DBoW2/FRootSift.h"
 #include "DBoW2/TemplatedVocabulary.h"
 
 #include <memory>
@@ -27,6 +28,7 @@
 #include "PoseGraphOptimizer.h"
 #include "SiftSettings.h"
 #include "VideoSource.h"
+#include "VladVocabulary.h"
 
 class QTimer;
 
@@ -46,6 +48,15 @@ namespace ORB_SLAM3 { class System; }
 // (templated), but a vocabulary trained on ORB descriptors cannot
 // meaningfully score SIFT's float ones.
 using OrbVocabulary = DBoW2::TemplatedVocabulary<DBoW2::FORB::TDescriptor, DBoW2::FORB>;
+
+// SIFT-compatible counterpart: a real DBoW2 vocabulary tree over RootSIFT's
+// 128-dim float descriptors, scored via FRootSift's (squared-)L2-distance-
+// based TDescriptor operations (third_party/DBoW2/DBoW2/FRootSift.h/.cpp,
+// this session -- the vendored DBoW2 only shipped FORB.h before). Trained
+// via analyze/train_sift_dbow_vocabulary.cpp, an alternative to
+// vision/VladVocabulary.h's VLAD codebook for SIFT loop-closure candidate
+// search -- see SlamWorker::loadSiftVocabulary().
+using SiftVocabulary = DBoW2::TemplatedVocabulary<DBoW2::FRootSift::TDescriptor, DBoW2::FRootSift>;
 
 // Runs on a dedicated QThread. Owns the video source, the SIFT detector and
 // a minimal monocular SLAM front-end:
@@ -111,6 +122,32 @@ public:
         return m_sequentialEdgeRecords;
     }
     const std::vector<pose_graph::LoopClosureRecord> &loopClosureRecords() const { return m_loopClosureRecords; }
+
+    // Essential-Graph-style covisibility edges (ORB-SLAM2/3's own
+    // definition: an edge between any two keyframes sharing at least
+    // minSharedLandmarks jointly-observed landmarks -- same covisibility
+    // graph construction cullRedundantKeyframes() already builds from
+    // m_landmarkObservations, just exposed here without the culling
+    // side-effects) for pose_graph::optimizePoseGraph(). Unlike
+    // LoopClosureRecord, these are NOT independent re-measurements (no
+    // PnP solve against the older keyframe's own map) -- they read the
+    // relative pose directly off both keyframes' own CURRENT (live-
+    // tracked, already locally-BA-refined) poses. That's still real
+    // information for the offline solver: it turns the ALREADY-trustworthy
+    // local relative geometry continuous local BA maintains during live
+    // tracking into an EXPLICIT graph edge, which the existing sequential-
+    // only chain has no way to represent (confirmed empirically this
+    // session that a sequential-edge-only Sim3 graph has zero real
+    // internal constraint -- every sequential edge's chi2 reads exactly
+    // 0.000 -- so the whole offline correction was riding on loop edges
+    // alone; this is the fix). Returned as SequentialEdgeRecord (not a new
+    // type) since PoseGraphOptimizer.cpp's Sim3/SE3 solve paths already
+    // treat that struct as a generic Huber-robustified relative-pose edge,
+    // not something requiring j==i+1 -- see optimizePoseGraphSim3()'s own
+    // warm-start-chain loop, which explicitly filters for j==i+1 and
+    // simply ignores any edge that isn't consecutive, so passing these in
+    // is safe with no other code changes needed.
+    std::vector<pose_graph::SequentialEdgeRecord> covisibilityEdgeRecords(int minSharedLandmarks = 100) const;
 
 public:
     // Runs like the start() slot, but without the artificial real-time
@@ -222,6 +259,15 @@ public slots:
     // drift after a pose is already accepted.
     void setMinTrackInliers(int count) { m_minTrackInliers = count; }
 
+    // Fraction of full resolution SIFT/ORB detection runs at (default 0.5,
+    // half-res -- see m_detectionScale's own doc comment for the real-time-
+    // budget reasoning behind that default). Was a fixed kDetectionScale
+    // constexpr; moved to a runtime override the same way m_minTrackInliers
+    // was, so an offline harness (unconstrained by live playback pacing)
+    // can trade detection cost for denser per-frame keypoints without
+    // touching the GUI's own real-time default.
+    void setDetectionScale(double scale) { m_detectionScale = scale; }
+
     // Default off (behavior-preserving): requires each descriptor match to
     // survive a B->A nearest-neighbor cross-check in addition to the
     // existing one-directional A->B Lowe's-ratio-test (see
@@ -301,6 +347,89 @@ public slots:
     // original raw-match-count search whenever this is off or no
     // vocabulary is loaded -- zero behavior change for anyone not using it.
     void setDbowLoopClosureEnabled(bool enabled) { m_dbowLoopClosureEnabled = enabled; }
+
+    // Loads a VLAD codebook (see vision/VladVocabulary.h, and
+    // third_party/ORB_SLAM3_SIFT/analyze/orbslam3_vlad_train.cpp for how
+    // one is trained) for VLAD-based loop-closure candidate search -- see
+    // setVladLoopClosureEnabled(). This is the SIFT-compatible counterpart
+    // to loadOrbVocabulary()/setDbowLoopClosureEnabled() (DBoW2 only scores
+    // ORB's binary descriptors): meaningful only with the SIFT detector
+    // active, and only if the codebook was itself trained on the same
+    // descriptor space this build produces (RootSIFT after the toRootSift()
+    // normalization FeatureDetector.h's own doc comment describes -- e.g.
+    // vocabulary_sift/vlad_codebook_all_rootsift.yml, NOT the raw-SIFT
+    // vlad_codebook_all.yml). Returns false (leaving any previously loaded
+    // codebook in place) if the file can't be parsed.
+    bool loadVladVocabulary(const QString &path);
+
+    // Default off: when on (and a codebook is loaded), tryLoopClosure()'s
+    // candidate search scores each earlier keyframe's VLAD vector (computed
+    // at insertKeyframe() time, see Keyframe::vladVector) against the new
+    // keyframe's own, via the codebook's score(), instead of the original
+    // raw-descriptor-match-count search -- same idea as
+    // setDbowLoopClosureEnabled(), just for SIFT instead of ORB. Checked
+    // before the DBoW2 branch in tryLoopClosure(); in practice the two
+    // never both fire for the same run since DBoW2 requires the ORB
+    // detector and VLAD requires SIFT. Falls back to the raw-match-count
+    // search whenever this is off, no codebook is loaded, or this
+    // particular keyframe has no vladVector -- zero behavior change for
+    // anyone not using it.
+    void setVladLoopClosureEnabled(bool enabled) { m_vladLoopClosureEnabled = enabled; }
+
+    // Loads a real DBoW2 vocabulary trained on RootSIFT descriptors (see
+    // SiftVocabulary's own doc comment and
+    // analyze/train_sift_dbow_vocabulary.cpp) for DBoW2-based loop-closure
+    // candidate search on SIFT -- a second, alternative SIFT-compatible
+    // counterpart to loadOrbVocabulary(), alongside loadVladVocabulary()'s
+    // VLAD codebook (both are valid at once; setSiftDbowLoopClosureEnabled()
+    // decides which one tryLoopClosure() actually uses, see its own doc
+    // comment for the priority order). Meaningful only with the SIFT
+    // detector active. Returns false (leaving any previously loaded
+    // vocabulary in place) if the file can't be parsed.
+    bool loadSiftVocabulary(const QString &path);
+
+    // Default off: when on (and a vocabulary is loaded), tryLoopClosure()'s
+    // candidate search scores each earlier keyframe's DBoW2 BowVector
+    // (computed from RootSIFT descriptors at insertKeyframe() time, see
+    // Keyframe::siftBowVec) against the new keyframe's own, via the
+    // vocabulary's TF-IDF score() -- same mechanism as
+    // setDbowLoopClosureEnabled(), just for SIFT instead of ORB, and a
+    // second option alongside setVladLoopClosureEnabled() for the same
+    // detector. Checked BEFORE the VLAD branch in tryLoopClosure() when
+    // both are enabled (real TF-IDF scoring over a proper vocabulary tree
+    // vs. VLAD's flat aggregate is expected to be the more discriminative
+    // of the two, per the DBoW2 vs VLAD comparison in DEBUGGING.md -- pure
+    // ordering choice, not yet measured against each other on this
+    // pipeline). Falls back to VLAD, then the original raw-match-count
+    // search, whenever this is off, no vocabulary is loaded, or this
+    // particular keyframe has no siftBowVec -- zero behavior change for
+    // anyone not using it.
+    void setSiftDbowLoopClosureEnabled(bool enabled) { m_siftDbowLoopClosureEnabled = enabled; }
+
+    // Default off (behavior-preserving): when on, a geometrically-verified
+    // loop candidate is no longer corrected on the FIRST confirmation --
+    // tryLoopClosure() instead requires the SAME loop hypothesis (same
+    // matched old keyframe, within kLoopConsistencyOldIdxWindow) to be
+    // independently re-verified across kLoopConsistencyRequiredCount
+    // consecutive-ish new-keyframe insertions (within
+    // kLoopConsistencyMaxGapKeyframes of each other) before actually
+    // applying the correction. This is real ORB-SLAM3's own
+    // `mnLoopNumCoincidences >= 3` mechanism (see LoopClosing.cc,
+    // DetectCommonRegionsFromBoW()) -- a simplified adaptation, not a
+    // literal port: ORB-SLAM3 checks consistency across covisibility-graph
+    // GROUPS of keyframes (this codebase has no such grouping structure),
+    // this checks a simple index-proximity window instead. A prior session
+    // note left at the degenerate-correction guard in tryLoopClosure()
+    // ("Requiring multi-candidate agreement... remains a more principled
+    // fix... just not attempted yet") anticipated exactly this. When a
+    // candidate is still pending confirmation, tryLoopClosure() returns
+    // without applying any correction that call -- the pending streak is
+    // NOT reset by an intervening call that finds no candidate at all
+    // (only by one that finds a candidate pointing somewhere else, or by
+    // too large a gap since the last confirmation), a deliberate
+    // simplification to avoid touching this function's many existing
+    // early-return sites.
+    void setLoopConsistencyGroupEnabled(bool enabled) { m_loopConsistencyGroupEnabled = enabled; }
 
     // Default off: periodically (every kCullingCheckIntervalKeyframes
     // insertions, see cullRedundantKeyframes()) builds a covisibility graph
@@ -964,6 +1093,22 @@ private:
     // worse memory-wise than the already-unbounded m_keyframeHistory below.
     std::unordered_map<long long, cv::Point3f> m_landmarkPositions;
     std::unordered_map<long long, std::vector<std::pair<int, cv::Point2f>>> m_landmarkObservations;
+
+    // Reverse index, parallel to m_keyframeHistory: ALL landmark IDs
+    // keyframe i has ANY observation of -- both the ones it originally
+    // triangulated (Keyframe::localMapPointIds) AND every later
+    // re-observation recordLandmarkObservations() finds for it. Exists so
+    // runLocalBundleAdjustment() (and, in principle, the other BA
+    // functions) can find every landmark a window's keyframes actually
+    // observe, not just the ones some in-window keyframe happened to be
+    // the ORIGINAL triangulator of -- confirmed this session that the
+    // ownership-only rule silently drops real, already-recorded multi-view
+    // observations from local BA whenever a landmark's owning keyframe has
+    // scrolled just outside the window while still being actively
+    // re-observed by keyframes inside it, needlessly starving BA of
+    // constraint density it already has the data for.
+    std::vector<std::vector<long long>> m_keyframeObservedLandmarkIds;
+
     bool m_loopBundleAdjustmentEnabled = false;
 
     cv::Mat m_currR;
@@ -1019,6 +1164,18 @@ private:
                                   // (default-constructed) otherwise -- tryLoopClosure()'s DBoW2 branch
                                   // skips any keyframe with an empty bowVec, so this is safe to leave
                                   // unused when setDbowLoopClosureEnabled() is off
+        cv::Mat vladVector; // computed at insertion time (insertKeyframe()) only when a VLAD codebook
+                             // is loaded and the SIFT detector is active; empty otherwise --
+                             // tryLoopClosure()'s VLAD branch skips any keyframe with an empty
+                             // vladVector, so this is safe to leave unused when
+                             // setVladLoopClosureEnabled() is off. See vision/VladVocabulary.h.
+        DBoW2::BowVector siftBowVec; // computed at insertion time only when a SiftVocabulary is
+                                      // loaded and the SIFT detector is active; empty otherwise --
+                                      // tryLoopClosure()'s SIFT-DBoW2 branch skips any keyframe with
+                                      // an empty siftBowVec, so this is safe to leave unused when
+                                      // setSiftDbowLoopClosureEnabled() is off. Separate field from
+                                      // the ORB-only bowVec above (not reused) so the two vocabulary
+                                      // types can never be cross-scored against each other by mistake.
         bool culled = false; // set by cullRedundantKeyframes() (see setKeyframeCullingEnabled()) when
                               // this keyframe is judged redundant via the covisibility graph -- ONLY
                               // skips this keyframe as a FUTURE tryLoopClosure() candidate; deliberately
@@ -1050,9 +1207,34 @@ private:
     // just falls through to the original raw-match-count loop search.
     std::unique_ptr<OrbVocabulary> m_orbVocabulary;
     bool m_dbowLoopClosureEnabled = false;
+
+    // See loadVladVocabulary()/setVladLoopClosureEnabled(). Null until
+    // loadVladVocabulary() succeeds -- every VLAD call site checks this
+    // (and m_vladLoopClosureEnabled) before use, so an unloaded codebook
+    // just falls through to the original raw-match-count loop search.
+    std::unique_ptr<vlad::VladVocabulary> m_vladVocabulary;
+    bool m_vladLoopClosureEnabled = false;
+
+    // See loadSiftVocabulary()/setSiftDbowLoopClosureEnabled(). Null until
+    // loadSiftVocabulary() succeeds -- every call site checks this (and
+    // m_siftDbowLoopClosureEnabled) before use, so an unloaded vocabulary
+    // just falls through to VLAD, then the raw-match-count loop search.
+    std::unique_ptr<SiftVocabulary> m_siftVocabulary;
+    bool m_siftDbowLoopClosureEnabled = false;
+
+    // See setLoopConsistencyGroupEnabled(). m_pendingLoopOldIdx == -1 means
+    // no candidate is currently pending confirmation.
+    bool m_loopConsistencyGroupEnabled = false;
+    int m_pendingLoopOldIdx = -1;
+    size_t m_pendingLoopNewKfIdx = 0;
+    int m_pendingLoopStreak = 0;
+
     bool m_keyframeCullingEnabled = false; // see setKeyframeCullingEnabled()
     int m_minTrackInliers = 10; // see setMinTrackInliers(); must match kMinTrackInliers's own default in
                                  // SlamWorker.cpp so behavior is unchanged until explicitly overridden
+    double m_detectionScale = 0.5; // see setDetectionScale(); must match the old kDetectionScale
+                                    // constexpr's own default in SlamWorker.cpp so behavior is
+                                    // unchanged until explicitly overridden
     bool m_localBundleAdjustmentEnabled = false; // see setLocalBundleAdjustmentEnabled()
     bool m_globalBundleAdjustmentEnabled = false; // see setGlobalBundleAdjustmentEnabled()
 
