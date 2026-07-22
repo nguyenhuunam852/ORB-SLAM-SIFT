@@ -545,6 +545,32 @@ public slots:
     // both are on (global BA is a strict superset of the windowed one).
     void setGlobalBundleAdjustmentEnabled(bool enabled) { m_globalBundleAdjustmentEnabled = enabled; }
 
+    // Default off, requires setGlobalBundleAdjustmentEnabled() to also be
+    // on: DEBUGGING.md item 29's deterministic stand-in for real
+    // ORB-SLAM3's background-thread GBA + spanning-tree correction
+    // propagation (see third_party/ORB_SLAM3/src/LoopClosing.cc's own
+    // RunGlobalBundleAdjustment()). A REAL background std::thread was
+    // deliberately not implemented: this pipeline has no locking
+    // infrastructure around m_keyframeHistory/m_landmarkPositions (unlike
+    // ORB-SLAM3's mMutexMapUpdate/RequestStop() synchronization), and
+    // kitti_ate's own hard-won run-to-run determinism (see processNext()'s
+    // keypoint-order fix and the ceres::num_threads=1 pin) depends on
+    // staying single-threaded. Instead: runGlobalBundleAdjustment() still
+    // SOLVES synchronously (same Ceres call, same cost), but when this is
+    // on, defers WRITING the corrected keyframe poses/landmark positions
+    // until kGlobalBaIntegrationDelayKeyframes keyframes later (simulating
+    // "still solving in the background") via tryIntegratePendingGlobalBa().
+    // Keyframes inserted during that simulated gap -- which never had
+    // their own residual in the original optimization, exactly ORB-SLAM3's
+    // own reason for needing spanning-tree propagation -- get corrected by
+    // a single rigid delta derived from how the anchor keyframe's own pose
+    // changed, chained forward; a simplified stand-in for ORB-SLAM3's real
+    // per-keyframe parent/child tree walk (this codebase has no such
+    // graph). Fully deterministic (no OS thread, no races) -- see
+    // DEBUGGING.md for whether this measured any differently from the
+    // immediate-write default.
+    void setGlobalBundleAdjustmentAsyncEnabled(bool enabled) { m_globalBundleAdjustmentAsyncEnabled = enabled; }
+
     // Default off: when on, trackFrame() matches against the covisibility-
     // driven local map (see buildCovisibilityLocalMap()) instead of the
     // flat rolling m_mapPoints/m_mapDescriptors -- more relevant candidate
@@ -1431,6 +1457,21 @@ private:
                                     // unchanged until explicitly overridden
     bool m_localBundleAdjustmentEnabled = false; // see setLocalBundleAdjustmentEnabled()
     bool m_globalBundleAdjustmentEnabled = false; // see setGlobalBundleAdjustmentEnabled()
+
+    // See setGlobalBundleAdjustmentAsyncEnabled()/tryIntegratePendingGlobalBa().
+    bool m_globalBundleAdjustmentAsyncEnabled = false;
+    bool m_pendingGlobalBaValid = false;
+    int m_pendingGlobalBaTriggerKfIdx = -1;
+    int m_pendingGlobalBaIntegrateAtKfIdx = -1;
+    std::vector<cv::Mat> m_pendingGlobalBaR; // parallel, indices [0, triggerKfIdx]
+    std::vector<cv::Mat> m_pendingGlobalBaT;
+    std::unordered_map<long long, cv::Point3f> m_pendingGlobalBaLandmarks;
+
+    // Applies a pending async global BA result once enough keyframes have
+    // been inserted since it was solved (see
+    // setGlobalBundleAdjustmentAsyncEnabled()) -- called at the top of
+    // insertKeyframe() so it's checked on every keyframe-insertion attempt.
+    void tryIntegratePendingGlobalBa();
 
     int m_frameCount = 0;
     int m_framesSinceKeyframe = 0;

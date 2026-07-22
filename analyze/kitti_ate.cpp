@@ -211,7 +211,11 @@ int main(int argc, char *argv[])
                       "require within-call consensus among independently-scored loop candidates (see "
                       "SlamWorker::setLoopSpatialConsensusEnabled()).\n"
                       "  [argv42] local-ba-window: overrides SlamWorker::setLocalBaWindowKeyframes() "
-                      "(default 8).\n");
+                      "(default 8).\n"
+                      "  [argv43] globalbaasync: requires 'globalba' -- pass the literal word "
+                      "'globalbaasync' to enable SlamWorker::setGlobalBundleAdjustmentAsyncEnabled(), a "
+                      "deterministic stand-in for real ORB-SLAM3's background-thread global BA + "
+                      "spanning-tree correction propagation (see DEBUGGING.md item 29).\n");
         return 1;
     }
     const QString imagePattern = QString::fromLocal8Bit(argv[1]);
@@ -512,6 +516,15 @@ int main(int argc, char *argv[])
             worker.setLocalBaWindowKeyframes(windowKeyframes);
             std::fprintf(stderr, "[config] local BA window keyframes=%d\n", windowKeyframes);
         }
+    }
+
+    // argv[43]: pass the literal word 'globalbaasync' (requires 'globalba')
+    // to enable SlamWorker::setGlobalBundleAdjustmentAsyncEnabled() --
+    // DEBUGGING.md item 29's deterministic stand-in for real ORB-SLAM3's
+    // background-thread global BA + spanning-tree correction propagation.
+    if (argc > 43 && std::strcmp(argv[43], "globalbaasync") == 0) {
+        worker.setGlobalBundleAdjustmentAsyncEnabled(true);
+        std::fprintf(stderr, "[config] global BA async (deferred-integration simulation) enabled\n");
     }
 
     if (argc > 9 && std::strcmp(argv[9], "groundplane") == 0) {

@@ -399,6 +399,15 @@ constexpr int kBaMaxWindowKeyframes = 600; // skip BA (fall back to the interpol
 // runtime reason kBaMaxWindowKeyframes exists (a late-sequence loop can
 // span 400+ keyframes/20000+ landmarks).
 constexpr int kGlobalBaMaxWindowKeyframes = 400;
+constexpr int kGlobalBaIntegrationDelayKeyframes = 15; // setGlobalBundleAdjustmentAsyncEnabled()'s
+                                                        // simulated "still solving in the background"
+                                                        // window -- same scale as kFuseWindowKeyframes'
+                                                        // own "recent window" (15), chosen for the same
+                                                        // reason (long enough to be a meaningfully
+                                                        // different scenario from immediate synchronous
+                                                        // write-back, short enough that the gap-keyframe
+                                                        // propagation's single-rigid-delta approximation
+                                                        // stays plausible). Untuned.
 
 // Covisibility-driven local map for tracking (see
 // setCovisibilityLocalMapEnabled()): trackFrame() matches against the union
@@ -3129,6 +3138,10 @@ bool SlamWorker::trackFrame(const std::vector<cv::KeyPoint> &kps, const cv::Mat 
 void SlamWorker::insertKeyframe(const std::vector<cv::KeyPoint> &kps, const cv::Mat &descriptors,
                                  const cv::Mat &R, const cv::Mat &t)
 {
+    tryIntegratePendingGlobalBa(); // see setGlobalBundleAdjustmentAsyncEnabled() -- checked on every
+                                    // keyframe-insertion attempt, since kGlobalBaIntegrationDelayKeyframes
+                                    // is counted in keyframe-count units
+
     std::vector<cv::DMatch> matches;
     if (!matchDescriptors(m_refDescriptors, descriptors, matches) ||
         matches.size() < static_cast<size_t>(kMinInitMatches))
@@ -3934,12 +3947,26 @@ bool SlamWorker::runGlobalBundleAdjustment(int newKfIdx, const cv::Mat &loopR, c
         return false; // nothing before it to jointly optimize against
     if (newKfIdx + 1 > kGlobalBaMaxWindowKeyframes)
         return false; // too large to solve in reasonable time -- see kGlobalBaMaxWindowKeyframes
+    if (m_globalBundleAdjustmentAsyncEnabled && m_pendingGlobalBaValid)
+        return false; // a previous solve hasn't been integrated yet -- mirrors ORB-SLAM3's own
+                       // mbRunningGBA guard against overlapping background solves (LoopClosing.cc)
 
-    // Same conservative landmark rule as runLoopBundleAdjustment(), just
-    // spanning the WHOLE map ([0, newKfIdx]) instead of one loop's window.
+    // Same rule as runLoopBundleAdjustment() (see its own doc comment,
+    // DEBUGGING.md item 10/27's queued item 7): any landmark with AT LEAST
+    // ONE observation from an in-window keyframe, not just ones some
+    // in-window keyframe happens to be the ORIGINAL triangulator of
+    // (m_keyframeHistory[i].localMapPointIds -- the stale ownership-only
+    // rule local/loop BA both used to have, fixed there in items 8/10 with
+    // a real measured win each time, never applied here). Spans the WHOLE
+    // map ([0, newKfIdx]) instead of one loop's window.
+    // processedLandmarkIds dedups: the SAME landmark can legitimately
+    // appear in several in-window keyframes' own observed-landmark lists.
     std::unordered_map<long long, std::vector<std::pair<int, cv::Point2f>>> windowObservations;
+    std::unordered_set<long long> processedLandmarkIds;
     for (int i = 0; i <= newKfIdx; ++i) {
-        for (long long id : m_keyframeHistory[static_cast<size_t>(i)].localMapPointIds) {
+        for (long long id : m_keyframeObservedLandmarkIds[static_cast<size_t>(i)]) {
+            if (!processedLandmarkIds.insert(id).second)
+                continue;
             const auto it = m_landmarkObservations.find(id);
             if (it == m_landmarkObservations.end())
                 continue;
@@ -3961,37 +3988,28 @@ bool SlamWorker::runGlobalBundleAdjustment(int newKfIdx, const cv::Mat &loopR, c
         for (int k = 0; k < 3; ++k)
             block[static_cast<size_t>(3 + k)] = t.at<double>(k);
     };
-    // Smooth warm-start -- same technique and rationale as
-    // runLoopBundleAdjustment()'s own copy of this block (see its comment
-    // for the measured evidence: this exact double-rigid-anchor pattern
-    // gave 104.024m here vs 93.851m windowed on the same sequence before
-    // this fix, purely because this function's span is longer). alpha=0 at
-    // kf#0 reduces exactly to its own untouched live pose, alpha=1 at
-    // newKfIdx reduces exactly to loopR/loopT.
-    {
-        const Keyframe &endKf = m_keyframeHistory[static_cast<size_t>(newKfIdx)];
-        const cv::Mat RcwDrifted = endKf.R.t();
-        const cv::Mat CDrifted = -RcwDrifted * endKf.t;
-        const cv::Mat RcwLoop = loopR.t();
-        const cv::Mat CLoop = -RcwLoop * loopT;
-        const cv::Mat Rdelta = RcwLoop * RcwDrifted.t();
-        const cv::Mat tDelta = CLoop - Rdelta * CDrifted;
-        cv::Mat deltaRvec;
-        cv::Rodrigues(Rdelta, deltaRvec);
-        for (int i = 0; i <= newKfIdx; ++i) {
-            const double alpha = static_cast<double>(i) / static_cast<double>(newKfIdx);
-            cv::Mat Ralpha;
-            cv::Rodrigues(deltaRvec * alpha, Ralpha);
-            const Keyframe &kf = m_keyframeHistory[static_cast<size_t>(i)];
-            const cv::Mat Rcw = kf.R.t();
-            const cv::Mat C = -Rcw * kf.t;
-            const cv::Mat Cwarm = Ralpha * C + alpha * tDelta;
-            const cv::Mat RcwWarm = Ralpha * Rcw;
-            const cv::Mat Rwarm = RcwWarm.t();
-            const cv::Mat twarm = -Rwarm * Cwarm;
-            fillPose(poses[static_cast<size_t>(i)], Rwarm, twarm);
-        }
+    // Live-pose warm-start (v2, see DEBUGGING.md item 29) -- replaces the
+    // earlier "smooth" warm-start (a single rigid drift transform spread
+    // LINEARLY across every intermediate keyframe, alpha=i/newKfIdx),
+    // which real ORB-SLAM3's own Optimizer::BundleAdjustment() (see
+    // third_party/ORB_SLAM3/src/Optimizer.cc) does NOT do: it fixes only
+    // the map's origin keyframe and initializes every OTHER keyframe from
+    // its own current pose estimate, trusting Levenberg-Marquardt to
+    // converge from there instead of assuming drift accrued as one uniform
+    // rigid transform (false in general -- real drift accrues unevenly,
+    // faster through turns/low-texture stretches than straight, well-
+    // textured ones). Each intermediate keyframe here is now warm-started
+    // from its own live R/t verbatim, same principle. The two-hard-anchor
+    // scheme below (kf#0 AND newKfIdx both held constant, not just kf#0
+    // like ORB-SLAM3) is intentionally kept as-is -- it has its own
+    // separate justification (monocular global BA's scale/gauge ambiguity
+    // without an external anchor) and its own measured history, not part
+    // of this change.
+    for (int i = 0; i < newKfIdx; ++i) {
+        const Keyframe &kf = m_keyframeHistory[static_cast<size_t>(i)];
+        fillPose(poses[static_cast<size_t>(i)], kf.R, kf.t);
     }
+    fillPose(poses[static_cast<size_t>(newKfIdx)], loopR, loopT);
 
     const CameraIntrinsics &intr = m_intrinsics;
     std::unordered_map<long long, std::array<double, 3>> landmarks;
@@ -4064,6 +4082,35 @@ bool SlamWorker::runGlobalBundleAdjustment(int newKfIdx, const cv::Mat &loopR, c
         cv::Rodrigues(rvec, R);
         t = (cv::Mat_<double>(3, 1) << block[3], block[4], block[5]);
     };
+
+    if (m_globalBundleAdjustmentAsyncEnabled) {
+        // See setGlobalBundleAdjustmentAsyncEnabled(): queue the solved
+        // result instead of writing it now -- tryIntegratePendingGlobalBa()
+        // applies it kGlobalBaIntegrationDelayKeyframes keyframes later.
+        m_pendingGlobalBaR.assign(static_cast<size_t>(newKfIdx + 1), cv::Mat());
+        m_pendingGlobalBaT.assign(static_cast<size_t>(newKfIdx + 1), cv::Mat());
+        poseToRT(poses.front(), m_pendingGlobalBaR[0], m_pendingGlobalBaT[0]);
+        for (int i = 1; i < newKfIdx; ++i)
+            poseToRT(poses[static_cast<size_t>(i)], m_pendingGlobalBaR[static_cast<size_t>(i)],
+                     m_pendingGlobalBaT[static_cast<size_t>(i)]);
+        poseToRT(poses.back(), m_pendingGlobalBaR[static_cast<size_t>(newKfIdx)],
+                 m_pendingGlobalBaT[static_cast<size_t>(newKfIdx)]);
+
+        m_pendingGlobalBaLandmarks.clear();
+        for (const auto &entry : landmarks) {
+            m_pendingGlobalBaLandmarks[entry.first] =
+                cv::Point3f(static_cast<float>(entry.second[0]), static_cast<float>(entry.second[1]),
+                            static_cast<float>(entry.second[2]));
+        }
+
+        m_pendingGlobalBaTriggerKfIdx = newKfIdx;
+        m_pendingGlobalBaIntegrateAtKfIdx = newKfIdx + kGlobalBaIntegrationDelayKeyframes;
+        m_pendingGlobalBaValid = true;
+        std::fprintf(stderr, "[globalba][async] solved at kf#%d, deferring integration to kf#%d\n", newKfIdx,
+                     m_pendingGlobalBaIntegrateAtKfIdx);
+        return true;
+    }
+
     for (int i = 1; i < newKfIdx; ++i) { // 0 and newKfIdx were held constant above -- unchanged
         cv::Mat R, t;
         poseToRT(poses[static_cast<size_t>(i)], R, t);
@@ -4097,6 +4144,82 @@ bool SlamWorker::runGlobalBundleAdjustment(int newKfIdx, const cv::Mat &loopR, c
     }
 
     return true;
+}
+
+void SlamWorker::tryIntegratePendingGlobalBa()
+{
+    if (!m_pendingGlobalBaValid)
+        return;
+    const int currentCount = static_cast<int>(m_keyframeHistory.size());
+    if (currentCount < m_pendingGlobalBaIntegrateAtKfIdx)
+        return; // still "solving" -- see setGlobalBundleAdjustmentAsyncEnabled()
+
+    const int trigger = m_pendingGlobalBaTriggerKfIdx;
+
+    // Snapshot the anchor keyframe's CURRENT (pre-integration) camera
+    // center/orientation before overwriting it -- this is the delta gap
+    // keyframes (trigger, currentCount) get propagated by below, mirroring
+    // ORB-SLAM3's own child-correction composition (LoopClosing.cc's
+    // Tchildc = pChild->GetPose() * Twc, generalized here to a single
+    // rigid delta since this codebase has no parent/child keyframe graph
+    // to walk).
+    const cv::Mat RcwOld = m_keyframeHistory[static_cast<size_t>(trigger)].R.t();
+    const cv::Mat COld = -RcwOld * m_keyframeHistory[static_cast<size_t>(trigger)].t;
+
+    for (int i = 0; i <= trigger; ++i) {
+        m_keyframeHistory[static_cast<size_t>(i)].R = m_pendingGlobalBaR[static_cast<size_t>(i)];
+        m_keyframeHistory[static_cast<size_t>(i)].t = m_pendingGlobalBaT[static_cast<size_t>(i)];
+    }
+
+    const cv::Mat RcwNew = m_pendingGlobalBaR[static_cast<size_t>(trigger)].t();
+    const cv::Mat CNew = -RcwNew * m_pendingGlobalBaT[static_cast<size_t>(trigger)];
+    const cv::Mat Rdelta = RcwNew * RcwOld.t();
+    const cv::Mat tDeltaC = CNew - Rdelta * COld;
+
+    int propagatedCount = 0;
+    for (int i = trigger + 1; i < currentCount; ++i) {
+        Keyframe &kf = m_keyframeHistory[static_cast<size_t>(i)];
+        const cv::Mat Rcw = kf.R.t();
+        const cv::Mat C = -Rcw * kf.t;
+        const cv::Mat Cwarm = Rdelta * C + tDeltaC;
+        const cv::Mat RcwWarm = Rdelta * Rcw;
+        const cv::Mat Rwarm = RcwWarm.t();
+        const cv::Mat twarm = -Rwarm * Cwarm;
+        kf.R = Rwarm;
+        kf.t = twarm;
+        ++propagatedCount;
+    }
+
+    std::unordered_map<long long, size_t> mapIndexById;
+    mapIndexById.reserve(m_mapPointIds.size());
+    for (size_t i = 0; i < m_mapPointIds.size(); ++i)
+        mapIndexById[m_mapPointIds[i]] = i;
+
+    for (const auto &entry : m_pendingGlobalBaLandmarks) {
+        m_landmarkPositions[entry.first] = entry.second;
+        const auto mapIt = mapIndexById.find(entry.first);
+        if (mapIt != mapIndexById.end())
+            m_mapPoints[mapIt->second] = entry.second;
+        for (int i = 0; i <= trigger; ++i) {
+            Keyframe &kf = m_keyframeHistory[static_cast<size_t>(i)];
+            const auto idIt = std::find(kf.localMapPointIds.begin(), kf.localMapPointIds.end(), entry.first);
+            if (idIt != kf.localMapPointIds.end()) {
+                const size_t localIdx = static_cast<size_t>(idIt - kf.localMapPointIds.begin());
+                kf.localMapPoints[localIdx] = entry.second;
+                break;
+            }
+        }
+    }
+
+    std::fprintf(stderr,
+                  "[globalba][async] integrated pending solve (trigger kf#%d) at kf#%d, propagated to %d "
+                  "gap keyframes, %zu landmarks\n",
+                  trigger, currentCount - 1, propagatedCount, m_pendingGlobalBaLandmarks.size());
+
+    m_pendingGlobalBaValid = false;
+    m_pendingGlobalBaR.clear();
+    m_pendingGlobalBaT.clear();
+    m_pendingGlobalBaLandmarks.clear();
 }
 
 std::vector<pose_graph::KeyframePose> SlamWorker::keyframePoses() const

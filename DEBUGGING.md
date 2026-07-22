@@ -1082,6 +1082,93 @@ since item 18, never attempted, a substantially bigger undertaking than
 anything tried this session). Phase A (`fuse`) alone remains the
 session's clear, validated win at 51.273m.
 
+### 27. Tried the flagged "genuinely different design" (Phase B v5: re-triangulate the merged position from ALL combined observations) -- best Phase B variant yet, still net negative vs. Phase A alone
+
+Follow-up session, user explicitly asked to try the redesign item 26 (and
+20/25) flagged as the one remaining plausible fix: instead of a merge
+keeping the survivor's own stale, pre-merge 3D position (the shared flaw
+across v1-v4, root-caused across items 20/25/26), re-triangulate a fresh
+position from BOTH ids' combined observation set at merge time.
+
+Implemented as `SlamWorker::triangulateMultiView()` (new function, linear
+N-view DLT generalized from the existing 2-view `triangulate()`: each
+observation contributes 2 rows `u*P_row3-P_row1` / `v*P_row3-P_row2` to one
+homogeneous system, solved via `cv::SVD`), wired into `fuseWindowLandmarks()`'s
+Phase B branch: on a genuine conflict, builds `survivor`'s + `loser`'s
+combined observation lists, re-triangulates, and REJECTS the merge outright
+(both ids left untouched) if the combined set fails its own reprojection-
+error gate (reused `kFuseMergeMaxReprojErrorPixels`, mean over all
+observing keyframes) -- making triangulation success itself the real merge
+criterion, not just a single-view pixel pre-filter. Also fixed a real gap
+v1-v4 never had to handle: since the survivor's position now actually
+changes at merge time (previously it never did), survivor's OWN owning
+keyframe's `localMapPoints` copy now gets synced too, not just loser's (the
+original item 20 fix only handled the retiring id's side).
+
+**Measured on the Phase-A 51.273m baseline (single variable changed)**:
+**51.273m -> 116.705m**. Worse than Phase A alone, but the best Phase B
+variant of the five tried this project (v1 161.117m, v2/item25-sync-fix
+139.061m, v3/item26-stricter-gate 193.839m, v5 116.705m) -- a genuine ~16%
+improvement over the previous best (item 25), confirming re-triangulation
+was a real, correctly-diagnosed lever, just not enough of one. `Recovered
+scale` 0.1316 (vs Phase A's 0.2317) and merge/extension event count 38120
+(vs Phase A-only's 23534) both point the same direction as before: more
+aggressive fusion still net-corrupts more than it helps, even when the
+position update itself is now geometrically grounded rather than blindly
+inherited.
+
+**Conclusion: Phase B's core idea -- permanently merging two landmarks'
+identities on a detected keypoint-slot conflict -- is confirmed
+fundamentally incompatible with this pipeline across FIVE independently-
+designed variants, including the one variant (re-triangulation) that
+addressed the exact root cause every prior attempt diagnosed.** Not
+recommended to invest further in Phase B merging without a genuinely
+different mechanism outside this whole design family (e.g. not merging
+identities at all, only ever extending coverage -- which is exactly what
+Phase A alone already does, and is the config that should stay
+recommended). `fusemerge` stays off by default; code kept in the tree for
+anyone with a new hypothesis.
+
+### 28. Applied the same landmark-density fix to `runGlobalBundleAdjustment()` (queued item 7) -- fix is correct, but globalBA remains net negative when enabled
+
+Same follow-up session, second request: `runGlobalBundleAdjustment()` still
+had the stale ownership-only landmark rule
+(`m_keyframeHistory[i].localMapPointIds`) that items 8/10 already found and
+fixed in local BA and loop BA respectively, each time for a real measured
+win (125m->118m, then 107.676m->72.550m). Applied the identical fix here:
+switched to `m_keyframeObservedLandmarkIds[i]` (dense, any-observation-in-
+window rule) with the same `processedLandmarkIds` dedup guard loop-BA
+already uses.
+
+**Measured with `globalba` enabled on top of the current 51.273m baseline
+(single variable changed: `globalba` off -> on, density fix included)**:
+**51.273m -> 150.016m**, a large regression, not an improvement. Recovered
+scale collapsed further (0.2317 -> 0.0860) and 155 fewer ground-truth
+frames matched (4360/4541 vs 4515/4541) -- a real tracking-robustness
+regression, not just an alignment artifact. This is consistent with this
+function's own pre-existing doc comment (a 2026-07-21 finding, before this
+fix): global BA was already measured worse than windowed loop-BA on this
+pipeline (169.465m global-only vs 126.134m windowed, an older baseline),
+specifically because it silently declines past
+`kGlobalBaMaxWindowKeyframes` for late loop closures and falls back to
+windowed BA anyway -- so its only real opportunity to help is the
+EARLY-sequence closures, and apparently that's not enough to offset
+whatever else changes about jointly optimizing over the whole map at once
+(all keyframe poses simultaneously, not just a recent window) versus
+letting continuous windowed BA do its job.
+
+**Conclusion: the density fix itself is a correct, justified change (same
+diagnosed bug, same fix, same code pattern that won twice already) and is
+kept in the code -- but it does NOT flip global BA into being a net win.**
+The `globalba` flag stays off in the recommended config; this queued item
+is now closed as "fixed but still not recommended to enable," not "still
+buggy." Do not re-attempt enabling global BA without a new hypothesis about
+why simultaneous whole-map optimization underperforms windowed BA here
+specifically (not yet root-caused -- candidates: numerical conditioning of
+a much larger simultaneous problem, the smooth warm-start's rigid-drift
+assumption breaking down over a longer span, or accumulated small pose
+errors elsewhere in the map outweighing what the early closures fix).
+
 ### Queued next steps (not started this session, in priority order per the user's own direction)
 
 **IMPORTANT: the reference baseline changed this session** -- item 19's
