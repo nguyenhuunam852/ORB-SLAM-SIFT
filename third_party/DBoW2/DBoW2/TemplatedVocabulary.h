@@ -18,6 +18,7 @@
 #define __D_T_TEMPLATED_VOCABULARY__
 
 #include <cassert>
+#include <cstdio>
 
 #include <vector>
 #include <numeric>
@@ -672,6 +673,16 @@ void TemplatedVocabulary<TDescriptor,F>::HKmeansStep(NodeId parent_id,
   {
     // select clusters and groups with kmeans
 
+    // Progress logging added for this project (2026-07-22): HKmeansStep
+    // previously ran silently end to end, so a long FRootSift training run
+    // (continuous-descriptor L2 distance, far slower per-comparison than
+    // FORB's Hamming distance) gave no sign of life for the entire
+    // duration -- indistinguishable from a hang. stderr so it interleaves
+    // with train_sift_dbow_vocabulary.cpp's own [config]/[progress] lines.
+    std::fprintf(stderr, "[hkmeans] level %d/%d: clustering %zu descriptors into %d groups\n",
+                  current_level, m_L, descriptors.size(), m_k);
+    std::fflush(stderr);
+
     bool first_time = true;
     bool goon = true;
 
@@ -797,9 +808,14 @@ void TemplatedVocabulary<TDescriptor,F>::HKmeansStep(NodeId parent_id,
 				last_association = current_association;
 				//last_assoc = assoc.clone();
 			}
-			
+
 		} // while(goon)
-    
+
+    std::fprintf(stderr, "[hkmeans] level %d/%d: %s after %d/%d iterations\n",
+                  current_level, m_L, goon ? "hit iteration cap" : "converged",
+                  hkmeansIteration, kMaxHKmeansIterations);
+    std::fflush(stderr);
+
   } // if must run kmeans
   
   // create nodes
