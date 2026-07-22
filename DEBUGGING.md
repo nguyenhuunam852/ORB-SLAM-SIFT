@@ -518,41 +518,544 @@ appearance similarity, not noise.
 
 **Not yet done**: a real, full-size vocabulary (larger k/L, more training
 images) has not been trained -- this smoke test used a deliberately tiny
-k/L/stride just to validate the pipeline end-to-end. The user is preparing
-to run real training on Kaggle; a Kaggle notebook for this was queued as
-the next step. No ATE measurement with a trained SIFT-DBoW2 vocabulary
-exists yet -- VLAD remains the only measured SIFT loop-closure candidate
-search on this pipeline (see item 9's 107.676m and item 10's 72.550m,
-both VLAD-based).
+k/L/stride just to validate the pipeline end-to-end. A Kaggle notebook for
+this (`kaggle/train_sift_dbow_vocabulary_kaggle.ipynb`) was written and
+verified (standalone g++ compile + a real small end-to-end training run,
+both confirmed working locally) -- not yet run for real on Kaggle. No ATE
+measurement with a trained SIFT-DBoW2 vocabulary exists yet -- VLAD
+remains the only measured SIFT loop-closure candidate search on this
+pipeline (see item 9's 107.676m and item 10's 72.550m, both VLAD-based).
+
+### 15. Implemented and measured item 14's finding #1 (loop-closure temporal-consistency gate) -- NEGATIVE result, root-caused, left off by default
+
+Implemented `setLoopConsistencyGroupEnabled()` (default off): once every
+other verification gate in `tryLoopClosure()` passes (candidate score, PnP
+inlier count, degenerate-solve sanity caps), a real correction is no
+longer applied on the first confirmation -- the SAME loop hypothesis must
+be independently re-verified across `kLoopConsistencyRequiredCount=3`
+calls whose matched old-keyframe index stays within
+`kLoopConsistencyOldIdxWindow=5` of each other and whose new-keyframe
+index doesn't drift apart by more than `kLoopConsistencyMaxGapKeyframes=4`
+-- a deliberately simplified stand-in for real ORB-SLAM3's own
+`mnLoopNumCoincidences>=3` (`LoopClosing.cc`), which instead checks
+membership against covisibility-graph GROUPS this codebase has no
+equivalent structure for. New `kitti_ate` CLI flag `argv[38]`
+(`loopconsistency`).
+
+**Measured on the exact item-10 baseline config (single variable changed,
+same freshly-reconfirmed 72.550m run to compare against)**:
+**72.550m -> 100.391m (+38.4%, worse)**. Also: matched points dropped
+slightly (4519->4518/4541), `Recovered scale` moved further from 1.0
+(0.2679->0.1589).
+
+**Root-caused, not just measured**: the gate reduced actually-committed
+loop closures from 66 (baseline) to 21 -- a real, large loss of correction
+opportunity, not a filtering-out of false positives. Broke down the 52
+"waiting" (not-yet-confirmed) log lines: 27 streaks died at 1/3
+confirmations (never even got a 2nd), 25 died at 2/3 (never got a 3rd).
+Combined with only 21 successful 3/3 commits, this means the large
+majority of geometrically-verified, real loop candidates simply timed out
+waiting for a 2nd or 3rd confirmation that never arrived within the
+index-window/gap tolerance, rather than being correctly rejected as false
+positives. Interpretation: on this pipeline/sequence, a real revisit
+typically produces ONE strong verified candidate against a given local
+area, then the very next candidate a few keyframes later already matches a
+noticeably different old-keyframe index (viewing angle/position shifted
+enough that the best-scoring old keyframe moves) -- the simple 1D
+index-window proxy this session used to approximate ORB-SLAM3's real
+covisibility-group membership check is too narrow to reliably catch that
+drift as "the same place", so most real streaks reset (or simply expire
+via the gap tolerance) before reaching 3. Net effect: far FEWER real
+corrections applied overall, which is directly why ATE got worse -- not
+because the corrections that did fire were bad, but because most real
+drift went uncorrected that the baseline's zero-gate policy would have
+fixed on the first try.
+
+**Left off by default (already was); not recommended to re-enable as-is.**
+If revisited, the fix is almost certainly a smarter "same place" test than
+a 1D old-keyframe-index window -- e.g. actually checking descriptor/VLAD/
+BoW-score similarity between the two candidates' own old keyframes (a
+cheap proxy for real covisibility-group membership), or simply loosening
+`kLoopConsistencyOldIdxWindow`/`kLoopConsistencyMaxGapKeyframes`
+substantially and re-measuring -- neither attempted this session.
+
+### 16. Implemented and measured item 14's finding #2 (map-point fuse/dedup) -- ALSO a negative result, likely cause identified
+
+Implemented `setLandmarkFuseEnabled()`/`fuseWindowLandmarks()` (default
+off): a simplified adaptation of real ORB-SLAM3's
+`LocalMapping::SearchInNeighbors()`/`ORBmatcher::Fuse()`. The real
+algorithm projects a keyframe's map points into covisible neighbors'
+keypoint sets and merges same-index matches; this codebase has no
+per-keyframe "map point at this keypoint index" table to support that, so
+this implementation instead does a pure 3D-proximity test: for each
+landmark the current keyframe just triangulated, find the closest OTHER
+landmark (by Euclidean distance) among everything actively observed within
+the last `kFuseWindowKeyframes=15` keyframes; if within
+`kFuseMaxWorldDistance=0.5` world units, merge them (fewer-observations
+one absorbed into the more-observed one, via the same
+`m_landmarkObservations` splice-and-erase item 15's design also uses).
+Deliberately has NO descriptor-similarity check (unlike real ORB-SLAM3's
+own `Fuse()`, which requires `bestDist<=TH_LOW` on top of the spatial
+search) -- a simplification, not an oversight; flagged here since it's the
+leading suspect below. New `kitti_ate` CLI flag `argv[39]` (`fuse`).
+
+**Measured on the exact item-10 baseline config (single variable changed)**:
+**72.550m -> 104.455m (+44%, worse)**. Also: matched points dropped
+(4519->4481/4541), `Recovered scale` moved further from 1.0
+(0.2679->0.1936). Loop-closure candidate detection itself was barely
+affected (65 closures fired vs baseline's 66), so this isn't a case of the
+fuse pass corrupting loop-closure candidate search specifically -- the
+damage is happening in the tracking/BA data itself. 3019 landmarks were
+merged across ~500+ keyframe insertions -- several merges per keyframe on
+average, a substantial rate.
+
+**User asked directly: bug, or a real mechanism problem? Re-audited the
+code line-by-line first** (indexing, the survivor/loser observation-count
+comparison, the `activeIds` pool bookkeeping across a keyframe's own
+sequential merges) -- found no coding bug; `fuseWindowLandmarks()` does
+exactly what it was written to do. **Then measured directly rather than
+just theorizing**: added temporary diagnostic logging (descriptor L2
+distance between `newId` and `bestMatch` at every merge, found via a
+linear owning-keyframe search -- too expensive to keep permanently, this
+was diagnostic-only and has been removed again) and ran a short (~90s,
+1703-merge-sample) partial benchmark. Result: **median descriptor L2
+distance at merge time was 0.7987** (mean 0.6979) -- for RootSIFT's
+roughly unit-normalized descriptor space, that's a LARGE distance (a
+genuine same-feature match is typically well under ~0.4). Bucketed: only
+22.1% of merges had descL2 < 0.4 (plausibly-genuine), while **72.3% had
+descL2 >= 0.6** (mean/median both squarely in this range) -- a
+distribution dominated by pairs that would be rejected outright by even a
+loose ordinary descriptor-matching threshold. **Confirmed, not just
+suspected: this is a MECHANISM problem, not a bug.** The pure-3D-proximity
+gate (no descriptor check, unlike real ORB-SLAM3's own `bestDist<=TH_LOW`
+requirement) is doing exactly what its design implies -- merging whatever
+happens to be spatially close regardless of whether it's remotely the same
+visual feature -- and the real data shows most of what it finds close in
+3D is NOT visually similar. A false merge is actively harmful, not just
+wasted effort: it forces two genuinely different 3D observations onto one
+shared position, injecting real reprojection-error inconsistency directly
+into every future local/loop BA window that landmark participates in --
+structurally similar to (and consistent with) item 4's earlier finding
+that BA can converge cleanly on a locally self-consistent-looking but
+globally wrong configuration.
+
+**Left off by default (already was); not recommended to re-enable as-is.**
+The fix implied directly by the above measurement: add a descriptor-
+similarity gate (comparing the new landmark's own descriptor, available in
+the current keyframe's `descriptors` row, against the candidate match's
+descriptor -- obtainable from whichever keyframe's
+`localMapDescriptors`/`descriptors` still holds it) alongside the existing
+3D-distance gate, mirroring what the real algorithm actually relies on --
+not attempted this session, but now a well-evidenced next step rather than
+a guess. A tighter distance threshold alone (without adding a descriptor
+check) is not expected to be sufficient on its own: the measured
+distribution shows visually-dissimilar pairs land at ALL measured 3D
+distances, not just the far end of the 0-0.5 range, so shrinking the
+radius wouldn't reliably exclude them.
+
+### 17. Added the descriptor-similarity gate item 16 called for -- fixed the false-merge symptom, did NOT fix the actual regression
+
+User asked directly, after item 16's diagnosis: "is there a way to make it
+work better?" -- implemented exactly what item 16 concluded was needed.
+Added `m_landmarkDescriptors` (a new `unordered_map<long long, cv::Mat>`,
+seeded alongside `m_landmarkPositions` at triangulation time in
+`insertKeyframe()`) and rewrote `fuseWindowLandmarks()` into a real
+two-stage search matching ORB-SLAM3's own `ORBmatcher::Fuse()` structure:
+`kFuseMaxWorldDistance` (3D proximity) now only NARROWS the candidate set
+(a cheap first pass), and a NEW `kFuseMaxDescriptorDistance=0.4` gate
+(RootSIFT L2 distance) actually DECIDES the match among those candidates --
+directly informed by item 16's own measurement (false merges had median
+descL2=0.7987; 0.4 sits at the edge of that observed gap).
+
+**Measured on the exact item-10 baseline config again (single variable
+changed)**: **72.550m -> 104.672m** -- statistically the SAME as item 16's
+ungated version (104.455m), despite merges dropping from 3019 to 1269
+(-58%, keeping only pairs that passed BOTH the proximity AND descriptor
+gates). Matched points recovered slightly (4481->4516, closer to
+baseline's 4519) and loop-closure count stayed normal (74 vs baseline's
+66, not suppressed) -- so tracking robustness improved marginally, but ATE
+itself did not.
+
+**Conclusion, directly answering the user's question**: the descriptor
+gate fixed the exact symptom item 16 measured (most merges are now
+confirmed visually-similar, not dissimilar) -- but this reveals that
+false-merges were NOT actually the primary cause of the ATE regression;
+something about the FUSE MECHANISM ITSELF, even restricted to
+high-confidence genuine duplicates, is still net-harmful to this
+pipeline's accuracy. Leading (unverified) hypothesis: a merge only
+transfers the loser's observation onto the survivor's EXISTING stored 3D
+position -- it never re-triangulates or immediately re-optimizes that
+position using the newly combined observation set, so any real (if small)
+disagreement between the two independently-triangulated estimates of "the
+same point" becomes a standing reprojection-error tension that whichever
+future local/loop BA window picks up the merged landmark has to absorb,
+concentrated onto whatever nearby poses/points are in that window --
+plausible given item 4's own earlier finding that this pipeline's BA can
+converge cleanly on a locally-consistent-looking but globally-off
+configuration. Not verified this session (would need instrumenting BA's
+own before/after cost specifically for merged-vs-unmerged landmarks to
+confirm).
+
+**Both fuse variants now left off by default, this direction considered
+closed for this session** -- fixing the false-merge symptom didn't unlock
+the win items 8/10 hoped adjacent duplicate-dedup would provide.
+
+### 18. Tested item 17's own hypothesis directly (user asked "if that's the cause, can it be fixed?") -- fix applied, made things WORSE, hypothesis refuted
+
+Item 17 ended on an unverified hypothesis: the survivor's position never
+gets refined using the newly-merged observation because
+`fuseWindowLandmarks()` never registers the survivor in
+`m_keyframeObservedLandmarkIds[newKeyframeIndex]` -- so local/loop BA's
+own density-based landmark selection (items 8/10) never learns the
+survivor has a fresh observation. Re-reading the code confirmed this gap
+is real (not just theorized): the function never touches
+`m_keyframeObservedLandmarkIds` at all. User asked directly whether this
+could be fixed -- implemented the obvious fix (`push_back(survivor)` onto
+the current keyframe's reverse-index entry right after each merge, so the
+very next local BA call -- which already runs immediately after fuse in
+`insertKeyframe()`'s own ordering -- picks it up).
+
+**Measured on the exact item-10 baseline config again**: **72.550m ->
+155.278m** -- dramatically WORSE, not better, than either item 16's
+ungated version (104.455m) or item 17's descriptor-gated version
+(104.672m). **This refutes item 17's own hypothesis**: if "stale,
+never-refined position" were the real problem, closing that gap should
+have helped. Instead, actively exposing the merged observation to BA made
+things much worse. Revised understanding: the merged residual itself is
+the problem, not merely its dormancy. Splicing the loser's own image
+observation onto the survivor's (necessarily slightly different --
+allowed up to kFuseMaxWorldDistance/kFuseMaxDescriptorDistance apart, not
+identical) 3D position creates a residual with real, structural geometric
+inconsistency baked in by construction: the loser's pixel coordinates were
+measured assuming ITS OWN triangulated position, not the survivor's. While
+dormant (items 16/17, before this fix), that inconsistency just sits
+unused in `m_landmarkObservations`, causing only moderate harm (evidently
+via the loop-closure PnP/BA paths that do independently consult those
+entries). Once local BA is forced to actively reconcile it (item 18), the
+optimizer has to distort something REAL (the current keyframe's own pose,
+or the survivor's position, or both) to explain an artificial discrepancy
+-- and apparently does so destructively, consistent with item 4's
+established finding that this pipeline's BA can converge cleanly on a
+locally-self-consistent-looking but globally-wrong configuration.
+
+**Conclusion: this whole direction (landmark fuse/dedup via 3D+descriptor
+matching and observation-splicing) is now considered CLOSED for this
+pipeline, not just "needs more tuning."** Three independent, honestly
+-measured attempts (item 16: no descriptor gate, 104.455m; item 17: with
+descriptor gate, 104.672m; item 18: + BA-visibility fix, 155.278m) all
+regressed ATE, and making the mechanism progressively more "correct" by
+the standards of a literal ORB-SLAM3 port made results WORSE, not better --
+the opposite of what would be expected if this were simply an
+under-implemented version of a sound idea. The likely real fix (an actual
+re-triangulation/joint re-optimization of the survivor's position at merge
+time, rather than treating the loser's raw pixel observation as valid
+evidence for the survivor's existing position) is a substantially bigger
+change than a bug/threshold fix -- not recommended to pursue further
+without a genuinely new design, not attempted this session.
+
+### 19. Redesigned the fuse pass around real projection+keypoint evidence (not 3D-to-3D landmark comparison) -- first POSITIVE result in this whole direction: 72.550m -> 51.273m (-29.3%)
+
+User asked directly why real ORB-SLAM3's `Fuse()` works when this
+session's items 16-18 didn't, then asked if that same evidence-gathering
+technique could be applied here. Re-read `ORBmatcher::Fuse()` again with
+that specific question and identified the real structural difference:
+real `Fuse()` PROJECTS a point into a target keyframe and matches against
+that keyframe's own ACTUALLY-DETECTED keypoints (radius search, then
+descriptor distance) -- never comparing one landmark's stored 3D position
+against another's. Two consequences follow: (a) any match is grounded in a
+real detected image feature, not two independently-triangulated (and
+therefore never-quite-identical) 3D estimates; (b) `Fuse()`'s PRIMARY role
+is extending an already-good point's observation COVERAGE across
+covisible keyframes -- merging (`Replace()`) only fires as a narrow edge
+case when two different points both already claim the exact same keypoint
+slot, a real, unambiguous conflict. Items 16-18 inverted this: merging was
+the primary operation, anchored to abstract 3D distance, with no
+real-image grounding at all -- which item 18 showed actively corrupts BA
+once engaged.
+
+**Redesigned accordingly, split into two phases per the user's own
+direction (measure coverage-extension alone before adding conflict-
+merging), Phase A only implemented and measured this item**:
+- Added `Keyframe::keypointLandmarkId` (parallel to `keypoints`/
+  `descriptors`, -1 = unassigned) -- the missing piece real ORB-SLAM3's own
+  `KeyFrame::mvpMapPoints` provides and this codebase never had. Populated
+  at triangulation time (`insertKeyframe()`) and by
+  `recordLandmarkObservations()` (signature extended to take it by
+  reference) whenever a real reprojection-gated match is accepted --
+  required reordering `insertKeyframe()` to construct the `Keyframe` object
+  earlier (before `recordLandmarkObservations()`'s call) so there's
+  somewhere for it to write into.
+- Rewrote `fuseWindowLandmarks()`: for each of the current keyframe's own
+  just-triangulated landmarks, projects it into each OTHER keyframe in the
+  window (via that keyframe's own R/t), searches for a descriptor match
+  against that keyframe's own FULL detected keypoint set, and gates it
+  with the exact same `kMaxObservationReprojErrorPixels` reprojection-error
+  check `recordLandmarkObservations()` already uses safely for the rolling
+  map. If the matched keypoint's `keypointLandmarkId` is unassigned (-1),
+  extends coverage: records a new (real, reprojection-verified)
+  observation and claims that slot. If already assigned to a DIFFERENT
+  landmark, Phase A currently just skips it (conflict/merge handling
+  deferred to Phase B, not implemented yet).
+
+**Real bug found and fixed along the way** (not a design issue this time):
+the shared `feature_detector::matchDescriptors()` had `if (... ||
+descA.rows < 2 || descB.rows < 2) return false;` -- rejecting ANY
+single-row query outright, before attempting to match at all. Since this
+pass queries with exactly one landmark's descriptor at a time, EVERY call
+was silently returning zero matches (confirmed: first Phase A smoke test
+measured exactly 0 coverage-extensions across an 866-frame run). Root
+cause: `descA.rows>=2` was never actually required by the k=2 ratio-test
+algorithm (which ranks each descA row independently against descB; only
+descB needs >=2 rows, for the ratio comparison itself) -- just an overly
+broad defensive check. Fixed by relaxing it to `descB.rows < 2` only.
+Re-verified the fix doesn't change EXISTING behavior anywhere else in the
+codebase (no other call site currently passes a 1-row descA): re-ran the
+plain item-10 baseline config (fuse off) after the fix -- byte-identical
+72.550m, confirming zero side effects on the shared function's other
+callers.
+
+**Measured on the exact item-10 baseline config, Phase A only (single
+variable changed)**: **72.550m -> 51.273m, a real 29.3% improvement** --
+the first positive result across the whole fuse/dedup direction (items
+16-19) this session. 23534 coverage-extending observations added across
+the run (much higher than any previous item's merge count, expected since
+Phase A can add MANY observations per landmark across different nearby
+keyframes, not just one merge event). Matched points close to baseline
+(4515 vs 4519/4541), loop closures similar (71 vs baseline's 66) -- the
+improvement is coming from denser, more accurate local/loop BA
+constraints, not from different loop-closure behavior.
+
+**New best real, reproducible result: 51.273m** (SQPnP + VLAD +
+windowed-BA + guided + denser local/loop-BA + Phase-A landmark-coverage
+fuse). Now ~2.6x from the user's <20m goal (was ~3.6x before this item).
+`setLandmarkFuseEnabled()`/`fuse` CLI flag can now be considered a real,
+positive, recommended feature -- unlike items 16-18's now-superseded
+merge-based versions, which remain in the git history but are no longer
+what `fuseWindowLandmarks()` does.
+
+**Not yet done at the time**: Phase B (genuine-conflict merging, using
+`keypointLandmarkId` to detect real index collisions instead of the old
+3D-distance heuristic) was deliberately deferred to measure Phase A in
+isolation first, per the user's own explicit direction. Implemented and
+measured next (item 20).
+
+### 20. Implemented item 19's Phase B (genuine-conflict merging) -- NEGATIVE, root-caused, split into its own opt-in flag
+
+Extended `fuseWindowLandmarks()`: when Phase A's projection+match search
+lands on a keypoint whose `keypointLandmarkId` is ALREADY assigned to a
+DIFFERENT landmark (a genuine, unambiguous conflict -- both ids
+demonstrably explain the exact same detected keypoint, confirmed via a
+real reprojection-gated match, not items 16-18's abstract 3D-distance
+heuristic), merges them (richer-evidence-wins, same rule as before).
+
+**Measured on the Phase-A 51.273m baseline (single variable changed)**:
+**51.273m -> 161.117m**, dramatically worse. Loop closures dropped 71->33.
+**Root-caused, not just measured**: `tryLoopClosure()`'s own PnP re-
+measurement and Sim3Solver scale measurement read `Keyframe::localMapPoints`/
+`localMapPointIds`/`localMapDescriptors` directly (confirmed by reading the
+call sites) -- a SEPARATE array from `m_landmarkObservations`/
+`m_landmarkPositions` that Phase B's merge never touches. Any landmark
+absorbed as a loser leaves a stale, orphaned position in whichever
+keyframe owns it via `localMapPointIds`, silently corrupting exactly the
+two most safety-critical loop-closure measurements. Phase A never has
+this problem since it only ever ADDS observations to a still-alive
+landmark, never invalidates one.
+
+**Split into its own flag** (`setLandmarkFuseMergeEnabled()`/`fusemerge`
+CLI arg, requires `fuse` too), default OFF, NOT recommended as-is -- kept
+in the tree for anyone who wants to fix the `localMapPoints` synchronization
+gap and re-measure. Re-verified Phase A alone is unaffected by this split:
+byte-identical 51.273m after the refactor. User asked directly whether to
+invest further fixing Phase B or shelve it -- decided to shelve for now
+(the required fix is a real architecture task with uncertain payoff, vs.
+Phase A's already-validated, safe win).
+
+### 21. Re-attempted item 15's loop-closure consistency gate with a real evidence-grounded "same place" test -- STILL negative, same failure pattern as the original crude version
+
+User asked to revisit item 15 (`setLoopConsistencyGroupEnabled()`,
+originally measured 72.550m->100.391m, worse) applying the SAME lesson
+item 19 just proved for fuse: ground "same place" in real appearance
+evidence instead of an abstract proxy. Replaced the 1D old-keyframe-index
+window with a real place-recognition similarity check (VLAD/SIFT-DBoW2/
+DBoW2 score -- whichever backend found the candidate -- between the two
+OLD keyframes being confirmed against each other, `kLoopConsistencyPlaceMinScore=0.3`),
+falling back to the old index-window test only when no place-recognition
+vector is available.
+
+**Measured on the Phase-A 51.273m baseline (single variable changed,
+loop-consistency + fuse together)**: **51.273m -> 87.471m**, still
+substantially worse. Loop closures dropped 71->19 (40 "waiting" streaks:
+20 died at 1/3, 20 died at 2/3) -- essentially the SAME failure pattern
+item 15 already found with the cruder index-window test (there: 66->21
+committed, also dominated by streaks dying early). **Conclusion: grounding
+the "same place" test in real evidence did NOT fix this gate**, unlike the
+analogous fix that worked for fuse. This means the root problem isn't
+really "how do we measure same place" -- it's that requiring
+`kLoopConsistencyRequiredCount=3` consecutive-ish confirmations is simply
+too strict for how densely/reliably this pipeline's own `tryLoopClosure()`
+actually re-detects a given revisit episode (roughly once per ~8-frame
+keyframe interval, gated by several independent, individually-noisy
+checks upstream -- PnP inlier count, degenerate-solve caps, etc.) --
+regardless of whether the SAME-CANDIDATE test itself is accurate. Two
+independent implementations of this gate (crude index-window, real
+place-similarity) both fail the same way, which is stronger evidence than
+either alone.
+
+### 22. Tested item 21's own predicted next step (lower `kLoopConsistencyRequiredCount` 3->2) -- confirms this is a mechanism problem, not a tuning problem; direction now CLOSED
+
+**Measured on the same Phase-A+loop-consistency config (single variable
+changed)**: **87.471m -> 83.553m** -- barely moved, still dramatically
+worse than Phase A alone's 51.273m. Closures: 34 committed (up from 19 at
+count=3, roughly the expected ~2x from recovering the "died at 2/3"
+streaks) -- but still far short of the 71 Phase A gets with no gate at
+all. This confirms the diagnosis directly: even after DOUBLING the
+successful closure count by loosening the required confirmations, the
+result is nowhere close to competitive, because at `count=1` this gate
+literally degenerates to "no gate" (71 closures, the known-good number) --
+so ANY `count > 1` necessarily throws away real corrections that a
+noisy, sparse re-detection cadence can't reliably re-confirm, no matter
+how the "same place" test is implemented. **This is a real, structural
+mismatch between the consistency-gate CONCEPT and this pipeline's own
+detection cadence, not a parameter to tune away.**
+
+**Direction closed.** Across items 15/21/22 (3 independent measurements:
+crude proxy, evidence-grounded proxy, evidence-grounded proxy at a looser
+threshold), the temporal-consistency gate has never once been
+competitive with the simpler "commit on first verified confirmation"
+policy already in place. Not recommended to revisit without a fundamentally
+different mechanism (e.g. one that doesn't require MULTIPLE SEPARATE
+`tryLoopClosure()` calls to agree, since that's the part shown to fail
+here) -- `setLoopConsistencyGroupEnabled()` stays available, off by
+default, for reference.
+
+### 23. Implemented a genuinely DIFFERENT loop-closure consistency mechanism (within-call spatial consensus, not across-call temporal recurrence) -- NULL result, gate never fires
+
+User asked directly whether the mechanism (not just the "same place" test)
+could be fixed. Designed a structurally different gate:
+`setLoopSpatialConsensusEnabled()` -- instead of requiring the SAME place
+be independently re-confirmed across multiple SEPARATE
+`tryLoopClosure()` calls (the part items 15/21/22 showed doesn't work
+here), this checks consensus WITHIN a single call: the candidate-search
+step now collects every candidate keyframe whose place-recognition score
+independently clears the normal acceptance threshold (not just the single
+best one), and only accepts the top-scoring one if at least one OTHER
+qualifying candidate lies within `kLoopSpatialConsensusWindow=5` keyframe
+indices of it -- i.e., do multiple independently-ranked keyframes from the
+existing history agree this is the same place, with no waiting/pending
+state needed at all (a single-call accept/reject decision).
+
+**Measured on the Phase-A 51.273m baseline (single variable changed)**:
+**51.273m -> 51.273m, byte-identical** (same 4515 matched points, same
+0.2317 Recovered scale, same 23534 fuse count). Closure count: 71,
+identical to Phase A alone. **The gate never once rejected a candidate
+across the whole run.** Not a regression, but not a measured improvement
+either -- a true null result. Likely explanation: when a real revisit
+produces a strong top-scoring candidate, several temporally-adjacent
+keyframes from that SAME original visit episode almost always also score
+above the acceptance threshold (they're naturally similar to each other
+too), so "spatial consensus" among candidates from the SAME query is
+essentially guaranteed whenever the top candidate is genuine on this
+dataset -- unlike the across-call approach, which failed because
+requiring the SAME query to repeat successfully on a LATER, separate
+keyframe is what doesn't reliably happen.
+
+**Inconclusive on the core question** (would this catch a genuine false
+positive if one occurred): apparently no isolated single-candidate false
+positive existed in this run for the gate to demonstrate value against,
+at `kLoopSpatialConsensusWindow=5`. Not tuned further (e.g. a tighter
+window, requiring 2+ OTHER qualifying candidates instead of just 1) --
+kept available (`loopspatialconsensus` CLI flag), off by default, neither
+recommended nor discouraged pending a test against a sequence/config with
+a known false-positive closure.
+
+### 24. Tried increasing `kLocalBaWindowKeyframes` (8 -> 16) -- negative result
+
+Moved `kLocalBaWindowKeyframes` from a fixed constexpr to a runtime-
+overridable `SlamWorker::m_localBaWindowKeyframes` (`setLocalBaWindowKeyframes()`,
+same migration pattern as `m_minTrackInliers`/`m_detectionScale`), default
+unchanged at 8. Added `kitti_ate.cpp argv[42]` CLI override. Rationale
+this was queued for: items 8/10's observation-density fix means a bigger
+window might now capture real multi-view constraint it previously
+couldn't (before those fixes, most landmarks in a big window were only
+"owned" by a few early keyframes in it, so a bigger window mostly just
+added single-observation landmarks with nothing to jointly triangulate
+against).
+
+**Measured on the Phase-A 51.273m baseline (single variable changed,
+window 8->16)**: **51.273m -> 70.619m**, worse. Confirmed via the
+`[localba]` log lines that the bigger window did engage as intended
+(e.g. one window spanning `kf#486..kf#501`, 1109 landmarks/2894
+observations -- substantially denser than typical window-8 logs seen
+earlier this session). Not root-caused further (out of scope of what was
+asked -- this was a direct single-variable test, not a diagnosis task).
+Plausible, unverified hypothesis: a wider window gives Ceres a harder,
+more strongly-coupled joint optimization problem (more shared landmarks
+tying more poses together at once) to solve with the SAME per-window pose-
+prior weights (`kLocalBaPosePriorRotWeight`/`kLocalBaPosePriorTransWeight`,
+tuned against the window-8 baseline) -- possibly needs re-tuning together
+with window size rather than changing window size alone. Not tested.
+**Reverted to the default (8) for the recommended config; not
+recommended to increase without further investigation.**
 
 ### Queued next steps (not started this session, in priority order per the user's own direction)
 
-0. **Prepare and run a real (non-smoke-test) DBoW2/RootSIFT vocabulary
-   training job on Kaggle** (item 14) -- notebook not yet created. Then
-   measure `siftdbow` vs `vlad` head-to-head on the same 72.550m-baseline
-   config (single-variable swap). User's explicit instruction: do this
-   BEFORE item 1 below.
-1. **Loop closure requires >=3 consecutive keyframe confirmations before
-   committing** (item 14's finding #1, from reading `LoopClosing.cc`
-   directly -- `mnLoopNumCoincidences >= 3`) -- `tryLoopClosure()`
-   currently commits on the first verified candidate, no temporal-
-   consistency gate. Cheapest of item 14's three findings to try (no
-   training needed), directly targets the "loop-closing maturity" gap
-   already diagnosed as the main remaining accuracy gap. **User's explicit
-   instruction: re-run the current best baseline (72.550m config) fresh
-   right before implementing this**, so the comparison is against a
-   just-confirmed number, not a stale one from earlier in the session.
-2. **Increase `kLocalBaWindowKeyframes` (currently 8)** -- previously a
-   larger window wouldn't have helped much under the old ownership-only
-   rule (most landmarks in a big window were still "owned" by only a few
-   early keyframes in it); now that observation density is unlocked (item
-   8, and now item 10's loop-BA equivalent), a larger window may capture
-   meaningfully more real multi-view constraint. Not yet tested.
-3. `LocalMapping::SearchInNeighbors()`/`ORBmatcher::Fuse()`-style map-point
-   dedup across covisible keyframes (item 14's finding #2) -- SlamWorker
-   has none at all currently; may be fragmenting real observation density
-   across duplicate landmark IDs for the same physical point. Not started.
-4. **Denser SIFT features via raw count is now a CLOSED, negative direction**
+**IMPORTANT: the reference baseline changed this session** -- item 19's
+Phase-A fuse is a real, measured win (72.550m -> 51.273m) and is now part
+of the recommended config (`fuse` flag). Any of the items below that
+involve re-measuring against "the baseline" should use the NEW 51.273m
+config (SQPnP+VLAD+windowed-BA+guided+localba+fuse -- see the updated
+"Known-good reference command" below), not the old 72.550m one, unless
+specifically isolating a pre-item-19 comparison.
+
+0. **DONE, negative (item 20): Phase B of item 19's fuse redesign
+   (genuine-conflict merging)** -- measured 51.273m->161.117m, root-caused
+   (stale `Keyframe::localMapPoints` after a merge corrupts loop-closure's
+   own PnP/Sim3Solver measurement), split into its own `fusemerge` flag
+   (off by default). Not recommended without fixing that synchronization
+   gap first (a real architecture task, not attempted).
+1. **Run the real (non-smoke-test) DBoW2/RootSIFT vocabulary training job
+   on Kaggle** (item 14, notebook ready:
+   `kaggle/train_sift_dbow_vocabulary_kaggle.ipynb`). Then measure
+   `siftdbow` vs `vlad` head-to-head on the new 51.273m baseline
+   (single-variable swap).
+2. **CLOSED, negative (items 15/21/22): across-call loop-closure
+   consistency gate** -- tried three times (crude keyframe-index proxy,
+   real VLAD/DBoW place-similarity proxy, and a looser required-count=2 on
+   top of that), all three measured worse than no gate at all (best:
+   83.553m vs 51.273m baseline). Root cause confirmed structural, not
+   tunable: this gate requires MULTIPLE SEPARATE `tryLoopClosure()` calls
+   to independently re-confirm the same place, but this pipeline's own
+   re-detection cadence is too sparse/noisy to reliably supply more than
+   one confirmation per real revisit. **A structurally different
+   mechanism was also tried (item 23): within-call spatial consensus among
+   independently-scored candidates in a SINGLE call, no waiting needed --
+   NULL result (51.273m, byte-identical to no gate at all; never once
+   rejected a candidate).** Not recommended to revisit either approach
+   without either a known false-positive closure to test the spatial-
+   consensus gate against, or a fundamentally different idea for the
+   across-call version.
+3. **DONE, negative (item 24): `kLocalBaWindowKeyframes` 8->16** --
+   measured 51.273m->70.619m, worse. Now runtime-overridable
+   (`setLocalBaWindowKeyframes()`/`kitti_ate.cpp argv[42]`) if re-tested.
+   Reverted to default (8). Possible follow-up if revisited: re-tune
+   `kLocalBaPosePriorRotWeight`/`kLocalBaPosePriorTransWeight` together
+   with a larger window rather than changing window size alone -- not
+   attempted.
+4. **Map-point MERGE/dedup specifically (items 16/17/18's 3D-distance
+   approach) is CLOSED for this pipeline** -- not to be confused with item
+   19's fuse redesign (a positive result, now recommended): items 16-18
+   were three independent, honestly-measured attempts at ABSTRACT-3D-
+   DISTANCE-based merging, each fixing the previous one's most likely-
+   sounding flaw, ALL regressed ATE, getting progressively WORSE as made
+   more "complete": no descriptor gate 104.455m -> with descriptor gate
+   104.672m, unchanged -> + BA-visibility fix 155.278m, dramatically
+   worse. Root cause (item 18): splicing a raw pixel observation onto
+   ANOTHER landmark's necessarily-slightly-different 3D position (not
+   grounded in any real detected keypoint) creates a structurally
+   inconsistent residual. Item 19's redesign fixed this by grounding
+   everything in real projection + actually-detected keypoints instead --
+   that's why it worked. Do not revive the OLD 3D-distance approach.
+5. **Denser SIFT features via raw count is now a CLOSED, negative direction**
    -- item 12 showed `nFeatures` alone is inert (never hit its own cap),
    item 13 tested the real lever (`kDetectionScale` 0.5->1.0, full-res) and
    measured it WORSE (72.550m->105.692m), likely because full-res adds
@@ -562,30 +1065,34 @@ both VLAD-based).
    untested (a stricter, not looser, threshold might be the more promising
    direction given item 13's finding -- fewer but higher-quality
    keypoints -- but that's speculative, not yet tried).
-5. Re-test SQPnP + posegraph/Sim3Solver combined (todo, not yet measured
+6. Re-test SQPnP + posegraph/Sim3Solver combined (todo, not yet measured
    whether Sim3Solver's improved measurement changes anything about
    SQPnP's own trajectory specifically, as opposed to the P3P baseline it
    was tested against in item 9). Note the offline-posegraph-vs-live-
    tracking comparison in items 5/6 was run against a live-tracking
-   baseline that predates item 10's fix -- if this direction is revisited,
-   re-measure against the new 72.550m baseline, not the old 120-125m one.
-6. `runGlobalBundleAdjustment()` still has the identical ownership-only
+   baseline that predates items 10/19's fixes -- if this direction is
+   revisited, re-measure against the new 51.273m baseline, not the old
+   72.550m or 120-125m ones.
+7. `runGlobalBundleAdjustment()` still has the identical ownership-only
    landmark rule (`SlamWorker.cpp`, its own comment says "same conservative
    landmark rule as runLoopBundleAdjustment()", now stale after item 10) --
    not yet fixed or measured. Lower priority than the above since global BA
    fires less often than loop BA, but the same mechanism may apply.
 
-### Known-good reference command (this session's best config, SQPnP)
+### Known-good reference command (this session's best config, SQPnP + Phase-A fuse -- 51.273m)
 
 ```
 kitti_ate <left-pattern> <poses> 1200 sqpnp <out-prefix> fivepoint - - - ba \
-  - - - - - - - - - - - - - - localba - - guided - vlad <vlad-codebook-path>
+  - - - - - - - - - - - - - - localba - - guided - vlad <vlad-codebook-path> \
+  - - - - - - - fuse
 ```
 (argv positions: 4=pnp-method, 10=ba/windowed-loop-BA, 25=localba, 28=guided,
-30/31=vlad+codebook-path -- see `kitti_ate.cpp`'s own usage text for the
-full, current list; several argv slots shifted this session after the
-stereo flag's removal, so old recorded commands from before this session
-may no longer line up with current positions.)
+30/31=vlad+codebook-path, 39=fuse (item 19's Phase-A landmark-coverage fuse,
+new this session) -- see `kitti_ate.cpp`'s own usage text for the full,
+current list; several argv slots shifted this session after the stereo
+flag's removal, so old recorded commands from before this session may no
+longer line up with current positions. Without the trailing `fuse` flag,
+this same command reproduces item 10's 72.550m pre-fuse baseline exactly.)
 
 ## Part 58 (2026-07-20, GPU session on Kaggle): LightGlue closed as a paper-grounded negative result, CudaSIFT+RootSIFT integrated and debugged live, final result -- best-ever per-match accepted rate (45%) but 0% scorable coverage due to a reset-timing artifact
 

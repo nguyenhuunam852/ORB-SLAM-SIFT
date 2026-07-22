@@ -47,7 +47,16 @@ bool matchDescriptors(int normType, const cv::Mat &descA, const cv::Mat &descB, 
                        float ratio, bool mutualCheck)
 {
     goodMatches.clear();
-    if (descA.empty() || descB.empty() || descA.rows < 2 || descB.rows < 2)
+    // descB needs >= 2 rows for a meaningful k=2 ratio test (comparing the
+    // best match against a real 2nd-best) -- descA has no such requirement:
+    // knnMatch() ranks each descA ROW independently against descB, so even
+    // a single-row descA (e.g. fuseWindowLandmarks()'s per-landmark query,
+    // see DEBUGGING.md item 19) works correctly. Previously required
+    // descA.rows >= 2 too, for no algorithmic reason found -- this silently
+    // made every single-row query return false before matching was even
+    // attempted (confirmed: fuseWindowLandmarks()'s v4/Phase A measured 0
+    // matches across an 866-frame smoke test before this fix).
+    if (descA.empty() || descB.empty() || descB.rows < 2)
         return false;
 
     cv::BFMatcher matcher(normType);

@@ -197,20 +197,87 @@ constexpr double kLoopMaxCorrectionMagnitude = 100000.0; // tryLoopClosure()'s d
                                                            // pathological PnP solves, never real drift.
 constexpr double kLoopMaxCorrectionAngleDeg = 90.0; // same guard, rotation component -- ~3x the largest
                                                      // genuine correction observed (~30 degrees).
-constexpr int kLoopConsistencyRequiredCount = 3; // setLoopConsistencyGroupEnabled()'s own gate: matches
-                                                  // real ORB-SLAM3's mnLoopNumCoincidences>=3 threshold
-                                                  // exactly (LoopClosing.cc) -- not independently tuned.
-constexpr int kLoopConsistencyOldIdxWindow = 5; // how close two confirmations' matched old-keyframe
-                                                 // indices must be to count as "the same place" --
-                                                 // untuned-per-sequence estimate (this codebase has no
-                                                 // covisibility-group structure to check membership
-                                                 // against instead, see setLoopConsistencyGroupEnabled()'s
-                                                 // own doc comment for why this is a simplified stand-in).
+constexpr int kLoopConsistencyRequiredCount = 2; // setLoopConsistencyGroupEnabled()'s own gate --
+                                                  // ORB-SLAM3's own mnLoopNumCoincidences>=3
+                                                  // (LoopClosing.cc) was tried literally twice (items
+                                                  // 15/21, both measured negative -- most streaks died at
+                                                  // exactly 2/3, one confirmation short) and lowered to 2
+                                                  // here to test whether this pipeline's own re-detection
+                                                  // cadence (sparser/noisier than ORB-SLAM3's) simply can't
+                                                  // sustain 3 -- see DEBUGGING.md item 22.
+constexpr int kLoopConsistencyOldIdxWindow = 5; // FALLBACK-only "same place" test (see
+                                                 // kLoopConsistencyPlaceMinScore below for the primary
+                                                 // one) -- only used when no place-recognition vector is
+                                                 // available for either old keyframe (raw-match-count
+                                                 // candidate search). Untuned-per-sequence estimate.
+constexpr double kLoopConsistencyPlaceMinScore = 0.3; // setLoopConsistencyGroupEnabled()'s primary "same
+                                                       // place" test: place-recognition score (VLAD/
+                                                       // SIFT-DBoW2/DBoW2 -- whichever candidate-search
+                                                       // backend is active) between the two OLD keyframes
+                                                       // being confirmed against each other, grounding the
+                                                       // test in real appearance evidence instead of the
+                                                       // 1D keyframe-index proxy this replaced. Same lesson
+                                                       // item 19 already confirmed for fuseWindowLandmarks()
+                                                       // (grounding matches in real evidence fixed an
+                                                       // analogous problem there) -- the pure index-window
+                                                       // version was measured (item 15) to lose far more
+                                                       // real corrections than it filtered false positives,
+                                                       // because viewing-angle drift shifts the best-
+                                                       // matching old-keyframe index faster than a small
+                                                       // window tolerates. Two OLD keyframes from the SAME
+                                                       // physical revisit episode should score well above
+                                                       // kVladMinScore's distant-frame noise floor (~0.05) --
+                                                       // 0.3 is an initial, untuned-per-sequence estimate,
+                                                       // same spirit as kVladMinScore/kDbowMinScore/
+                                                       // kSiftDbowMinScore.
 constexpr size_t kLoopConsistencyMaxGapKeyframes = 4; // how many new-keyframe insertions may pass between
                                                        // two confirmations of the same pending candidate
                                                        // before treating the streak as stale and
                                                        // restarting it -- roughly half a kKeyframeEveryNFrames
                                                        // cycle's worth of slack, untuned.
+constexpr int kLoopSpatialConsensusWindow = 5; // setLoopSpatialConsensusEnabled()'s own gate (DEBUGGING.md
+                                                // item 23): among all candidates whose place-recognition
+                                                // score independently exceeds the primary acceptance
+                                                // threshold in a SINGLE tryLoopClosure() call, the top-
+                                                // scoring one is only accepted if at least one OTHER
+                                                // qualifying candidate lies within this many keyframe
+                                                // indices of it -- checks WITHIN-call consensus among
+                                                // several independently-ranked candidates instead of
+                                                // ACROSS-call temporal recurrence (see
+                                                // setLoopConsistencyGroupEnabled()'s own doc comment for
+                                                // why that approach was closed as a structural mismatch,
+                                                // items 15/21/22). Untuned-per-sequence estimate.
+constexpr int kFuseWindowKeyframes = 15; // fuseWindowLandmarks()'s own recent-activity window --
+                                          // roughly 2x kLocalBaWindowKeyframes, wide enough to catch a
+                                          // duplicate triangulated a handful of keyframes apart, still
+                                          // narrow enough that local scale is roughly self-consistent
+                                          // (see kFuseMaxWorldDistance's own comment) and the O(new x
+                                          // active) pairwise distance sweep stays cheap. Untuned.
+constexpr float kFuseMaxWorldDistance = 0.5f; // fuseWindowLandmarks()'s CANDIDATE-narrowing gate (a
+                                               // cheap first pass, not the actual merge decision -- see
+                                               // kFuseMaxDescriptorDistance below for that) -- world units
+                                               // (this pipeline's own internal, not-yet-Umeyama-aligned
+                                               // scale, which item 11 already established isn't perfectly
+                                               // constant over a FULL sequence -- assumed roughly self-
+                                               // consistent within a kFuseWindowKeyframes-sized recent
+                                               // window, not validated). Untuned-per-sequence estimate,
+                                               // same spirit as kDbowMinScore/kVladMinScore.
+constexpr double kFuseMaxDescriptorDistance = 0.4; // fuseWindowLandmarks()'s actual "same physical
+                                                    // point" decision, among whatever
+                                                    // kFuseMaxWorldDistance already narrowed the field
+                                                    // to -- RootSIFT L2 distance, same convention this
+                                                    // pipeline's descriptor space already uses elsewhere.
+                                                    // Directly informed by a real measurement (item 16,
+                                                    // DEBUGGING.md): a diagnostic run of the earlier
+                                                    // pure-3D-distance version found its false merges had
+                                                    // a median descriptor distance of 0.7987 (72.3% >=
+                                                    // 0.6), while genuine same-feature matches elsewhere
+                                                    // in this codebase are expected well under ~0.4 -- so
+                                                    // 0.4 sits at the boundary of that observed gap, not a
+                                                    // blind guess, though still not independently verified
+                                                    // as the right cutoff for GENUINE matches specifically
+                                                    // (only for excluding the false ones that were
+                                                    // measured).
 constexpr int kSim3SolverMinCorrespondences = 8; // solveSim3Ransac()'s own call site in
                                                   // tryLoopClosure(): below this many descriptor-matched
                                                   // 3D-3D correspondences, don't even attempt RANSAC (the
@@ -408,7 +475,11 @@ constexpr int kCovisibilityMapStaleFrames = 24; // see m_framesSinceCovisibility
 // broke the earlier attempt, without needing OXTS or ground truth as an
 // external anchor (both off the table -- see this session's own earlier
 // discussion).
-constexpr int kLocalBaWindowKeyframes = 8;
+// kLocalBaWindowKeyframes moved to SlamWorker::m_localBaWindowKeyframes (see setLocalBaWindowKeyframes())
+// -- was a fixed constexpr here, now runtime-overridable; default value (8) unchanged. Queued since item
+// 8/10's observation-density fix unlocked real multi-view constraint in a window that previously only
+// had ownership-only landmarks to work with -- a bigger window may now capture meaningfully more of it,
+// untested before this session (see DEBUGGING.md).
 constexpr double kLocalBaPosePriorRotWeight = 20.0; // radians -- deliberately tight: rotation is
                                                      // well-observed even in a small window (unlike
                                                      // scale), so there's little reason to let it drift
@@ -3015,12 +3086,18 @@ void SlamWorker::insertKeyframe(const std::vector<cv::KeyPoint> &kps, const cv::
     std::vector<cv::Point3f> newPoints;
     std::vector<cv::Point2f> newImagePoints;
     cv::Mat newDescriptors;
+    std::vector<int> newKeypointIndices; // parallel to newPoints -- this keyframe's own kps/kf.keypoints
+                                          // index each new point came from, needed below to seed
+                                          // kf.keypointLandmarkId (matches[i].trainIdx is only available
+                                          // inside this loop, over the unfiltered triangulated/valid index
+                                          // space)
     for (size_t i = 0; i < triangulated.size(); ++i) {
         if (!valid[i])
             continue;
         newPoints.push_back(triangulated[i]);
         newImagePoints.push_back(pts2[i]); // this keyframe's own 2D observation of the point
         newDescriptors.push_back(descriptors.row(matches[i].trainIdx));
+        newKeypointIndices.push_back(matches[i].trainIdx);
     }
 
     // A fresh, stable landmark ID per new point -- see m_landmarkPositions/
@@ -3034,6 +3111,7 @@ void SlamWorker::insertKeyframe(const std::vector<cv::KeyPoint> &kps, const cv::
         const long long id = m_nextLandmarkId++;
         newIds.push_back(id);
         m_landmarkPositions[id] = newPoints[i];
+        m_landmarkDescriptors[id] = newDescriptors.row(static_cast<int>(i)).clone();
         m_landmarkObservations[id].emplace_back(newKeyframeIndex, newImagePoints[i]);
     }
 
@@ -3043,18 +3121,14 @@ void SlamWorker::insertKeyframe(const std::vector<cv::KeyPoint> &kps, const cv::
     // appends any further re-observed landmarks onto the SAME entry.
     m_keyframeObservedLandmarkIds.push_back(newIds);
 
-    // Before this keyframe's own new points join the global map below, see
-    // whether this keyframe *also* re-observes any already-known landmark
-    // (triangulated by some earlier keyframe) -- the cross-keyframe
-    // correspondence bundle adjustment needs and nothing else in this
-    // codebase records.
-    recordLandmarkObservations(newKeyframeIndex, kps, descriptors, R, t);
-
     // Record this keyframe (with a copy of its own locally-triangulated
     // points, kept independently of the global map's rolling eviction --
     // see the Keyframe comment in SlamWorker.h) before newPoints is moved
     // out below, so a much-later loop closure still has something of this
-    // keyframe's own to PnP-solve against.
+    // keyframe's own to PnP-solve against. Constructed here (earlier than
+    // this function used to build it) specifically so
+    // kf.keypointLandmarkId exists for recordLandmarkObservations() to
+    // write into next.
     Keyframe kf;
     kf.keypoints = kps;
     kf.descriptors = descriptors.clone();
@@ -3065,6 +3139,21 @@ void SlamWorker::insertKeyframe(const std::vector<cv::KeyPoint> &kps, const cv::
     kf.localMapDescriptors = newDescriptors;
     kf.localMapPointIds = newIds;
     kf.frameIndex = m_frameCount;
+
+    // See Keyframe::keypointLandmarkId's own doc comment. Seeded with this
+    // keyframe's own just-triangulated points; recordLandmarkObservations()
+    // below fills in any further re-observed (rolling-map) landmarks onto
+    // the SAME array.
+    kf.keypointLandmarkId.assign(kps.size(), -1);
+    for (size_t i = 0; i < newIds.size(); ++i)
+        kf.keypointLandmarkId[static_cast<size_t>(newKeypointIndices[i])] = newIds[i];
+
+    // Before this keyframe's own new points join the global map below, see
+    // whether this keyframe *also* re-observes any already-known landmark
+    // (triangulated by some earlier keyframe) -- the cross-keyframe
+    // correspondence bundle adjustment needs and nothing else in this
+    // codebase records.
+    recordLandmarkObservations(newKeyframeIndex, kps, descriptors, R, t, kf.keypointLandmarkId);
 
     // DBoW2 place-recognition vector for tryLoopClosure()'s candidate
     // search (see setDbowLoopClosureEnabled()) -- only computed when a
@@ -3139,6 +3228,12 @@ void SlamWorker::insertKeyframe(const std::vector<cv::KeyPoint> &kps, const cv::
 
     setReferenceFrame(kps, descriptors, R, t);
 
+    // Before local BA -- see fuseWindowLandmarks()'s own doc comment --
+    // mirrors ORB-SLAM3's own LocalMapping::Run() ordering
+    // (SearchInNeighbors() before LocalBundleAdjustment()).
+    if (m_landmarkFuseEnabled)
+        fuseWindowLandmarks(static_cast<int>(m_keyframeHistory.size()) - 1);
+
     if (m_localBundleAdjustmentEnabled)
         runLocalBundleAdjustment();
     else
@@ -3153,8 +3248,151 @@ void SlamWorker::insertKeyframe(const std::vector<cv::KeyPoint> &kps, const cv::
         buildCovisibilityLocalMap();
 }
 
+void SlamWorker::fuseWindowLandmarks(int newKeyframeIndex)
+{
+    // v4 redesign (DEBUGGING.md item 19), Phase A only (coverage
+    // extension, no merging -- see setLandmarkFuseEnabled()'s own doc
+    // comment for why items 16-18's version, and why merging is deferred).
+    // Real ORB-SLAM3-style PROJECTION test this time: for each of the
+    // current keyframe's own just-triangulated landmarks, project it into
+    // each nearby keyframe's OWN pose and search that keyframe's OWN
+    // actually-detected keypoints (not another landmark's stored 3D
+    // position) for a reprojection-gated descriptor match -- exactly what
+    // recordLandmarkObservations() already does for the rolling map,
+    // applied here to nearby PAST keyframes too.
+    const int n = static_cast<int>(m_keyframeHistory.size());
+    const int windowStart = std::max(0, n - kFuseWindowKeyframes);
+
+    const std::vector<long long> newIds = m_keyframeHistory[static_cast<size_t>(newKeyframeIndex)].localMapPointIds;
+
+    for (long long newId : newIds) {
+        const auto posIt = m_landmarkPositions.find(newId);
+        const auto descIt = m_landmarkDescriptors.find(newId);
+        if (posIt == m_landmarkPositions.end() || descIt == m_landmarkDescriptors.end())
+            continue;
+        const cv::Point3f &p = posIt->second;
+        const cv::Mat pWorld = (cv::Mat_<double>(3, 1) << p.x, p.y, p.z);
+        const cv::Mat &d1 = descIt->second;
+
+        for (int ki = windowStart; ki < n; ++ki) {
+            if (ki == newKeyframeIndex)
+                continue;
+            Keyframe &otherKf = m_keyframeHistory[static_cast<size_t>(ki)];
+            if (otherKf.descriptors.empty())
+                continue;
+
+            const cv::Mat camPt = otherKf.R * pWorld + otherKf.t;
+            const double z = camPt.at<double>(2);
+            if (z < 1e-3)
+                continue; // behind this keyframe's own camera
+
+            const double u = m_intrinsics.fx * camPt.at<double>(0) / z + m_intrinsics.cx;
+            const double v = m_intrinsics.fy * camPt.at<double>(1) / z + m_intrinsics.cy;
+
+            std::vector<cv::DMatch> matches;
+            if (!matchDescriptors(d1, otherKf.descriptors, matches) || matches.empty())
+                continue;
+            const cv::DMatch &m = matches.front(); // d1 is a single-row query -> at most 1 result
+            const cv::Point2f &obs = otherKf.keypoints[static_cast<size_t>(m.trainIdx)].pt;
+            const double du = u - obs.x, dv = v - obs.y;
+            if (du * du + dv * dv > kMaxObservationReprojErrorPixels * kMaxObservationReprojErrorPixels)
+                continue; // descriptor-similar but geometrically implausible from this viewpoint
+
+            const long long existing = otherKf.keypointLandmarkId[static_cast<size_t>(m.trainIdx)];
+            if (existing == newId)
+                continue; // already linked (defensive, shouldn't normally occur for a brand-new id)
+
+            if (existing >= 0 && !m_landmarkFuseMergeEnabled)
+                continue; // genuine conflict, but Phase B is off -- see setLandmarkFuseMergeEnabled()'s
+                           // own doc comment for why it's NOT recommended (measured negative, item 20)
+
+            if (existing >= 0) {
+                // Phase B: a GENUINE conflict -- newId and existing both
+                // demonstrably explain this exact detected keypoint in
+                // otherKf, confirmed via a real reprojection-gated
+                // descriptor match, not items 16-18's abstract 3D-distance
+                // heuristic (which item 18 confirmed was actively harmful).
+                // Richer-evidence-wins, same rule as before: whichever id
+                // has fewer recorded observations is absorbed into the one
+                // with more.
+                const auto newObsIt = m_landmarkObservations.find(newId);
+                const auto existingObsIt = m_landmarkObservations.find(existing);
+                const size_t newObsCount = newObsIt == m_landmarkObservations.end() ? 0 : newObsIt->second.size();
+                const size_t existingObsCount =
+                    existingObsIt == m_landmarkObservations.end() ? 0 : existingObsIt->second.size();
+                const long long survivor = existingObsCount >= newObsCount ? existing : newId;
+                const long long loser = survivor == existing ? newId : existing;
+
+                const auto loserIt = m_landmarkObservations.find(loser);
+                if (loserIt != m_landmarkObservations.end()) {
+                    // Resync loser's OWNING keyframe's own local-map copy
+                    // (Keyframe::localMapPointIds/localMapPoints/
+                    // localMapDescriptors) BEFORE erasing loser's
+                    // observation list -- this is the exact stale-data gap
+                    // item 20 root-caused as Phase B's real regression
+                    // cause: tryLoopClosure()'s own PnP/Sim3Solver
+                    // measurement reads THESE arrays directly, not
+                    // m_landmarkObservations/m_landmarkPositions, so
+                    // without this fix a future loop closure could still
+                    // silently use loser's dead, no-longer-updated
+                    // position. The owning keyframe is always the FIRST
+                    // (oldest) entry in the observation list -- seeded at
+                    // triangulation time in insertKeyframe() and never
+                    // reordered, only ever appended to afterward.
+                    const int loserOwnerKfIdx = loserIt->second.front().first;
+                    Keyframe &loserOwnerKf = m_keyframeHistory[static_cast<size_t>(loserOwnerKfIdx)];
+                    const auto ownIt = std::find(loserOwnerKf.localMapPointIds.begin(),
+                                                  loserOwnerKf.localMapPointIds.end(), loser);
+                    if (ownIt != loserOwnerKf.localMapPointIds.end()) {
+                        const size_t localIdx =
+                            static_cast<size_t>(ownIt - loserOwnerKf.localMapPointIds.begin());
+                        loserOwnerKf.localMapPointIds[localIdx] = survivor;
+                        const auto survivorPosIt = m_landmarkPositions.find(survivor);
+                        if (survivorPosIt != m_landmarkPositions.end())
+                            loserOwnerKf.localMapPoints[localIdx] = survivorPosIt->second;
+                        const auto survivorDescIt = m_landmarkDescriptors.find(survivor);
+                        if (survivorDescIt != m_landmarkDescriptors.end())
+                            survivorDescIt->second.copyTo(
+                                loserOwnerKf.localMapDescriptors.row(static_cast<int>(localIdx)));
+                    }
+
+                    std::vector<std::pair<int, cv::Point2f>> loserObs = std::move(loserIt->second);
+                    m_landmarkObservations.erase(loserIt);
+                    auto &survivorObs = m_landmarkObservations[survivor];
+                    survivorObs.insert(survivorObs.end(), loserObs.begin(), loserObs.end());
+                }
+                // Only this one now-resolved slot is fixed up -- any OTHER
+                // keyframe that historically linked to loser (via an
+                // earlier Phase A coverage-extension) keeps a stale
+                // keypointLandmarkId entry; the next fuse pass that
+                // touches it will find loser's m_landmarkObservations
+                // entry gone and treat it as inert, self-healing onto
+                // whatever survivor is current by then. Same soft-
+                // consistency approach this codebase already uses for
+                // keyframe culling.
+                otherKf.keypointLandmarkId[static_cast<size_t>(m.trainIdx)] = survivor;
+                ++m_fusedLandmarkCount;
+
+                if (loser == newId)
+                    break; // newId itself is gone -- nothing left to check against the rest of the window
+                continue;
+            }
+
+            // Unclaimed keypoint: extend coverage. A real, reprojection-
+            // gated new observation of newId -- structurally identical to
+            // what recordLandmarkObservations() already does safely for
+            // the rolling map, just reaching into a nearby PAST keyframe.
+            m_landmarkObservations[newId].emplace_back(ki, obs);
+            m_keyframeObservedLandmarkIds[static_cast<size_t>(ki)].push_back(newId);
+            otherKf.keypointLandmarkId[static_cast<size_t>(m.trainIdx)] = newId;
+            ++m_fusedLandmarkCount;
+        }
+    }
+}
+
 void SlamWorker::recordLandmarkObservations(int keyframeIndex, const std::vector<cv::KeyPoint> &kps,
-                                             const cv::Mat &descriptors, const cv::Mat &R, const cv::Mat &t)
+                                             const cv::Mat &descriptors, const cv::Mat &R, const cv::Mat &t,
+                                             std::vector<long long> &keypointLandmarkId)
 {
     if (m_mapDescriptors.empty())
         return;
@@ -3192,6 +3430,7 @@ void SlamWorker::recordLandmarkObservations(int keyframeIndex, const std::vector
             continue;
         m_landmarkObservations[id].emplace_back(keyframeIndex, obs);
         m_keyframeObservedLandmarkIds[static_cast<size_t>(keyframeIndex)].push_back(id);
+        keypointLandmarkId[static_cast<size_t>(m.trainIdx)] = id;
     }
 }
 
@@ -3238,7 +3477,7 @@ void SlamWorker::refineLocalKeyframes()
 bool SlamWorker::runLocalBundleAdjustment()
 {
     const int n = static_cast<int>(m_keyframeHistory.size());
-    const int windowStart = std::max(0, n - kLocalBaWindowKeyframes);
+    const int windowStart = std::max(0, n - m_localBaWindowKeyframes);
     const int windowSize = n - windowStart;
     if (windowSize < 2)
         return false;
@@ -3989,6 +4228,17 @@ void SlamWorker::cullRedundantKeyframes()
         std::fprintf(stderr, "[cull] %d keyframe(s) newly marked redundant this pass\n", culledCount);
 }
 
+bool SlamWorker::loopHasSpatialConsensus(const std::vector<int> &qualifying, int bestIdx) const
+{
+    if (!m_loopSpatialConsensusEnabled)
+        return true;
+    for (int idx : qualifying) {
+        if (idx != bestIdx && std::abs(idx - bestIdx) <= kLoopSpatialConsensusWindow)
+            return true;
+    }
+    return false;
+}
+
 void SlamWorker::tryLoopClosure(size_t newKeyframeIndex)
 {
     if (newKeyframeIndex < static_cast<size_t>(kLoopExclusionWindow))
@@ -4022,16 +4272,21 @@ void SlamWorker::tryLoopClosure(size_t newKeyframeIndex)
     // loaded, or this particular keyframe has no siftBowVec.
     if (m_siftDbowLoopClosureEnabled && m_siftVocabulary && !newKf.siftBowVec.empty()) {
         usedSiftDbow = true;
+        std::vector<int> qualifying;
         for (size_t i = 0; i <= searchLimit; ++i) {
             if (m_keyframeHistory[i].culled || m_keyframeHistory[i].siftBowVec.empty())
                 continue;
             const double score = m_siftVocabulary->score(m_keyframeHistory[i].siftBowVec, newKf.siftBowVec);
+            if (score >= kSiftDbowMinScore)
+                qualifying.push_back(static_cast<int>(i));
             if (score > bestSiftDbowScore) {
                 bestSiftDbowScore = score;
                 bestIdx = static_cast<int>(i);
             }
         }
         if (bestIdx < 0 || bestSiftDbowScore < kSiftDbowMinScore)
+            return;
+        if (!loopHasSpatialConsensus(qualifying, bestIdx))
             return;
         std::fprintf(stderr, "[loop][siftdbow] kf#%d candidate=kf#%d score=%.4f\n",
                      static_cast<int>(newKeyframeIndex), bestIdx, bestSiftDbowScore);
@@ -4045,16 +4300,21 @@ void SlamWorker::tryLoopClosure(size_t newKeyframeIndex)
     // (non-SIFT runs).
     else if (m_vladLoopClosureEnabled && m_vladVocabulary && !newKf.vladVector.empty()) {
         usedVlad = true;
+        std::vector<int> qualifying;
         for (size_t i = 0; i <= searchLimit; ++i) {
             if (m_keyframeHistory[i].culled || m_keyframeHistory[i].vladVector.empty())
                 continue;
             const float score = m_vladVocabulary->score(m_keyframeHistory[i].vladVector, newKf.vladVector);
+            if (score >= kVladMinScore)
+                qualifying.push_back(static_cast<int>(i));
             if (score > bestVladScore) {
                 bestVladScore = score;
                 bestIdx = static_cast<int>(i);
             }
         }
         if (bestIdx < 0 || bestVladScore < kVladMinScore)
+            return;
+        if (!loopHasSpatialConsensus(qualifying, bestIdx))
             return;
         std::fprintf(stderr, "[loop][vlad] kf#%d candidate=kf#%d score=%.4f\n",
                      static_cast<int>(newKeyframeIndex), bestIdx, bestVladScore);
@@ -4067,16 +4327,21 @@ void SlamWorker::tryLoopClosure(size_t newKeyframeIndex)
     // particular keyframe has no BowVector (non-ORB runs).
     else if (m_dbowLoopClosureEnabled && m_orbVocabulary && !newKf.bowVec.empty()) {
         usedDbow = true;
+        std::vector<int> qualifying;
         for (size_t i = 0; i <= searchLimit; ++i) {
             if (m_keyframeHistory[i].culled || m_keyframeHistory[i].bowVec.empty())
                 continue;
             const double score = m_orbVocabulary->score(m_keyframeHistory[i].bowVec, newKf.bowVec);
+            if (score >= kDbowMinScore)
+                qualifying.push_back(static_cast<int>(i));
             if (score > bestDbowScore) {
                 bestDbowScore = score;
                 bestIdx = static_cast<int>(i);
             }
         }
         if (bestIdx < 0 || bestDbowScore < kDbowMinScore)
+            return;
+        if (!loopHasSpatialConsensus(qualifying, bestIdx))
             return;
         std::fprintf(stderr, "[loop][dbow] kf#%d candidate=kf#%d score=%.4f\n",
                      static_cast<int>(newKeyframeIndex), bestIdx, bestDbowScore);
@@ -4301,9 +4566,34 @@ void SlamWorker::tryLoopClosure(size_t newKeyframeIndex)
     // the LAST thing standing between a real geometrically-verified
     // candidate and actually applying its correction.
     if (m_loopConsistencyGroupEnabled) {
-        const bool samePlace = m_pendingLoopOldIdx >= 0 &&
-                                std::abs(bestIdx - m_pendingLoopOldIdx) <= kLoopConsistencyOldIdxWindow &&
-                                newKeyframeIndex - m_pendingLoopNewKfIdx <= kLoopConsistencyMaxGapKeyframes;
+        bool samePlace = false;
+        if (m_pendingLoopOldIdx >= 0 &&
+            newKeyframeIndex - m_pendingLoopNewKfIdx <= kLoopConsistencyMaxGapKeyframes) {
+            // Ground "same place" in real appearance evidence (whichever
+            // candidate-search backend actually found this candidate)
+            // between the two OLD keyframes -- see kLoopConsistencyPlaceMinScore's
+            // own doc comment for why this replaced a pure keyframe-index
+            // proxy. Falls back to the index-window test only when neither
+            // old keyframe has a usable place-recognition vector (raw-
+            // match-count candidate search).
+            const Keyframe &candidateOldKf = m_keyframeHistory[static_cast<size_t>(bestIdx)];
+            const Keyframe &pendingOldKf = m_keyframeHistory[static_cast<size_t>(m_pendingLoopOldIdx)];
+            if (usedSiftDbow && m_siftVocabulary && !candidateOldKf.siftBowVec.empty() &&
+                !pendingOldKf.siftBowVec.empty()) {
+                samePlace = m_siftVocabulary->score(candidateOldKf.siftBowVec, pendingOldKf.siftBowVec) >=
+                            kLoopConsistencyPlaceMinScore;
+            } else if (usedVlad && m_vladVocabulary && !candidateOldKf.vladVector.empty() &&
+                       !pendingOldKf.vladVector.empty()) {
+                samePlace = m_vladVocabulary->score(candidateOldKf.vladVector, pendingOldKf.vladVector) >=
+                            kLoopConsistencyPlaceMinScore;
+            } else if (usedDbow && m_orbVocabulary && !candidateOldKf.bowVec.empty() &&
+                       !pendingOldKf.bowVec.empty()) {
+                samePlace = m_orbVocabulary->score(candidateOldKf.bowVec, pendingOldKf.bowVec) >=
+                            kLoopConsistencyPlaceMinScore;
+            } else {
+                samePlace = std::abs(bestIdx - m_pendingLoopOldIdx) <= kLoopConsistencyOldIdxWindow;
+            }
+        }
         if (samePlace) {
             ++m_pendingLoopStreak;
         } else {
