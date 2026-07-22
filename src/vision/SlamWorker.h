@@ -615,6 +615,46 @@ public slots:
     // path when both this and setGlobalBundleAdjustmentEnabled() are on.
     void setGlobalBaPoseGraphPolishEnabled(bool enabled) { m_globalBaPoseGraphPolishEnabled = enabled; }
 
+    // Default off: DEBUGGING.md item 35. ONE flag that turns on the full
+    // ORB-SLAM3-imitation loop-correction pipeline the user asked for --
+    // matches real LoopClosing::CorrectLoop()'s actual structure end to
+    // end: (1) keyframe culling ON with a lowered covisibility threshold
+    // (m_covisibilityMinShared 100->60, giving the essential graph more
+    // edges to work with, since 60 is the only value that maps to the
+    // covisibility-edge threshold -- no culling constant is "60"); (2) an
+    // essential-graph-style Sim3 pose-graph correction over the WHOLE map
+    // that runs FIRST and synchronously (the primary correction, applied
+    // immediately -- setGlobalBaPoseGraphPolishEnabled()); (3) global BA
+    // demoted to a deferred/"background-thread" SECONDARY polish
+    // (setGlobalBundleAdjustmentAsyncEnabled()'s deterministic deferred-
+    // integration, the faithful-imitation stand-in for ORB-SLAM3's real
+    // std::thread -- functionally identical for offline ATE, minus the
+    // run-to-run non-determinism a real thread would reintroduce), during
+    // whose deferral window the normal per-keyframe local BA keeps
+    // refining new keyframes in parallel, exactly as ORB-SLAM3's
+    // LocalMapping does while its GBA thread solves. Enabling this implies
+    // setGlobalBundleAdjustmentEnabled(true).
+    // Default off, requires setGlobalBundleAdjustmentEnabled(): DEBUGGING.md
+    // item 35. Switches runGlobalBundleAdjustment()'s Ceres solver from
+    // SPARSE_NORMAL_CHOLESKY (full normal equations, capped at
+    // kGlobalBaMaxWindowKeyframes) to SPARSE_SCHUR with landmarks in
+    // elimination group 0 -- Ceres' direct equivalent of real ORB-SLAM3's
+    // g2o::BlockSolver_6_3 + vPoint->setMarginalized(true). Same optimum,
+    // but the block-structured Schur solve scales to the whole map, so the
+    // keyframe cap is also lifted when this is on. Isolated behind its own
+    // flag so the Schur-vs-Cholesky + cap-lifted change is a single
+    // measured variable.
+    void setGlobalBaSchurEnabled(bool enabled) { m_globalBaSchurEnabled = enabled; }
+
+    void setGlobalBaOrbSlam3PipelineEnabled(bool enabled)
+    {
+        m_keyframeCullingEnabled = enabled;
+        m_globalBundleAdjustmentEnabled = enabled;
+        m_globalBaPoseGraphPolishEnabled = enabled;
+        m_globalBundleAdjustmentAsyncEnabled = enabled;
+        m_covisibilityMinShared = enabled ? 60 : 100;
+    }
+
     // Default off: when on, trackFrame() matches against the covisibility-
     // driven local map (see buildCovisibilityLocalMap()) instead of the
     // flat rolling m_mapPoints/m_mapDescriptors -- more relevant candidate
@@ -632,6 +672,50 @@ public slots:
     // kGuidedSearchRadiusPixels' own doc comment for why this shape, not a
     // from-scratch guided matcher).
     void setGuidedSearchEnabled(bool enabled) { m_guidedSearchEnabled = enabled; }
+
+    // Default off: DEBUGGING.md item 36. When on, trackFrame() follows its
+    // SQPnP RANSAC solve with a real ORB-SLAM3-style pose-only BA
+    // (optimizePoseOnly()) -- refine this frame's pose against ALL matched
+    // map points with the map fixed + iterative outlier rejection, the
+    // per-frame-tracking-accuracy mechanism this pipeline was missing vs
+    // ORB-SLAM3 (which never trusts a raw RANSAC minimal-sample pose). SQPnP
+    // is kept as the robust bootstrap so coverage cannot collapse (per the
+    // user's explicit requirement); this only ever refines on top.
+    void setPoseOnlyBaEnabled(bool enabled) { m_poseOnlyBaEnabled = enabled; }
+
+    // Default off, requires setLocalBundleAdjustmentEnabled(): DEBUGGING.md
+    // item 37. Swaps runLocalBundleAdjustment()'s soft-prior scheme for
+    // runLocalBundleAdjustmentHardAnchor() -- real ORB-SLAM3 local BA with
+    // fixed co-observing border keyframes as hard scale anchors. The
+    // structurally-correct hard anchoring the reverted single-anchor
+    // attempt lacked (which is why that one scale-collapsed to 187m).
+    void setLocalBaHardAnchorEnabled(bool enabled) { m_localBaHardAnchorEnabled = enabled; }
+
+    // Default off, requires setPoseOnlyBaEnabled(): DEBUGGING.md item 38.
+    // Octave/scale information weighting in pose-only BA -- the SIFT-
+    // appropriate analogue of ORB-SLAM3's per-pyramid-level invSigma2:
+    // weights each observation by (kOctaveWeightRefSize/keypoint-size)^2 so
+    // coarse-scale (less precisely localized) SIFT keypoints count less,
+    // using the keypoint's REAL size, not ORB's discrete 1.2^level formula.
+    // Currently applied only in optimizePoseOnly() (where the keypoint
+    // scale is directly available); extending it to local/loop/global BA
+    // would need per-observation scale plumbing (see item 38).
+    void setOctaveWeightingEnabled(bool enabled) { m_octaveWeightingEnabled = enabled; }
+
+    // Default off, meaningful only with setPoseOnlyBaEnabled(): DEBUGGING.md
+    // item 39. After a loop closure commits, fall back to pure SQPnP (skip
+    // pose-only BA) for kPoseOnlyLoopSuppressFrames frames while the
+    // loop-BA-perturbed map re-settles -- fixes the diagnosed local scale
+    // collapse (frames ~2500-3300) where pose-only BA rigidly followed a
+    // momentarily-compressed post-loop map. SQPnP's RANSAC is robust to it.
+    void setPoseOnlyLoopSuppressEnabled(bool enabled) { m_poseOnlyLoopSuppressEnabled = enabled; }
+
+    // Default off: DEBUGGING.md item 40. Rejects unreliable loop closures in
+    // tryLoopClosure() -- an extreme Sim3-measured scale (far from 1.0)
+    // backed by too few inliers, the garbage-loop signature that
+    // map-compresses and degrades tracking. Aims to raise loop-closure
+    // quality (fewer bad map perturbations) without the new DBoW2 vocabulary.
+    void setLoopQualityGateEnabled(bool enabled) { m_loopQualityGateEnabled = enabled; }
 
     // Default off: when on, trackFrame() inserts a new keyframe once the
     // tracked-inlier ratio degrades past kKeyframeQualityRatioThreshold
@@ -871,6 +955,16 @@ private:
 
     bool initializeFromFrame(const std::vector<cv::KeyPoint> &kps, const cv::Mat &descriptors);
     bool trackFrame(const std::vector<cv::KeyPoint> &kps, const cv::Mat &descriptors);
+
+    // Real ORB-SLAM3-style pose-only BA (see setPoseOnlyBaEnabled(),
+    // DEBUGGING.md item 36): refines a single frame's 6-DOF pose against all
+    // its matched map points (map held fixed), iterative 4-pass outlier
+    // rejection, initialized from the SQPnP RANSAC solve. Refines R/tvec in
+    // place and reports the final inlier count on success; returns false
+    // (leaving R/tvec untouched) if it declines.
+    bool optimizePoseOnly(const std::vector<cv::Point3f> &objectPoints,
+                           const std::vector<cv::Point2f> &imagePoints, const std::vector<float> &imageScales,
+                           cv::Mat &R, cv::Mat &tvec, int &inlierCountOut) const;
     void insertKeyframe(const std::vector<cv::KeyPoint> &kps, const cv::Mat &descriptors,
                          const cv::Mat &R, const cv::Mat &t);
     bool recoverViaEpipolar(const std::vector<cv::KeyPoint> &kps, const cv::Mat &descriptors);
@@ -1015,6 +1109,14 @@ private:
     // refinement refineLocalKeyframes() does). Returns false (no-op) if the
     // window has too few keyframes/landmarks to be worth solving.
     bool runLocalBundleAdjustment();
+
+    // Real ORB-SLAM3-style local BA with hard-anchor border keyframes (see
+    // setLocalBaHardAnchorEnabled(), DEBUGGING.md item 37): optimizes the
+    // recent window's keyframes + their observed map points freely, while
+    // every OTHER keyframe co-observing those points is added and held
+    // CONSTANT as a scale/gauge anchor. The structurally-correct
+    // alternative to runLocalBundleAdjustment()'s soft-prior scheme.
+    bool runLocalBundleAdjustmentHardAnchor();
 
     // Full global BA (see setGlobalBundleAdjustmentEnabled()): joint Ceres
     // BA over EVERY keyframe/landmark from 0 to newKfIdx (not just a loop's
@@ -1326,6 +1428,12 @@ private:
     // indefinitely.
     int m_framesSinceCovisibilityMapRebuild = 0;
     bool m_guidedSearchEnabled = false; // see setGuidedSearchEnabled()
+    bool m_poseOnlyBaEnabled = false; // see setPoseOnlyBaEnabled()
+    bool m_localBaHardAnchorEnabled = false; // see setLocalBaHardAnchorEnabled()
+    bool m_octaveWeightingEnabled = false; // see setOctaveWeightingEnabled()
+    bool m_poseOnlyLoopSuppressEnabled = false; // see setPoseOnlyLoopSuppressEnabled()
+    int m_poseOnlyLoopSuppressFrames = 0; // countdown; >0 means suppress pose-only BA this frame (item 39)
+    bool m_loopQualityGateEnabled = false; // see setLoopQualityGateEnabled() (item 40)
     bool m_qualityDrivenKeyframesEnabled = false; // see setQualityDrivenKeyframesEnabled()
 
     // Parallel to m_mapPoints -- a stable ID per live map point, surviving
@@ -1548,6 +1656,9 @@ private:
     bool m_globalBaSoftLoopAnchorEnabled = false; // see setGlobalBaSoftLoopAnchorEnabled()
     bool m_globalBaPolishEnabled = false; // see setGlobalBaPolishEnabled()
     bool m_globalBaPoseGraphPolishEnabled = false; // see setGlobalBaPoseGraphPolishEnabled()
+    bool m_globalBaSchurEnabled = false; // see setGlobalBaSchurEnabled()
+    int m_covisibilityMinShared = 100; // essential-graph covisibility edge threshold; lowered to 60 by
+                                        // setGlobalBaOrbSlam3PipelineEnabled() (see its doc comment)
     bool m_pendingGlobalBaValid = false;
     int m_pendingGlobalBaTriggerKfIdx = -1;
     int m_pendingGlobalBaIntegrateAtKfIdx = -1;

@@ -197,6 +197,17 @@ constexpr double kLoopMaxCorrectionMagnitude = 100000.0; // tryLoopClosure()'s d
                                                            // pathological PnP solves, never real drift.
 constexpr double kLoopMaxCorrectionAngleDeg = 90.0; // same guard, rotation component -- ~3x the largest
                                                      // genuine correction observed (~30 degrees).
+// Loop-closure QUALITY gate (item 40, setLoopQualityGateEnabled()): reject a
+// closure whose Sim3-measured scale is extreme (far from 1.0) AND supported by
+// too few Sim3 inliers -- the signature of an UNRELIABLE scale measurement (garbage
+// loop) rather than real drift, which map-compresses and degrades tracking. Unlike
+// the deliberately-loose degenerate-solve caps above, this targets the "few-inlier
+// large-scale" case specifically, and ONLY when both conditions hold, to avoid the
+// documented vicious cycle of rejecting real large-drift corrections (a genuine
+// large drift has MANY inliers, so it passes). Untuned.
+constexpr int kLoopQualityMinSim3Inliers = 15; // below this, an extreme scaleMeas is untrustworthy
+constexpr double kLoopQualityScaleLo = 0.70; // extreme-scale band: reject only OUTSIDE [lo, hi]
+constexpr double kLoopQualityScaleHi = 1.45;
 constexpr int kLoopConsistencyRequiredCount = 2; // setLoopConsistencyGroupEnabled()'s own gate --
                                                   // ORB-SLAM3's own mnLoopNumCoincidences>=3
                                                   // (LoopClosing.cc) was tried literally twice (items
@@ -336,6 +347,25 @@ constexpr int kBaMinObservationsPerLandmark = 2; // a landmark needs observation
 constexpr double kBaHuberDeltaPixels = 4.0; // robust-loss threshold: a mismatched/outlier
                                              // correspondence beyond this many pixels of reprojection
                                              // error gets down-weighted instead of dominating the fit
+constexpr double kPoseOnlyLoopSuppressScaleLo = 0.80; // item 39: only suppress pose-only BA after a loop
+constexpr double kPoseOnlyLoopSuppressScaleHi = 1.25; // closure whose scaleMeas falls OUTSIDE [lo,hi] --
+                                                       // i.e. one that applied a real scale correction
+                                                       // (the map-compressing case that causes the
+                                                       // collapse). Near-unit closures leave pose-only BA
+                                                       // on. Untuned.
+constexpr int kPoseOnlyLoopSuppressFrames = 30; // DEBUGGING.md item 39: after a loop closure commits, use
+                                                 // pure SQPnP (skip pose-only BA) for this many frames while
+                                                 // the loop-BA-perturbed map re-settles -- pose-only BA holds
+                                                 // the map fixed and fits the camera rigidly to it, so it
+                                                 // follows a momentarily-compressed post-loop map straight
+                                                 // into a local scale collapse (the diagnosed frames-2500-3300
+                                                 // failure); SQPnP's RANSAC is robust to it. ~4 keyframes at
+                                                 // the default keyframe spacing. Untuned.
+constexpr double kOctaveWeightRefSize = 2.0; // octave/scale information weighting reference (item 38, see
+                                              // optimizePoseOnly()): a SIFT keypoint at/below this SIZE
+                                              // (diameter, ~the finest detectable scale) keeps full unit
+                                              // weight; coarser ones get invSigma2=(ref/size)^2 < 1. Not
+                                              // per-sequence tuned.
 constexpr double kMaxObservationReprojErrorPixels = 8.0; // recordLandmarkObservations() gate: a plain
                                                           // descriptor ratio-test match (unlike every
                                                           // other point-to-3D-structure step in this
@@ -576,6 +606,49 @@ struct ReprojectionCost
     }
 
     double observedU, observedV, fx, fy, cx, cy;
+};
+
+// Pose-only reprojection residual (see SlamWorker::optimizePoseOnly(),
+// DEBUGGING.md item 36): the 3D landmark position is BAKED IN as a
+// constant (X/Y/Z), so the only free parameter block is the 6-DOF camera
+// pose [rvec(3), t(3)]. This is exactly real ORB-SLAM3's
+// Optimizer::PoseOptimization() structure -- refine the current frame's
+// pose against all its matched map points with the map held fixed, far
+// more accurate than trusting RANSAC PnP's minimal-sample winner, which is
+// the actual per-frame drift source vs ORB-SLAM3 (see trackFrame()).
+struct PoseOnlyReprojectionCost
+{
+    PoseOnlyReprojectionCost(double X, double Y, double Z, double observedU, double observedV, double fx,
+                              double fy, double cx, double cy)
+        : X(X), Y(Y), Z(Z), observedU(observedU), observedV(observedV), fx(fx), fy(fy), cx(cx), cy(cy)
+    {
+    }
+
+    template <typename T>
+    bool operator()(const T *const pose, T *residuals) const
+    {
+        T point[3] = {T(X), T(Y), T(Z)};
+        T camPoint[3];
+        ceres::AngleAxisRotatePoint(pose, point, camPoint);
+        camPoint[0] += pose[3];
+        camPoint[1] += pose[4];
+        camPoint[2] += pose[5];
+        T z = camPoint[2];
+        if (z < T(1e-3))
+            z = T(1e-3);
+        residuals[0] = T(fx) * camPoint[0] / z + T(cx) - T(observedU);
+        residuals[1] = T(fy) * camPoint[1] / z + T(cy) - T(observedV);
+        return true;
+    }
+
+    static ceres::CostFunction *Create(double X, double Y, double Z, double observedU, double observedV,
+                                        double fx, double fy, double cx, double cy)
+    {
+        return new ceres::AutoDiffCostFunction<PoseOnlyReprojectionCost, 2, 6>(
+            new PoseOnlyReprojectionCost(X, Y, Z, observedU, observedV, fx, fy, cx, cy));
+    }
+
+    double X, Y, Z, observedU, observedV, fx, fy, cx, cy;
 };
 
 // Soft prior pulling a [rvec(3), t(3)] pose parameter block back toward a
@@ -2940,6 +3013,121 @@ bool SlamWorker::initializeFromFrame(const std::vector<cv::KeyPoint> &kps, const
     return true;
 }
 
+bool SlamWorker::optimizePoseOnly(const std::vector<cv::Point3f> &objectPoints,
+                                   const std::vector<cv::Point2f> &imagePoints,
+                                   const std::vector<float> &imageScales, cv::Mat &R, cv::Mat &tvec,
+                                   int &inlierCountOut) const
+{
+    // Real ORB-SLAM3-style pose-only BA (Optimizer::PoseOptimization): the
+    // map is held fixed; only this frame's 6-DOF pose is optimized against
+    // ALL its matched map points, with iterative outlier re-rejection
+    // (ORB-SLAM3 does 4 passes). Initialized from the SQPnP RANSAC solve
+    // (R/tvec on entry) -- SQPnP stays as the robust minimal-sample
+    // bootstrap that keeps coverage from collapsing (per the user's
+    // explicit requirement), this just refines its result using every
+    // consistent observation instead of RANSAC's minimal sample. See
+    // trackFrame()'s call site (gated by m_poseOnlyBaEnabled) and
+    // DEBUGGING.md item 36.
+    const size_t n = objectPoints.size();
+    if (n < 4)
+        return false;
+
+    std::array<double, 6> pose;
+    cv::Mat rvec;
+    cv::Rodrigues(R, rvec);
+    for (int k = 0; k < 3; ++k)
+        pose[static_cast<size_t>(k)] = rvec.at<double>(k);
+    for (int k = 0; k < 3; ++k)
+        pose[static_cast<size_t>(3 + k)] = tvec.at<double>(k);
+
+    // Outlier gate in pixels -- reuse trackFrame()'s own PnP RANSAC
+    // reprojection-error threshold so "inlier" means the same thing before
+    // and after this refinement.
+    const double thresh = m_pnpSettings.reprojectionError;
+    const double thresh2 = thresh * thresh;
+    std::vector<uchar> isInlier(n, 1);
+
+    constexpr int kPoseOnlyPasses = 4; // ORB-SLAM3's own PoseOptimization pass count
+    for (int pass = 0; pass < kPoseOnlyPasses; ++pass) {
+        ceres::Problem problem;
+        problem.AddParameterBlock(pose.data(), 6);
+        int used = 0;
+        for (size_t i = 0; i < n; ++i) {
+            if (!isInlier[i])
+                continue;
+            const cv::Point3f &p = objectPoints[i];
+            ceres::CostFunction *cost = PoseOnlyReprojectionCost::Create(
+                p.x, p.y, p.z, imagePoints[i].x, imagePoints[i].y, m_intrinsics.fx, m_intrinsics.fy,
+                m_intrinsics.cx, m_intrinsics.cy);
+            ceres::LossFunction *loss = new ceres::HuberLoss(kBaHuberDeltaPixels);
+            if (m_octaveWeightingEnabled && i < imageScales.size() && imageScales[i] > 1e-3f) {
+                // Octave/scale information weighting (item 38), the SIFT-
+                // appropriate analogue of ORB-SLAM3's invSigma2 per pyramid
+                // level: a SIFT keypoint's SIZE (diameter) is proportional
+                // to the scale it was detected at, and its localization
+                // uncertainty in the original image grows with that scale --
+                // so information = 1/sigma^2 ~ (kOctaveWeightRefSize/size)^2.
+                // Fine keypoints (small size) keep ~unit weight; coarse ones
+                // are down-weighted. Uses the keypoint's REAL SIFT size, not
+                // ORB's discrete 1.2^level formula (which doesn't fit SIFT's
+                // sub-pixel/sub-scale-interpolated continuous scale space).
+                // ScaledLoss(Huber, invSigma2) mirrors ORB-SLAM3's
+                // information-weighted robust edge.
+                const double ratio = kOctaveWeightRefSize / static_cast<double>(imageScales[i]);
+                const double invSigma2 = std::min(1.0, ratio * ratio); // never UP-weight past unit
+                loss = new ceres::ScaledLoss(loss, invSigma2, ceres::TAKE_OWNERSHIP);
+            }
+            problem.AddResidualBlock(cost, loss, pose.data());
+            ++used;
+        }
+        if (used < 4)
+            return false;
+
+        ceres::Solver::Options options;
+        options.linear_solver_type = ceres::DENSE_QR; // tiny problem (one 6-DOF block)
+        options.max_num_iterations = kBaMaxIterations;
+        options.minimizer_progress_to_stdout = false;
+        options.num_threads = 1; // pinned for run-to-run reproducibility
+        ceres::Solver::Summary summary;
+        ceres::Solve(options, &problem, &summary);
+        if (!summary.IsSolutionUsable())
+            return false;
+
+        // Re-classify inliers against the refined pose for the next pass
+        // (ORB-SLAM3 re-includes points that come back within threshold too,
+        // not just permanently discarding -- so re-evaluate ALL points).
+        const cv::Mat rv = (cv::Mat_<double>(3, 1) << pose[0], pose[1], pose[2]);
+        cv::Mat Rp;
+        cv::Rodrigues(rv, Rp);
+        int inliers = 0;
+        for (size_t i = 0; i < n; ++i) {
+            const cv::Point3f &p = objectPoints[i];
+            const double cx = Rp.at<double>(0, 0) * p.x + Rp.at<double>(0, 1) * p.y +
+                              Rp.at<double>(0, 2) * p.z + pose[3];
+            const double cy = Rp.at<double>(1, 0) * p.x + Rp.at<double>(1, 1) * p.y +
+                              Rp.at<double>(1, 2) * p.z + pose[4];
+            const double cz = Rp.at<double>(2, 0) * p.x + Rp.at<double>(2, 1) * p.y +
+                              Rp.at<double>(2, 2) * p.z + pose[5];
+            if (cz < 1e-3) {
+                isInlier[i] = 0;
+                continue;
+            }
+            const double u = m_intrinsics.fx * cx / cz + m_intrinsics.cx;
+            const double v = m_intrinsics.fy * cy / cz + m_intrinsics.cy;
+            const double du = u - imagePoints[i].x, dv = v - imagePoints[i].y;
+            const bool in = (du * du + dv * dv) <= thresh2;
+            isInlier[i] = in ? 1 : 0;
+            inliers += in ? 1 : 0;
+        }
+        inlierCountOut = inliers;
+    }
+
+    const cv::Mat rvOut = (cv::Mat_<double>(3, 1) << pose[0], pose[1], pose[2]);
+    cv::Rodrigues(rvOut, R);
+    tvec = (cv::Mat_<double>(3, 1) << pose[3], pose[4], pose[5]);
+    return true;
+}
+
 bool SlamWorker::trackFrame(const std::vector<cv::KeyPoint> &kps, const cv::Mat &descriptors)
 {
     // Covisibility-driven local map (see setCovisibilityLocalMapEnabled())
@@ -2949,6 +3137,8 @@ bool SlamWorker::trackFrame(const std::vector<cv::KeyPoint> &kps, const cv::Mat 
     // can silently stop rebuilding it during a degraded-tracking patch,
     // which is exactly when tracking against a stale local map hurts most).
     ++m_framesSinceCovisibilityMapRebuild;
+    if (m_poseOnlyLoopSuppressFrames > 0)
+        --m_poseOnlyLoopSuppressFrames; // see kPoseOnlyLoopSuppressFrames (item 39)
     const bool useLocalMap = m_covisibilityLocalMapEnabled && !m_localMapDescriptors.empty() &&
                               m_framesSinceCovisibilityMapRebuild <= kCovisibilityMapStaleFrames;
     const cv::Mat &trackMapDescriptors = useLocalMap ? m_localMapDescriptors : m_mapDescriptors;
@@ -2998,21 +3188,57 @@ bool SlamWorker::trackFrame(const std::vector<cv::KeyPoint> &kps, const cv::Mat 
 
     std::vector<cv::Point3f> objectPoints;
     std::vector<cv::Point2f> imagePoints;
+    std::vector<float> imageScales; // parallel: the SIFT keypoint SIZE (diameter) of each match --
+                                     // used for octave/scale information weighting in pose-only BA
+                                     // (see optimizePoseOnly()/setOctaveWeightingEnabled(), item 38)
     objectPoints.reserve(matches.size());
     imagePoints.reserve(matches.size());
+    imageScales.reserve(matches.size());
     for (const auto &m : matches) {
         objectPoints.push_back(trackMapPoints[m.queryIdx]);
         imagePoints.push_back(kps[m.trainIdx].pt);
+        imageScales.push_back(kps[m.trainIdx].size);
     }
 
     cv::Mat R, tvec;
     int inlierCount = 0;
     bool ok = false;
-    if (m_pnpSettings.method == kPnpMethodDlt) {
+    bool trackedByMotionModel = false;
+
+    // Motion-model-PRIMARY tracking (real ORB-SLAM3 TrackWithMotionModel,
+    // see setPoseOnlyBaEnabled()/DEBUGGING.md item 36): when enabled and a
+    // previous pose+velocity exist, predict this frame's pose from constant
+    // velocity (m_velocityR/m_velocityT) and refine it DIRECTLY with
+    // pose-only BA over the guided matches -- no RANSAC. This is the
+    // accurate, low-per-frame-drift path ORB-SLAM3 uses on the vast
+    // majority of frames. SQPnP RANSAC below runs ONLY if this loses track
+    // (too few inliers) -- the recovery path, exactly ORB-SLAM3's
+    // fall-through from the motion model to reference-KF/relocalization.
+    // Keeping SQPnP as the fallback is what guarantees coverage can't
+    // collapse (the user's explicit requirement) on hard frames (sharp
+    // turns, where the constant-velocity prediction is worst).
+    if (m_poseOnlyBaEnabled && m_poseOnlyLoopSuppressFrames == 0 && !m_currR.empty()) {
+        cv::Mat mmR = m_velocityR * m_currR;
+        cv::Mat mmT = m_velocityR * m_currT + m_velocityT;
+        int mmInliers = 0;
+        if (optimizePoseOnly(objectPoints, imagePoints, imageScales, mmR, mmT, mmInliers) &&
+            mmInliers >= m_minTrackInliers) {
+            R = mmR;
+            tvec = mmT;
+            inlierCount = mmInliers;
+            ok = true;
+            trackedByMotionModel = true;
+        } else {
+            std::fprintf(stderr, "[track] motion-model tracking lost (inliers=%d min=%d) -- SQPnP recovery\n",
+                         mmInliers, m_minTrackInliers);
+        }
+    }
+
+    if (!ok && m_pnpSettings.method == kPnpMethodDlt) {
         std::vector<int> inlierIndices;
         ok = solvePnPDltRansac(objectPoints, imagePoints, R, tvec, inlierIndices);
         inlierCount = static_cast<int>(inlierIndices.size());
-    } else {
+    } else if (!ok) {
         const cv::Mat K = m_intrinsics.toMat();
         cv::Mat rvec;
         std::vector<int> inliers;
@@ -3060,6 +3286,24 @@ bool SlamWorker::trackFrame(const std::vector<cv::KeyPoint> &kps, const cv::Mat 
     if (!ok || inlierCount < m_minTrackInliers) {
         std::fprintf(stderr, "[track] PnP fail: ok=%d inliers=%d min=%d\n", ok, inlierCount, m_minTrackInliers);
         return false;
+    }
+
+    // Pose-only BA refinement on the SQPnP RECOVERY path (see
+    // optimizePoseOnly()/setPoseOnlyBaEnabled(), DEBUGGING.md item 36):
+    // only when this frame fell back to SQPnP (motion model already ran
+    // pose-only BA itself, so re-running it would be redundant). Refines
+    // the SQPnP minimal-sample pose against ALL matched map points with the
+    // map fixed + iterative outlier rejection. Falls through to the SQPnP
+    // result untouched if it declines, so it can only help.
+    if (m_poseOnlyBaEnabled && m_poseOnlyLoopSuppressFrames == 0 && !trackedByMotionModel) {
+        cv::Mat refinedR = R.clone(), refinedT = tvec.clone();
+        int refinedInliers = inlierCount;
+        if (optimizePoseOnly(objectPoints, imagePoints, imageScales, refinedR, refinedT, refinedInliers) &&
+            refinedInliers >= m_minTrackInliers) {
+            R = refinedR;
+            tvec = refinedT;
+            inlierCount = refinedInliers;
+        }
     }
 
     // A degenerate/bad RANSAC solve can still clear the minimum inlier
@@ -3332,7 +3576,9 @@ void SlamWorker::insertKeyframe(const std::vector<cv::KeyPoint> &kps, const cv::
     if (m_landmarkFuseEnabled)
         fuseWindowLandmarks(static_cast<int>(m_keyframeHistory.size()) - 1);
 
-    if (m_localBundleAdjustmentEnabled)
+    if (m_localBundleAdjustmentEnabled && m_localBaHardAnchorEnabled)
+        runLocalBundleAdjustmentHardAnchor();
+    else if (m_localBundleAdjustmentEnabled)
         runLocalBundleAdjustment();
     else
         refineLocalKeyframes();
@@ -3774,6 +4020,192 @@ bool SlamWorker::runLocalBundleAdjustment()
     return true;
 }
 
+bool SlamWorker::runLocalBundleAdjustmentHardAnchor()
+{
+    // Real ORB-SLAM3 LocalBundleAdjustment (Optimizer.cc): the LOCAL
+    // keyframes (the recent window) and the map points they observe are
+    // optimized freely; every OTHER keyframe that ALSO observes one of
+    // those local map points is added to the problem but held CONSTANT --
+    // these "border"/fixed keyframes are the hard anchors, and because they
+    // co-observe the local map points their fixed poses+observations pin
+    // the absolute scale/gauge of the whole local solve. This is the
+    // structurally-correct hard-anchor scheme, NOT the reverted single-
+    // hard-anchor attempt that let scale collapse (187m, see
+    // runLocalBundleAdjustment()'s soft-prior comment): there, one lone
+    // anchor left the rest of the window free to drift/rescale as a group;
+    // here, multiple fixed border keyframes distributed around the window
+    // co-constrain the same points, so the group cannot rescale. See
+    // setLocalBaHardAnchorEnabled(), DEBUGGING.md item 37.
+    const int n = static_cast<int>(m_keyframeHistory.size());
+    const int windowStart = std::max(0, n - m_localBaWindowKeyframes);
+    if (n - windowStart < 2)
+        return false;
+
+    // Local map points: every landmark observed by any in-window keyframe.
+    std::unordered_set<long long> localMpIds;
+    for (int i = windowStart; i < n; ++i)
+        for (long long id : m_keyframeObservedLandmarkIds[static_cast<size_t>(i)])
+            localMpIds.insert(id);
+
+    auto fillPose = [](std::array<double, 6> &block, const cv::Mat &R, const cv::Mat &t) {
+        cv::Mat rvec;
+        cv::Rodrigues(R, rvec);
+        for (int k = 0; k < 3; ++k)
+            block[static_cast<size_t>(k)] = rvec.at<double>(k);
+        for (int k = 0; k < 3; ++k)
+            block[static_cast<size_t>(3 + k)] = t.at<double>(k);
+    };
+
+    // Pose blocks, created lazily for every keyframe that actually observes
+    // a local map point (in-window OR fixed border). Stored in a
+    // deque/map so their addresses stay stable for Ceres.
+    std::unordered_map<int, std::array<double, 6>> poseBlocks;
+    std::unordered_set<int> fixedKfs; // keyframes < windowStart that co-observe -> hard anchors
+    std::unordered_map<long long, std::array<double, 3>> landmarks;
+    std::unordered_map<long long, std::vector<std::pair<int, cv::Point2f>>> mpObs;
+
+    auto ensurePose = [&](int kfIdx) {
+        if (poseBlocks.find(kfIdx) == poseBlocks.end()) {
+            const Keyframe &kf = m_keyframeHistory[static_cast<size_t>(kfIdx)];
+            std::array<double, 6> b;
+            fillPose(b, kf.R, kf.t);
+            poseBlocks[kfIdx] = b;
+        }
+    };
+
+    for (long long id : localMpIds) {
+        const auto it = m_landmarkObservations.find(id);
+        if (it == m_landmarkObservations.end() ||
+            it->second.size() < static_cast<size_t>(kBaMinObservationsPerLandmark))
+            continue;
+        const auto posIt = m_landmarkPositions.find(id);
+        if (posIt == m_landmarkPositions.end())
+            continue;
+        auto &dst = mpObs[id];
+        for (const auto &obs : it->second) {
+            const int kf = obs.first;
+            if (kf < 0 || kf >= n)
+                continue;
+            ensurePose(kf);
+            if (kf < windowStart)
+                fixedKfs.insert(kf); // border keyframe -> fixed anchor
+            dst.push_back(obs);
+        }
+        if (dst.empty()) {
+            mpObs.erase(id);
+            continue;
+        }
+        landmarks[id] = {static_cast<double>(posIt->second.x), static_cast<double>(posIt->second.y),
+                          static_cast<double>(posIt->second.z)};
+    }
+    if (landmarks.empty())
+        return false;
+
+    const CameraIntrinsics &intr = m_intrinsics;
+    ceres::Problem problem;
+    for (auto &entry : poseBlocks)
+        problem.AddParameterBlock(entry.second.data(), 6);
+
+    int residualCount = 0;
+    for (auto &entry : landmarks) {
+        for (const auto &obs : mpObs.at(entry.first)) {
+            ceres::CostFunction *cost =
+                ReprojectionCost::Create(obs.second.x, obs.second.y, intr.fx, intr.fy, intr.cx, intr.cy);
+            problem.AddResidualBlock(cost, new ceres::HuberLoss(kBaHuberDeltaPixels),
+                                      poseBlocks.at(obs.first).data(), entry.second.data());
+            ++residualCount;
+        }
+    }
+    if (residualCount == 0)
+        return false;
+
+    // Hard-fix every border keyframe (the anchors). Also fix kf#0 whenever
+    // it's in the problem (world origin). If somehow no border keyframe
+    // co-observes (rare, very early in a run), fix the oldest in-window
+    // keyframe so the gauge is still pinned.
+    for (int kf : fixedKfs)
+        problem.SetParameterBlockConstant(poseBlocks.at(kf).data());
+    if (poseBlocks.find(0) != poseBlocks.end())
+        problem.SetParameterBlockConstant(poseBlocks.at(0).data());
+    if (fixedKfs.empty() && poseBlocks.find(0) == poseBlocks.end() &&
+        poseBlocks.find(windowStart) != poseBlocks.end())
+        problem.SetParameterBlockConstant(poseBlocks.at(windowStart).data());
+
+    ceres::Solver::Options options;
+    options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
+    options.max_num_iterations = kBaMaxIterations;
+    options.minimizer_progress_to_stdout = false;
+    options.num_threads = 1; // pinned for run-to-run reproducibility
+    ceres::Solver::Summary summary;
+    ceres::Solve(options, &problem, &summary);
+    if (!summary.IsSolutionUsable()) {
+        options.linear_solver_type = ceres::ITERATIVE_SCHUR;
+        options.preconditioner_type = ceres::JACOBI;
+        ceres::Solve(options, &problem, &summary);
+    }
+    if (!summary.IsSolutionUsable()) {
+        std::fprintf(stderr, "[localba][hardanchor] did not converge, falling back: %s\n",
+                     summary.BriefReport().c_str());
+        return false;
+    }
+
+    auto poseToRT = [](const std::array<double, 6> &block, cv::Mat &R, cv::Mat &t) {
+        const cv::Mat rvec = (cv::Mat_<double>(3, 1) << block[0], block[1], block[2]);
+        cv::Rodrigues(rvec, R);
+        t = (cv::Mat_<double>(3, 1) << block[3], block[4], block[5]);
+    };
+    // Write back ONLY the in-window (free) keyframe poses -- fixed anchors
+    // were held constant and must stay byte-identical.
+    for (int i = windowStart; i < n; ++i) {
+        const auto it = poseBlocks.find(i);
+        if (it == poseBlocks.end())
+            continue;
+        cv::Mat R, t;
+        poseToRT(it->second, R, t);
+        m_keyframeHistory[static_cast<size_t>(i)].R = R;
+        m_keyframeHistory[static_cast<size_t>(i)].t = t;
+    }
+
+    std::unordered_map<long long, size_t> mapIndexById;
+    mapIndexById.reserve(m_mapPointIds.size());
+    for (size_t i = 0; i < m_mapPointIds.size(); ++i)
+        mapIndexById[m_mapPointIds[i]] = i;
+    for (const auto &entry : landmarks) {
+        const cv::Point3f newPos(static_cast<float>(entry.second[0]), static_cast<float>(entry.second[1]),
+                                  static_cast<float>(entry.second[2]));
+        m_landmarkPositions[entry.first] = newPos;
+        const auto mapIt = mapIndexById.find(entry.first);
+        if (mapIt != mapIndexById.end())
+            m_mapPoints[mapIt->second] = newPos;
+        for (int i = windowStart; i < n; ++i) {
+            Keyframe &kf = m_keyframeHistory[static_cast<size_t>(i)];
+            const auto idIt = std::find(kf.localMapPointIds.begin(), kf.localMapPointIds.end(), entry.first);
+            if (idIt != kf.localMapPointIds.end()) {
+                const size_t localIdx = static_cast<size_t>(idIt - kf.localMapPointIds.begin());
+                kf.localMapPoints[localIdx] = newPos;
+                break;
+            }
+        }
+    }
+
+    const Keyframe &latest = m_keyframeHistory.back();
+    m_refR = latest.R.clone();
+    m_refT = latest.t.clone();
+    m_currR = latest.R.clone();
+    m_currT = latest.t.clone();
+    if (!m_trajectory.isEmpty()) {
+        const cv::Mat C = -latest.R.t() * latest.t;
+        m_trajectory.last() = QPointF(C.at<double>(0), C.at<double>(2));
+    }
+
+    std::fprintf(stderr,
+                  "[localba][hardanchor] window kf#%d..kf#%d, %d fixed-anchor kfs, %d landmarks, %d "
+                  "observations, initial cost=%.3f final cost=%.3f\n",
+                  windowStart, n - 1, static_cast<int>(fixedKfs.size()), static_cast<int>(landmarks.size()),
+                  residualCount, summary.initial_cost, summary.final_cost);
+    return true;
+}
+
 bool SlamWorker::runLoopBundleAdjustment(int oldKfIdx, int newKfIdx, const cv::Mat &loopR, const cv::Mat &loopT,
                                           const std::unordered_set<long long> &loopVerifiedIds)
 {
@@ -3974,7 +4406,7 @@ bool SlamWorker::runPoseGraphThenGlobalBundleAdjustment(int newKfIdx, const cv::
 
     std::vector<pose_graph::KeyframePose> keyframes = keyframePoses();
     std::vector<pose_graph::SequentialEdgeRecord> sequential = sequentialEdgeRecords();
-    const std::vector<pose_graph::SequentialEdgeRecord> covis = covisibilityEdgeRecords();
+    const std::vector<pose_graph::SequentialEdgeRecord> covis = covisibilityEdgeRecords(m_covisibilityMinShared);
     sequential.insert(sequential.end(), covis.begin(), covis.end());
 
     pose_graph::PoseGraphOptions pgOptions;
@@ -4006,8 +4438,11 @@ bool SlamWorker::runGlobalBundleAdjustment(int newKfIdx, const cv::Mat &loopR, c
 {
     if (newKfIdx < 1)
         return false; // nothing before it to jointly optimize against
-    if (newKfIdx + 1 > kGlobalBaMaxWindowKeyframes)
-        return false; // too large to solve in reasonable time -- see kGlobalBaMaxWindowKeyframes
+    if (!m_globalBaSchurEnabled && newKfIdx + 1 > kGlobalBaMaxWindowKeyframes)
+        return false; // too large for the plain SPARSE_NORMAL_CHOLESKY solver -- see
+                       // kGlobalBaMaxWindowKeyframes. With Schur marginalization on
+                       // (m_globalBaSchurEnabled, item 35) this cap is lifted: the whole map
+                       // becomes tractable in one solve, which is the entire point of Schur here.
     if (m_globalBundleAdjustmentAsyncEnabled && m_pendingGlobalBaValid)
         return false; // a previous solve hasn't been integrated yet -- mirrors ORB-SLAM3's own
                        // mbRunningGBA guard against overlapping background solves (LoopClosing.cc)
@@ -4127,16 +4562,35 @@ bool SlamWorker::runGlobalBundleAdjustment(int newKfIdx, const cv::Mat &loopR, c
     }
 
     ceres::Solver::Options options;
-    options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
     options.max_num_iterations = kBaMaxIterations;
     options.minimizer_progress_to_stdout = false;
     options.num_threads = 1; // pinned for run-to-run reproducibility -- see kitti_ate.cpp's
     // own cv::setNumThreads(1) call for the matching OpenCV-side fix
+    if (m_globalBaSchurEnabled) {
+        // DEBUGGING.md item 35: Ceres' direct equivalent of real ORB-SLAM3's
+        // g2o::BlockSolver_6_3 + vPoint->setMarginalized(true) -- SPARSE_SCHUR
+        // with the landmark parameter blocks placed in elimination group 0
+        // (Schur-complemented out first), poses in group 1. Same exact
+        // optimum as SPARSE_NORMAL_CHOLESKY (Schur is a reordering of the
+        // solve, not a different objective), but exploits the pose/landmark
+        // block structure so it scales to the whole map instead of needing
+        // the kGlobalBaMaxWindowKeyframes cap.
+        auto ordering = std::make_shared<ceres::ParameterBlockOrdering>();
+        for (auto &entry : landmarks)
+            ordering->AddElementToGroup(entry.second.data(), 0);
+        for (int i = 0; i < windowSize; ++i)
+            ordering->AddElementToGroup(poses[static_cast<size_t>(i)].data(), 1);
+        options.linear_solver_ordering = ordering;
+        options.linear_solver_type = ceres::SPARSE_SCHUR;
+    } else {
+        options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
+    }
     ceres::Solver::Summary summary;
     ceres::Solve(options, &problem, &summary);
     if (!summary.IsSolutionUsable()) {
         options.linear_solver_type = ceres::ITERATIVE_SCHUR;
         options.preconditioner_type = ceres::JACOBI;
+        options.linear_solver_ordering.reset();
         ceres::Solve(options, &problem, &summary);
     }
     if (!summary.IsSolutionUsable()) {
@@ -5017,6 +5471,24 @@ void SlamWorker::tryLoopClosure(size_t newKeyframeIndex)
         return;
     }
 
+    // Loop-closure QUALITY gate (item 40, setLoopQualityGateEnabled()):
+    // reject an UNRELIABLE scale measurement -- an extreme scaleMeas (far
+    // from 1.0) backed by too few Sim3 inliers is the garbage-loop signature
+    // (e.g. the diagnosed scaleMeas=1.947 on 10 inliers that map-compressed
+    // and collapsed tracking). A genuine large drift has many inliers, so it
+    // passes; this only catches few-inlier extreme-scale measurements, which
+    // avoids the documented reject-real-drift vicious cycle. Placed after the
+    // degenerate-solve caps, before the temporal-consistency gate.
+    if (m_loopQualityGateEnabled && usedSim3Solver && sim3InlierCount < kLoopQualityMinSim3Inliers &&
+        (scaleMeas < kLoopQualityScaleLo || scaleMeas > kLoopQualityScaleHi)) {
+        std::fprintf(stderr,
+                      "[loop][quality] REJECTED unreliable closure: kf#%d<->kf#%d scaleMeas=%.4f "
+                      "sim3Inliers=%d (< %d) -- extreme scale on too few inliers\n",
+                      bestIdx, static_cast<int>(newKeyframeIndex), scaleMeas, sim3InlierCount,
+                      kLoopQualityMinSim3Inliers);
+        return;
+    }
+
     // Temporal-consistency gate (see setLoopConsistencyGroupEnabled()'s own
     // doc comment for the full rationale and its relationship to real
     // ORB-SLAM3's mnLoopNumCoincidences mechanism). Placed here, after
@@ -5093,6 +5565,22 @@ void SlamWorker::tryLoopClosure(size_t newKeyframeIndex)
                   static_cast<int>(inliers.size()), cv::norm(tDelta), cv::norm(deltaRvec) * 180.0 / CV_PI, scaleMeas,
                   usedSim3Solver ? "sim3solver, inliers=" : "fallback ratio",
                   usedSim3Solver ? std::to_string(sim3InlierCount).c_str() : "");
+
+    // A loop closure just committed -- the map is about to be perturbed by
+    // the loop correction/loop-BA below. Suppress pose-only BA for the next
+    // few frames ONLY when this closure applied a significant SCALE
+    // correction (scaleMeas far from 1.0) -- that's the case that
+    // compresses/expands the map and sends freshly-tracked pose-only frames
+    // into a local scale collapse (the diagnosed frames-2500-3300 failure,
+    // triggered by scaleMeas 1.29/1.947 loops). A near-unit-scale closure
+    // (scaleMeas ~1.0) barely perturbs the map, so leaving pose-only BA on
+    // through it preserves its accuracy elsewhere -- the blunt
+    // suppress-after-EVERY-loop version fixed the collapse region but
+    // degraded the clean-loop regions (item 39). See
+    // kPoseOnlyLoopSuppressFrames / setPoseOnlyLoopSuppressEnabled().
+    if (m_poseOnlyLoopSuppressEnabled &&
+        (scaleMeas < kPoseOnlyLoopSuppressScaleLo || scaleMeas > kPoseOnlyLoopSuppressScaleHi))
+        m_poseOnlyLoopSuppressFrames = kPoseOnlyLoopSuppressFrames;
 
     // Distribute the correction across every trajectory point and keyframe
     // between the two loop endpoints, proportional to how far along the

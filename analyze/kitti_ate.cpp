@@ -567,6 +567,91 @@ int main(int argc, char *argv[])
         std::fprintf(stderr, "[config] global BA pose-graph-first polish enabled\n");
     }
 
+    // argv[48]: pass the literal word 'globalbaorbslam3' -- ONE flag for the
+    // full ORB-SLAM3-imitation loop-correction pipeline (cull + covisibility
+    // threshold 60 + essential-graph Sim3 pose-graph correction first,
+    // synchronous + global BA demoted to a deferred/background secondary
+    // polish). See SlamWorker::setGlobalBaOrbSlam3PipelineEnabled(). Implies
+    // 'globalba'; do not also pass 'globalba'/'cull'/'globalbaasync'/
+    // 'globalbaposegraph' separately (this sets all of them).
+    if (argc > 48 && std::strcmp(argv[48], "globalbaorbslam3") == 0) {
+        worker.setGlobalBaOrbSlam3PipelineEnabled(true);
+        std::fprintf(stderr, "[config] full ORB-SLAM3-imitation loop-correction pipeline enabled "
+                              "(cull + covis60 + pose-graph-first + background GBA polish)\n");
+    }
+
+    // argv[49]: pass the literal word 'globalbaschur' -- enables global BA
+    // (if not already) AND switches its Ceres solver to SPARSE_SCHUR with
+    // landmark marginalization + lifts the keyframe cap, matching real
+    // ORB-SLAM3's g2o::BlockSolver_6_3 + setMarginalized(true) so global BA
+    // runs over the WHOLE map. See SlamWorker::setGlobalBaSchurEnabled().
+    if (argc > 49 && std::strcmp(argv[49], "globalbaschur") == 0) {
+        worker.setGlobalBundleAdjustmentEnabled(true);
+        worker.setGlobalBaSchurEnabled(true);
+        std::fprintf(stderr, "[config] global BA Schur marginalization + whole-map (cap lifted) enabled\n");
+    }
+
+    // argv[50]: pass the literal word 'poseonlyba' to enable the real
+    // ORB-SLAM3-style front-end -- constant-velocity motion-model-primary
+    // tracking + pose-only BA, with SQPnP as the lost-track recovery path
+    // (see SlamWorker::setPoseOnlyBaEnabled(), DEBUGGING.md item 36).
+    // Strongly recommended to pair with 'guided' (argv28) so the motion
+    // model also gates the match search, and 'sqpnp' (argv4) as the
+    // recovery solver. This attacks the actual per-frame drift gap vs
+    // ORB-SLAM3, unlike the globalBA experiments.
+    if (argc > 50 && std::strcmp(argv[50], "poseonlyba") == 0) {
+        worker.setPoseOnlyBaEnabled(true);
+        std::fprintf(stderr, "[config] pose-only BA (motion-model-primary tracking, SQPnP recovery) enabled\n");
+    }
+
+    // argv[51]: pass the literal word 'localbahard' (requires 'localba') to
+    // swap the soft-prior local BA for real ORB-SLAM3-style local BA with
+    // fixed co-observing border keyframes as hard scale anchors (see
+    // SlamWorker::setLocalBaHardAnchorEnabled(), DEBUGGING.md item 37).
+    if (argc > 51 && std::strcmp(argv[51], "localbahard") == 0) {
+        worker.setLocalBaHardAnchorEnabled(true);
+        std::fprintf(stderr, "[config] local BA hard-anchor (ORB-SLAM3-style fixed border keyframes) enabled\n");
+    }
+
+    // argv[52]: pass the literal word 'octaveweight' (requires 'poseonlyba')
+    // to weight pose-only BA observations by SIFT keypoint scale -- the
+    // SIFT analogue of ORB-SLAM3's per-octave invSigma2 (see
+    // SlamWorker::setOctaveWeightingEnabled(), DEBUGGING.md item 38).
+    if (argc > 52 && std::strcmp(argv[52], "octaveweight") == 0) {
+        worker.setOctaveWeightingEnabled(true);
+        std::fprintf(stderr, "[config] octave/scale information weighting in pose-only BA enabled\n");
+    }
+
+    // argv[53]: pass the literal word 'poseonlyloopguard' (with 'poseonlyba')
+    // to suppress pose-only BA for a few frames after each loop closure --
+    // fixes the diagnosed post-loop local scale collapse (see
+    // SlamWorker::setPoseOnlyLoopSuppressEnabled(), DEBUGGING.md item 39).
+    if (argc > 53 && std::strcmp(argv[53], "poseonlyloopguard") == 0) {
+        worker.setPoseOnlyLoopSuppressEnabled(true);
+        std::fprintf(stderr, "[config] pose-only BA post-loop-closure suppression enabled\n");
+    }
+
+    // argv[54]: pass the literal word 'pnpfullrefine' to enable
+    // SlamWorker::setPnpFullInlierRefineEnabled() -- a single safe LM refit
+    // of the SQPnP pose over ALL its RANSAC inliers (not the minimal
+    // sample), initialized from the SQPnP solution. The non-fragile,
+    // SQPnP-native alternative to pose-only BA (no iteration, no map
+    // following through loops). Wired to the GUI already; exposed here for
+    // headless measurement (DEBUGGING.md item 40).
+    if (argc > 54 && std::strcmp(argv[54], "pnpfullrefine") == 0) {
+        worker.setPnpFullInlierRefineEnabled(true);
+        std::fprintf(stderr, "[config] PnP full-inlier LM refit enabled\n");
+    }
+
+    // argv[55]: pass the literal word 'loopqualitygate' to reject unreliable
+    // loop closures (extreme Sim3 scale on too few inliers) -- raises
+    // loop-closure quality without the new DBoW2 vocabulary (see
+    // SlamWorker::setLoopQualityGateEnabled(), DEBUGGING.md item 40).
+    if (argc > 55 && std::strcmp(argv[55], "loopqualitygate") == 0) {
+        worker.setLoopQualityGateEnabled(true);
+        std::fprintf(stderr, "[config] loop-closure quality gate enabled\n");
+    }
+
     if (argc > 9 && std::strcmp(argv[9], "groundplane") == 0) {
         worker.setGroundPlaneEnabled(true);
         std::fprintf(stderr, "[config] ground-plane scale correction enabled (VISO2-M-style fallback)\n");

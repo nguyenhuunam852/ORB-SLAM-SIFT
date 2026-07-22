@@ -1451,6 +1451,175 @@ best variant (64.667m) and stays in the code for anyone who wants it; the
 default recommended config (`globalba` off, `fuse` + windowed `ba` +
 `localba` + VLAD) stays at **51.273m**.
 
+### 35. User: assemble the whole ORB-SLAM3 loop-correction pipeline behind ONE flag (cull + covisibility-60 + essential-graph-Sim3-first + "background" deferred GBA) -- EXTREME failure (scale collapse), then a stable Schur variant per the follow-up "just don't deviate extremely"
+
+Two related requests. First, one flag (`globalbaorbslam3`, `setGlobalBaOrbSlam3PipelineEnabled()`) turning on the full ORB-SLAM3-imitation
+loop-correction chain at once: keyframe culling ON, covisibility essential-graph
+threshold lowered 100->60 (`m_covisibilityMinShared`), Sim3 pose-graph correction
+over the whole map FIRST (synchronous, the primary correction), then GBA demoted
+to a deferred/"background" secondary polish (the deterministic deferred-integration
+stand-in for a real thread -- explained to the user that a real OS thread gives no
+ATE benefit offline and only adds run-to-run non-determinism, which they initially
+accepted with "bắt chước cũng được").
+
+**Measured: 51.273m -> 193.500m, the worst yet, with `Recovered scale` collapsed
+to 0.0100.** Root-caused from the logs: `covis60` feeds the Sim3 pose-graph MORE
+but WEAKER covisibility edges (60 shared landmarks vs 100), the pose-graph's scale
+DOF then collapses toward zero on those weak constraints (the exact
+already-known-4x-negative offline-pose-graph failure, now amplified), that
+degenerate near-zero-scale map is baked in BEFORE GBA runs, and the deferred GBA
+then polishes an already-broken map. Every one of the four stacked mechanisms was
+individually negative; stacking compounded rather than cancelled them.
+
+Second, after seeing the extreme collapse the user reframed the goal ("có thể lệch
+sai số, ít nhất nó ko lệch cực đoan" -- deviation is acceptable, extreme deviation
+is not; and "nhớ cho cờ để bật tắt" -- keep it behind a toggle). This pointed
+directly at the one globalBA difference from item 30's list that had NOT been
+tried and is inherently collapse-proof: **Schur marginalization** (`globalbaschur`,
+`setGlobalBaSchurEnabled()`, argv49). Ceres' direct equivalent of ORB-SLAM3's
+`g2o::BlockSolver_6_3` + `vPoint->setMarginalized(true)`: switched
+`runGlobalBundleAdjustment()`'s solver from `SPARSE_NORMAL_CHOLESKY` to
+`SPARSE_SCHUR` with landmark parameter blocks in elimination group 0, and lifted
+the `kGlobalBaMaxWindowKeyframes=400` cap (Schur's block structure makes the whole
+map tractable in one solve). Kept the two-hard-anchor scheme (kf#0 + loop pose),
+which is what makes it collapse-proof: pinning both endpoints locks the monocular
+scale gauge, so scale physically cannot run away.
+
+**Measured: 88.409m, `Recovered scale` 0.1807 (NOT collapsed), coverage 4526/4541
+(the highest of ANY globalBA variant), ATE max 193m (no blow-up).** This is the
+most STABLE globalBA variant of all -- exactly the "faithful to ORB-SLAM + no
+extreme deviation" behaviour the user asked for, and it is toggleable
+(`globalbaschur`, default off). But it is still worse than both v2 (64.667m) and
+the 51.273m baseline. Key finding: Schur is a pure re-ordering of the SAME
+optimisation, so at <=400 KF it would be byte-identical to v2 -- the ONLY thing it
+changes is that lifting the cap lets GBA run on the WHOLE ~509-KF map at late loop
+closures, and that whole-map one-shot correction is measurably WORSE than v2's
+fallback-to-windowed-loop-BA-past-400 behaviour. This re-confirms, from yet another
+angle, the session-long finding: one-shot whole-map optimisation underperforms
+continuous windowed BA on this pipeline. **globalbaschur is the recommended choice
+IF a stable ORB-SLAM-style whole-map GBA is wanted for its own sake; the plain
+51.273m baseline remains best for pure ATE.** All variants stay behind their own
+flags, all default off.
+
+### 36-38. Front-end/back-end ORB-SLAM3 ports: motion-model + pose-only BA (front), hard-anchor local BA (back), octave weighting -- all measured, none beat the 51.273m baseline, but pose-only BA gives a much healthier scale
+
+After the GBA investigation closed, the user correctly identified (from reading
+`third_party/ORB_SLAM3` directly) that GBA is NOT what makes ORB-SLAM3 accurate --
+the front-end (constant-velocity motion model + guided SearchByProjection +
+pose-only BA every frame) and continuous local BA are. Implemented the three
+mechanisms, each behind its own default-off flag:
+
+**36. Pose-only BA front-end (`poseonlyba`, argv50, `setPoseOnlyBaEnabled()`).**
+New `optimizePoseOnly()` (real ORB-SLAM3 `Optimizer::PoseOptimization`: refine
+this frame's 6-DOF pose against ALL matched map points, map fixed, 4-pass
+iterative outlier rejection, new file-scope `PoseOnlyReprojectionCost`) +
+motion-model-PRIMARY tracking (predict pose from `m_velocityR/T`, run pose-only BA
+directly; SQPnP RANSAC only runs as the lost-track RECOVERY path -- kept so
+coverage can't collapse, per the user's requirement). **Measured (on the 51.273m
+baseline config): 97.198m** -- worse ATE, BUT `Recovered scale` **0.7101** vs the
+baseline's 0.2317, i.e. the raw monocular trajectory is FAR closer to metric scale
+(needs only ~1.4x rescale vs ~4.3x). Motion model handled ~99% of frames (only 9
+SQPnP recoveries over 4541 frames), so the mechanism works as designed. The
+healthy scale is the most interesting front-end result of the session -- the
+per-frame pose-only refinement genuinely improves scale consistency; it just
+doesn't (yet) translate to better post-Umeyama ATE.
+
+**37. Hard-anchor local BA (`localbahard`, argv51, `setLocalBaHardAnchorEnabled()`).**
+New `runLocalBundleAdjustmentHardAnchor()` = real ORB-SLAM3 `LocalBundleAdjustment`:
+window keyframes + their map points free, every OTHER co-observing keyframe added
+and held CONSTANT as a hard scale/gauge anchor (the structurally-correct scheme the
+reverted single-anchor attempt lacked). **Measured ALONE: 131.540m, scale 0.1476**
+(vs soft-prior baseline 51.273m/0.2317). **Combined with pose-only BA: 170.203m,
+scale collapsed to 0.086.** Isolation confirmed the hard-anchor scheme itself is a
+net negative here and drifts scale low (not fully collapsed alone; collapses when
+pose-only BA feeds off the drifting map). **Root cause (diagnosed + confirmed by
+the scale numbers): monocular BA has a 1-DOF scale gauge on top of the 6-DOF rigid
+one; the soft-prior baseline leashes EVERY window pose to its own live-tracked
+prior, which bounds scale drift per solve, while the hard-anchor scheme removes
+that leash and relies only on border-keyframe observations. Over hundreds of
+sliding-window re-solves the border anchors (themselves recent, already slightly
+shrunk by earlier solves) provide no persistent absolute scale reference, so scale
+slowly drifts/collapses -- ORB-SLAM3 tolerates this via dense ORB covisibility +
+loop-Sim3 correction, neither strong enough on this sparse-SIFT pipeline.** The
+soft-prior local BA is genuinely better-suited here; the hard-anchor port does not
+transfer, same lesson as the GBA ports.
+
+**38. Octave/scale information weighting (`octaveweight`, argv52,
+`setOctaveWeightingEnabled()`).** SIFT-appropriate analogue of ORB-SLAM3's
+per-pyramid-level `invSigma2`: weights each pose-only-BA observation by
+`(kOctaveWeightRefSize/keypoint-size)^2` (via `ceres::ScaledLoss`), using the
+keypoint's REAL SIFT size (threaded through as `imageScales`), not ORB's discrete
+1.2^level formula (which doesn't fit SIFT's sub-pixel/sub-scale-interpolated
+continuous scale space). Flag PREPARED + built, applied only in `optimizePoseOnly()`
+where the scale is directly available (extending to local/loop/global BA would need
+per-observation scale plumbing). NOT yet measured. Note: "SIFT detects few
+keypoints" is not a reason against it -- reweighting doesn't reduce point count.
+
+**Overall**: the 51.273m baseline (SQPnP + soft-prior local BA + windowed loop-BA +
+VLAD + Phase-A fuse) remains best. Every ORB-SLAM3 front/back-end mechanism ported
+this session (pose-only BA, hard-anchor local BA) measured worse in ATE, confirming
+the same session-long pattern for GBA. The one genuinely promising thread is
+pose-only BA's much healthier raw scale (0.71) -- worth understanding why that
+doesn't yield better ATE before doing more. All flags default off.
+
+### 39. Diagnosed pose-only BA's failure (local post-loop scale collapse), tried a loop-suppression guard -- fixed the collapse region but net still worse; front-end direction closed
+
+Dug into WHY pose-only BA (item 36, 97.198m) underperforms despite healthier
+global scale. Per-region aligned/GT path-length ratio (a local scale-consistency
+measure) revealed: pose-only BA is actually BETTER than baseline in 3 of 4 regions
+of seq00 (1.16/0.95/0.99 vs baseline 0.85/0.89/0.99) but **catastrophically
+collapses in frames 2250-3400 (path ratio 0.43; the 100-frame window 2500-2600
+crashes to 0.07 -- the trajectory nearly stops while GT keeps moving)**. The
+collapse is SUDDEN, coincides with loop closures at frame 2455/2463 (scaleMeas
+1.29 then 1.947 on only 10 inliers), and happens in frames tracked AFTER the loop
+(not loop-BA-rewritten ones) with no motion-model losses there. **Root cause:
+pose-only BA holds the map fixed and fits the camera rigidly to it; after a loop
+closure's scale correction momentarily compresses the map, pose-only BA faithfully
+follows the compressed map into a local scale collapse. SQPnP's RANSAC is robust
+to the same perturbation (rejects inconsistent points).**
+
+Fix attempt: `poseonlyloopguard` (argv53, `setPoseOnlyLoopSuppressEnabled()`) --
+suppress pose-only BA (use pure SQPnP) for kPoseOnlyLoopSuppressFrames=30 frames
+after a loop closure. **Blunt version (suppress after EVERY loop): 97.2m -> 79.8m,
+and the region-3 collapse was genuinely FIXED (0.43 -> 0.98)** -- confirming the
+diagnosis -- **but it degraded the other 3 regions** (0.59/0.65/0.80, since it
+turned pose-only BA off a large fraction of the time, reverting toward SQPnP).
+Selective version (suppress only after scaleMeas-far-from-1.0 loops, `[0.8,1.25]`
+gate): **151.7m, WORSE, all regions collapsed to ~0.45.** The erratic,
+non-converging results across variants (79.8 / 97.2 / 151.7 / 170.2) are
+themselves the finding: **pose-only BA makes the trajectory hypersensitive to
+exactly when it runs relative to loop closures. The paradox that the BLUNT guard
+(79.8m) beat the SELECTIVE one (151.7m) shows the guard's "help" was really just
+turning pose-only BA off more -- reverting toward SQPnP. The more pose-only BA
+runs, the worse; pure SQPnP (baseline) is best.** Front-end pose-only-BA direction
+closed, 4 variants all worse than 51.273m. All flags default off.
+
+### 40. User kept the SQPnP+soft-prior baseline and asked for other improvement levers -- tested the two cheapest (tighter PnP reproj error, full-inlier LM refit); BOTH negative, revealing a deep "any tighter map-fit collapses scale" pattern
+
+Two SQPnP-compatible levers that don't touch architecture:
+- **Tighten PnP `reprojectionError` 8 -> 4px** (argv22, already wired): **140.8m,
+  scale collapsed to 0.0086**, matched frames 4515 -> 4277. The stricter RANSAC
+  threshold rejects too many correct matches -> starved tracking -> collapse. 8px
+  default is better.
+- **`pnpFullInlierRefine`** (argv54, newly wired from GUI to CLI,
+  `setPnpFullInlierRefineEnabled()`): a single safe LM refit of the SQPnP pose
+  over ALL inliers -- expected to be a small safe accuracy gain. **175.7m, scale
+  collapsed to 0.0648.** WORSE.
+
+**Both negative, and the pattern across items 36/39/40 is now unmistakable and
+deep: ANY mechanism that fits the per-frame pose more TIGHTLY to the map
+(pose-only BA, full-inlier LM refit, stricter reprojection gate) collapses scale
+on this pipeline. The baseline's plain SQPnP RANSAC minimal-sample solve is robust
+precisely because it is LOOSELY coupled to the map -- it does not over-fit the
+map's own scale imperfections into the trajectory.** This means the 51.273m
+baseline is near-optimal for the CURRENT map quality, and the real improvement
+lever is NOT tighter pose fitting but BETTER MAP QUALITY (more accurate landmarks,
+cleaner loop closures) -- at which point tighter fitting would stop backfiring.
+This directly motivates the one still-open item: a properly-trained SIFT-DBoW2
+vocabulary (item 29's Kaggle notebook now fixed to K=10/L=5/stride=3) for cleaner
+loop-closure candidate search -> fewer map-compressing garbage loops. `reprojErr`
+and `pnpfullrefine` flags kept, default off/8px.
+
 ### Queued next steps (not started this session, in priority order per the user's own direction)
 
 **IMPORTANT: the reference baseline changed this session** -- item 19's
