@@ -18,6 +18,10 @@
 #define __D_T_TEMPLATED_VOCABULARY__
 
 #include <cassert>
+#include <cstdio>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #include <vector>
 #include <numeric>
@@ -672,6 +676,16 @@ void TemplatedVocabulary<TDescriptor,F>::HKmeansStep(NodeId parent_id,
   {
     // select clusters and groups with kmeans
 
+    // Progress logging added for this project (2026-07-22): HKmeansStep
+    // previously ran silently end to end, so a long FRootSift training run
+    // (continuous-descriptor L2 distance, far slower per-comparison than
+    // FORB's Hamming distance) gave no sign of life for the entire
+    // duration -- indistinguishable from a hang. stderr so it interleaves
+    // with train_sift_dbow_vocabulary.cpp's own [config]/[progress] lines.
+    std::fprintf(stderr, "[hkmeans] level %d/%d: clustering %zu descriptors into %d groups\n",
+                  current_level, m_L, descriptors.size(), m_k);
+    std::fflush(stderr);
+
     bool first_time = true;
     bool goon = true;
 
@@ -741,35 +755,50 @@ void TemplatedVocabulary<TDescriptor,F>::HKmeansStep(NodeId parent_id,
       // 2. Associate features with clusters
 
       // calculate distances to cluster centers
+
+      // OpenMP parallelization added for this project (2026-07-22): this is
+      // the dominant cost in HKmeansStep -- O(descriptors.size() * m_k)
+      // F::distance() calls every iteration, repeated up to
+      // kMaxHKmeansIterations times per node, at every one of m_L tree
+      // levels. Each descriptor's nearest-cluster search is independent of
+      // every other descriptor's, so this splits cleanly across threads:
+      // the parallel loop only WRITES to its own current_association[d]
+      // slot (no shared mutable state, no locking needed), and the
+      // (cheap, O(n)) groups[] bucketing that used to happen inline is
+      // pulled out into a separate serial pass below since
+      // vector::push_back from multiple threads onto the same groups[c]
+      // would race.
       groups.clear();
       groups.resize(clusters.size(), vector<unsigned int>());
       current_association.resize(descriptors.size());
 
-      //assoc.clear();
-
-      typename vector<pDescriptor>::const_iterator fit;
-      //unsigned int d = 0;
-      for(fit = descriptors.begin(); fit != descriptors.end(); ++fit)//, ++d)
       {
-        double best_dist = F::distance(*(*fit), clusters[0]);
-        unsigned int icluster = 0;
-        
-        for(unsigned int c = 1; c < clusters.size(); ++c)
+        const int nDescriptors = static_cast<int>(descriptors.size());
+        const int nClusters = static_cast<int>(clusters.size());
+
+#pragma omp parallel for schedule(static)
+        for(int d = 0; d < nDescriptors; ++d)
         {
-          double dist = F::distance(*(*fit), clusters[c]);
-          if(dist < best_dist)
+          double best_dist = F::distance(*descriptors[d], clusters[0]);
+          unsigned int icluster = 0;
+
+          for(int c = 1; c < nClusters; ++c)
           {
-            best_dist = dist;
-            icluster = c;
+            double dist = F::distance(*descriptors[d], clusters[c]);
+            if(dist < best_dist)
+            {
+              best_dist = dist;
+              icluster = c;
+            }
           }
+
+          current_association[d] = icluster;
         }
 
-        //assoc.ref<unsigned char>(icluster, d) = 1;
-
-        groups[icluster].push_back(fit - descriptors.begin());
-        current_association[ fit - descriptors.begin() ] = icluster;
+        for(int d = 0; d < nDescriptors; ++d)
+          groups[current_association[d]].push_back(d);
       }
-      
+
       // kmeans++ ensures all the clusters has any feature associated with them
 
       // 3. check convergence
@@ -797,9 +826,14 @@ void TemplatedVocabulary<TDescriptor,F>::HKmeansStep(NodeId parent_id,
 				last_association = current_association;
 				//last_assoc = assoc.clone();
 			}
-			
+
 		} // while(goon)
-    
+
+    std::fprintf(stderr, "[hkmeans] level %d/%d: %s after %d/%d iterations\n",
+                  current_level, m_L, goon ? "hit iteration cap" : "converged",
+                  hkmeansIteration, kMaxHKmeansIterations);
+    std::fflush(stderr);
+
   } // if must run kmeans
   
   // create nodes

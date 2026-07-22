@@ -23,7 +23,20 @@ void FRootSift::meanValue(const std::vector<FRootSift::pDescriptor> &descriptors
 {
   if(descriptors.empty())
   {
-    mean.release();
+    // Deliberately NOT mean.release() here (this project, 2026-07-22):
+    // HKmeansStep passes clusters[c] as `mean`, already holding that
+    // cluster's centroid from the previous iteration/initiateClusters --
+    // releasing it turns clusters[c] into a 0x0 cv::Mat, and the very next
+    // line in HKmeansStep's reassignment loop calls F::distance() against
+    // it, which does b.ptr<float>() on an empty Mat -> null pointer,
+    // dereferenced 128 times -> SIGSEGV. A cluster losing all its assigned
+    // descriptors mid-iteration is routine for RootSIFT's continuous
+    // 128-dim float space (far more common than for FORB's Hamming
+    // distance, which is why the vendored FORB.cpp has this identical
+    // release()-on-empty pattern but rarely trips it). Keeping the old,
+    // still-valid centroid instead of releasing it fixes the crash and
+    // gives that cluster a chance to reattract points on a later
+    // iteration.
     return;
   }
   else if(descriptors.size() == 1)
