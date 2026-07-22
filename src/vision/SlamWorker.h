@@ -259,6 +259,16 @@ public slots:
     // drift after a pose is already accepted.
     void setMinTrackInliers(int count) { m_minTrackInliers = count; }
 
+    // Window size (in keyframes) runLocalBundleAdjustment() optimizes over
+    // -- was a fixed kLocalBaWindowKeyframes constexpr (default 8), now
+    // runtime-overridable. Untested at any other value before this session
+    // (see DEBUGGING.md) -- item 8's own observation-density fix means a
+    // bigger window may now capture real multi-view constraint it
+    // previously couldn't (landmarks were only pulled in via ownership
+    // before that fix, so a bigger window mostly just added more
+    // single-observation landmarks with nothing to triangulate against).
+    void setLocalBaWindowKeyframes(int count) { m_localBaWindowKeyframes = count; }
+
     // Fraction of full resolution SIFT/ORB detection runs at (default 0.5,
     // half-res -- see m_detectionScale's own doc comment for the real-time-
     // budget reasoning behind that default). Was a fixed kDetectionScale
@@ -409,27 +419,102 @@ public slots:
     // Default off (behavior-preserving): when on, a geometrically-verified
     // loop candidate is no longer corrected on the FIRST confirmation --
     // tryLoopClosure() instead requires the SAME loop hypothesis (same
-    // matched old keyframe, within kLoopConsistencyOldIdxWindow) to be
-    // independently re-verified across kLoopConsistencyRequiredCount
-    // consecutive-ish new-keyframe insertions (within
-    // kLoopConsistencyMaxGapKeyframes of each other) before actually
-    // applying the correction. This is real ORB-SLAM3's own
+    // PLACE, see below) to be independently re-verified across
+    // kLoopConsistencyRequiredCount consecutive-ish new-keyframe insertions
+    // (within kLoopConsistencyMaxGapKeyframes of each other) before
+    // actually applying the correction. This is real ORB-SLAM3's own
     // `mnLoopNumCoincidences >= 3` mechanism (see LoopClosing.cc,
     // DetectCommonRegionsFromBoW()) -- a simplified adaptation, not a
     // literal port: ORB-SLAM3 checks consistency across covisibility-graph
-    // GROUPS of keyframes (this codebase has no such grouping structure),
-    // this checks a simple index-proximity window instead. A prior session
-    // note left at the degenerate-correction guard in tryLoopClosure()
-    // ("Requiring multi-candidate agreement... remains a more principled
-    // fix... just not attempted yet") anticipated exactly this. When a
-    // candidate is still pending confirmation, tryLoopClosure() returns
-    // without applying any correction that call -- the pending streak is
-    // NOT reset by an intervening call that finds no candidate at all
-    // (only by one that finds a candidate pointing somewhere else, or by
-    // too large a gap since the last confirmation), a deliberate
-    // simplification to avoid touching this function's many existing
-    // early-return sites.
+    // GROUPS of keyframes (this codebase has no such grouping structure).
+    //
+    // "Same place" is tested via real place-recognition similarity
+    // (VLAD/SIFT-DBoW2/DBoW2 score, whichever candidate-search backend
+    // found this candidate) between the two OLD keyframes being confirmed
+    // against each other -- see kLoopConsistencyPlaceMinScore's own doc
+    // comment. An EARLIER version of this gate (still available as a
+    // fallback when no place-recognition vector exists for either old
+    // keyframe) used a pure keyframe-index-proximity window instead
+    // (kLoopConsistencyOldIdxWindow) and was measured to lose far more real
+    // corrections than it filtered false positives (DEBUGGING.md item 15:
+    // 72.550m->100.391m, committed closures dropped 66->21) -- viewing-
+    // angle drift shifts the best-matching old-keyframe index faster than
+    // a small window tolerates. Grounding the test in real appearance
+    // evidence instead (same lesson item 19 already confirmed for
+    // fuseWindowLandmarks()) is expected to fix this, not yet re-measured
+    // after this redesign.
+    //
+    // A prior session note left at the degenerate-correction guard in
+    // tryLoopClosure() ("Requiring multi-candidate agreement... remains a
+    // more principled fix... just not attempted yet") anticipated this gate
+    // in the first place. When a candidate is still pending confirmation,
+    // tryLoopClosure() returns without applying any correction that call --
+    // the pending streak is NOT reset by an intervening call that finds no
+    // candidate at all (only by one that finds a candidate pointing
+    // somewhere else, or by too large a gap since the last confirmation), a
+    // deliberate simplification to avoid touching this function's many
+    // existing early-return sites.
     void setLoopConsistencyGroupEnabled(bool enabled) { m_loopConsistencyGroupEnabled = enabled; }
+
+    // Default off (behavior-preserving), independent of
+    // setLoopConsistencyGroupEnabled() -- a DIFFERENT mechanism (DEBUGGING.md
+    // item 23), not a variant of it. That gate required MULTIPLE SEPARATE
+    // tryLoopClosure() calls (across different keyframe insertions) to
+    // independently re-confirm the same place, which items 15/21/22
+    // conclusively showed doesn't work on this pipeline's own sparse/noisy
+    // re-detection cadence. This gate instead checks consensus WITHIN a
+    // SINGLE call: the candidate-search step (whichever backend --
+    // siftdbow/vlad/dbow -- is active) collects every candidate keyframe
+    // whose place-recognition score independently clears the normal
+    // acceptance threshold, not just the single best one. The top-scoring
+    // candidate is only accepted if at least one OTHER qualifying candidate
+    // lies within kLoopSpatialConsensusWindow keyframe indices of it --
+    // i.e., multiple INDEPENDENTLY-scored keyframes from the current
+    // history agree this is the same place, a single-call decision with no
+    // waiting/pending state at all. Not yet measured.
+    void setLoopSpatialConsensusEnabled(bool enabled) { m_loopSpatialConsensusEnabled = enabled; }
+
+    // Default off (behavior-preserving): when on, every keyframe insertion
+    // calls fuseWindowLandmarks() -- a simplified adaptation of real
+    // ORB-SLAM3's LocalMapping::SearchInNeighbors()/ORBmatcher::Fuse(). v4
+    // redesign (DEBUGGING.md item 19, this is Phase A -- COVERAGE
+    // EXTENSION ONLY, no merging): for each of the current keyframe's own
+    // just-triangulated landmarks, projects it into each OTHER keyframe in
+    // a recent window and searches that keyframe's OWN actually-detected
+    // keypoints for a reprojection-gated descriptor match (the same
+    // standard recordLandmarkObservations() already uses safely for the
+    // rolling map) -- if the matched keypoint is unclaimed
+    // (Keyframe::keypointLandmarkId == -1), records a new, real observation
+    // of the landmark there. An EARLIER version of this pass (items 16-18,
+    // now superseded) compared landmarks by abstract 3D distance instead
+    // of real detected keypoints and was measured to regress ATE three
+    // times in a row; this redesign fixed that and measured a real
+    // 29.3% improvement (72.550m -> 51.273m). See
+    // setLandmarkFuseMergeEnabled() for the separate, NOT recommended,
+    // Phase B (genuine-conflict merging) this pass can also do.
+    void setLandmarkFuseEnabled(bool enabled) { m_landmarkFuseEnabled = enabled; }
+
+    // Default off, and requires setLandmarkFuseEnabled() to also be on:
+    // Phase B of fuseWindowLandmarks() (see its own doc comment) -- when a
+    // projected landmark's search lands on a keypoint ALREADY linked to a
+    // DIFFERENT landmark id (a genuine, unambiguous conflict: both ids
+    // demonstrably explain the exact same detected keypoint), merges them
+    // (richer-evidence-wins, same rule Phase B and items 16-18 both use).
+    // MEASURED NEGATIVE (DEBUGGING.md item 20): 51.273m -> 161.117m, and
+    // loop closures dropped 71->33. Root cause: merging only updates
+    // m_landmarkObservations/keypointLandmarkId, never the separate
+    // Keyframe::localMapPoints/localMapPointIds/localMapDescriptors arrays
+    // tryLoopClosure()'s own PnP/Sim3Solver measurement reads directly --
+    // any landmark absorbed as a loser leaves a stale, orphaned position in
+    // whichever keyframe owns it there, corrupting loop-closure's most
+    // safety-critical measurement step. Kept in the tree, off by default,
+    // for anyone who wants to fix that synchronization gap and re-measure
+    // -- not recommended to enable as-is.
+    void setLandmarkFuseMergeEnabled(bool enabled) { m_landmarkFuseMergeEnabled = enabled; }
+
+    // Running total of landmarks merged/extended by fuseWindowLandmarks()
+    // so far this run -- for end-of-run reporting (see kitti_ate.cpp).
+    long long fusedLandmarkCount() const { return m_fusedLandmarkCount; }
 
     // Default off: periodically (every kCullingCheckIntervalKeyframes
     // insertions, see cullRedundantKeyframes()) builds a covisibility graph
@@ -724,6 +809,14 @@ private:
     // against).
     void tryLoopClosure(size_t newKeyframeIndex);
 
+    // See setLoopSpatialConsensusEnabled(). Returns true immediately
+    // (no-op) when that feature is off. Otherwise, true iff `qualifying`
+    // (every candidate keyframe index whose place-recognition score
+    // independently cleared the acceptance threshold this same call)
+    // contains some OTHER index within kLoopSpatialConsensusWindow of
+    // bestIdx.
+    bool loopHasSpatialConsensus(const std::vector<int> &qualifying, int bestIdx) const;
+
     // See setKeyframeCullingEnabled(). Rebuilds the covisibility graph from
     // scratch (a full pass over m_landmarkObservations) each call -- called
     // only every kCullingCheckIntervalKeyframes keyframe insertions from
@@ -745,8 +838,49 @@ private:
     // 3D position before accepting it -- see kMaxObservationReprojErrorPixels'
     // doc comment (SlamWorker.cpp) for why a plain ratio-test match isn't
     // trusted on its own here.
+    // keypointLandmarkId: this keyframe's own Keyframe::keypointLandmarkId
+    // (passed by reference since this is called before the Keyframe is
+    // pushed into m_keyframeHistory) -- every accepted match additionally
+    // records keypointLandmarkId[m.trainIdx] = id, so fuseWindowLandmarks()'s
+    // v4 redesign (see DEBUGGING.md item 19) can tell which of this
+    // keyframe's own detected keypoints already have a confirmed landmark
+    // link (including ones assigned here, re-observations of the rolling
+    // map, not just ones this keyframe itself triangulated).
     void recordLandmarkObservations(int keyframeIndex, const std::vector<cv::KeyPoint> &kps,
-                                     const cv::Mat &descriptors, const cv::Mat &R, const cv::Mat &t);
+                                     const cv::Mat &descriptors, const cv::Mat &R, const cv::Mat &t,
+                                     std::vector<long long> &keypointLandmarkId);
+
+    // See setLandmarkFuseEnabled(). Simplified adaptation of real
+    // ORB-SLAM3's LocalMapping::SearchInNeighbors()/ORBmatcher::Fuse():
+    // for every landmark newKeyframeIndex just triangulated
+    // (m_keyframeHistory[newKeyframeIndex].localMapPointIds), searches
+    // everything actively observed within the last kFuseWindowKeyframes
+    // keyframes for candidates within kFuseMaxWorldDistance (3D proximity,
+    // a cheap first pass), then among THOSE candidates picks the one with
+    // the smallest RootSIFT descriptor distance -- only actually merging if
+    // that distance is also under kFuseMaxDescriptorDistance. This two-
+    // stage design (proximity narrows candidates, descriptor decides)
+    // mirrors real ORB-SLAM3's own ORBmatcher::Fuse() (radius search, then
+    // "match to the most similar keypoint in the radius"); an EARLIER
+    // version of this pass skipped the descriptor stage entirely and was
+    // measured (DEBUGGING.md item 16) to merge mostly visually-dissimilar
+    // landmarks (median descriptor distance among its merges: 0.7987) --
+    // confirmed a real false-merge problem, not a coding bug, which is why
+    // the descriptor gate was added. On an actual merge, the id with fewer
+    // recorded observations is absorbed into the one with more: its
+    // m_landmarkObservations entries are appended onto the survivor's and
+    // its own entry erased, so future local/loop-BA density lookups --
+    // items 8/10 -- and future fuse passes only ever see the survivor.
+    // Real ORB-SLAM3 additionally does its whole search via projection into
+    // covisible neighbors' own keypoint sets (needing a per-keyframe "map
+    // point at this keypoint index" table this codebase doesn't have) --
+    // this 3D-proximity-then-descriptor test is a coarser but much simpler
+    // stand-in; see DEBUGGING.md for remaining caveats (kFuseMaxWorldDistance
+    // is a fixed absolute threshold that assumes roughly self-consistent
+    // local scale within the window, not validated against the real
+    // monocular scale drift item 11 already established at the
+    // full-sequence level).
+    void fuseWindowLandmarks(int newKeyframeIndex);
 
     // Real joint bundle adjustment (Ceres, reprojection error) over every
     // keyframe strictly between oldKfIdx and newKfIdx plus every landmark
@@ -1094,6 +1228,15 @@ private:
     std::unordered_map<long long, cv::Point3f> m_landmarkPositions;
     std::unordered_map<long long, std::vector<std::pair<int, cv::Point2f>>> m_landmarkObservations;
 
+    // The triangulating keyframe's own descriptor row for this landmark,
+    // seeded once at creation time (insertKeyframe()) and never updated --
+    // fuseWindowLandmarks()'s own descriptor-similarity gate (see
+    // setLandmarkFuseEnabled()) is the only reader; a single representative
+    // descriptor is enough for that purpose (real ORB-SLAM3's own
+    // ComputeDistinctiveDescriptors() picks one representative descriptor
+    // per map point too, rather than averaging or keeping all of them).
+    std::unordered_map<long long, cv::Mat> m_landmarkDescriptors;
+
     // Reverse index, parallel to m_keyframeHistory: ALL landmark IDs
     // keyframe i has ANY observation of -- both the ones it originally
     // triangulated (Keyframe::localMapPointIds) AND every later
@@ -1146,6 +1289,21 @@ private:
     {
         std::vector<cv::KeyPoint> keypoints;
         cv::Mat descriptors;
+        // Parallel to keypoints/descriptors: which landmark id (if any, -1 =
+        // unassigned) this specific detected keypoint has been confirmed
+        // (via a real reprojection-gated match, same standard
+        // recordLandmarkObservations() already uses) to be an observation
+        // of. This is the piece real ORB-SLAM3's own KeyFrame::mvpMapPoints
+        // provides and this codebase lacked before fuseWindowLandmarks()'s
+        // v4 redesign (see DEBUGGING.md item 19) -- without it, there was
+        // no way to distinguish "this landmark is ALSO visible in this
+        // OTHER keyframe, safe to just add an observation" from "two
+        // DIFFERENT landmarks are both claiming to explain the exact same
+        // detected feature, a real conflict" -- items 16-18's pure-3D-
+        // distance version conflated the two, which item 18 confirmed was
+        // actively harmful once BA had to reconcile the resulting
+        // geometrically-inconsistent residuals.
+        std::vector<long long> keypointLandmarkId;
         cv::Mat R, t;
         std::vector<cv::Point3f> localMapPoints;
         cv::Mat localMapDescriptors;
@@ -1229,9 +1387,22 @@ private:
     size_t m_pendingLoopNewKfIdx = 0;
     int m_pendingLoopStreak = 0;
 
+    // See setLoopSpatialConsensusEnabled().
+    bool m_loopSpatialConsensusEnabled = false;
+
+    // See setLandmarkFuseEnabled()/fuseWindowLandmarks(). m_fusedLandmarkCount
+    // is a running total, reported at shutdown for visibility into how much
+    // this pass actually does on a given run.
+    bool m_landmarkFuseEnabled = false;
+    bool m_landmarkFuseMergeEnabled = false;
+    long long m_fusedLandmarkCount = 0;
+
     bool m_keyframeCullingEnabled = false; // see setKeyframeCullingEnabled()
     int m_minTrackInliers = 10; // see setMinTrackInliers(); must match kMinTrackInliers's own default in
                                  // SlamWorker.cpp so behavior is unchanged until explicitly overridden
+    int m_localBaWindowKeyframes = 8; // see setLocalBaWindowKeyframes(); must match the old
+                                       // kLocalBaWindowKeyframes constexpr's own default in SlamWorker.cpp
+                                       // so behavior is unchanged until explicitly overridden
     double m_detectionScale = 0.5; // see setDetectionScale(); must match the old kDetectionScale
                                     // constexpr's own default in SlamWorker.cpp so behavior is
                                     // unchanged until explicitly overridden

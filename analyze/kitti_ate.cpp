@@ -200,7 +200,18 @@ int main(int argc, char *argv[])
                       "  [argv38] loopconsistency: pass the literal word 'loopconsistency' to require a "
                       "loop candidate be re-verified across several consecutive-ish keyframe insertions "
                       "before its correction is applied (see "
-                      "SlamWorker::setLoopConsistencyGroupEnabled()).\n");
+                      "SlamWorker::setLoopConsistencyGroupEnabled()).\n"
+                      "  [argv39] fuse: pass the literal word 'fuse' to extend landmark observation "
+                      "coverage into nearby keyframes via real projection+keypoint matching (see "
+                      "SlamWorker::setLandmarkFuseEnabled()) -- RECOMMENDED, measured +29%% ATE win.\n"
+                      "  [argv40] fusemerge: pass the literal word 'fusemerge' (requires 'fuse') to ALSO "
+                      "merge genuine keypoint-conflicts (see SlamWorker::setLandmarkFuseMergeEnabled()) "
+                      "-- NOT RECOMMENDED, measured negative, see DEBUGGING.md item 20.\n"
+                      "  [argv41] loopspatialconsensus: pass the literal word 'loopspatialconsensus' to "
+                      "require within-call consensus among independently-scored loop candidates (see "
+                      "SlamWorker::setLoopSpatialConsensusEnabled()).\n"
+                      "  [argv42] local-ba-window: overrides SlamWorker::setLocalBaWindowKeyframes() "
+                      "(default 8).\n");
         return 1;
     }
     const QString imagePattern = QString::fromLocal8Bit(argv[1]);
@@ -454,6 +465,54 @@ int main(int argc, char *argv[])
         std::fprintf(stderr, "[config] loop-closure temporal-consistency gate enabled\n");
     }
 
+    // argv[39]: pass the literal word 'fuse' to enable fuseWindowLandmarks()
+    // Phase A -- a simplified adaptation of real ORB-SLAM3's
+    // LocalMapping::SearchInNeighbors()/ORBmatcher::Fuse() (see
+    // SlamWorker::setLandmarkFuseEnabled()): extends a just-triangulated
+    // landmark's observation coverage into nearby keyframes via real
+    // projection + reprojection-gated descriptor matching against their
+    // own detected keypoints. Measured real win (DEBUGGING.md item 19):
+    // 72.550m -> 51.273m. Detector-agnostic, RECOMMENDED.
+    if (argc > 39 && std::strcmp(argv[39], "fuse") == 0) {
+        worker.setLandmarkFuseEnabled(true);
+        std::fprintf(stderr, "[config] landmark fuse (Phase A: coverage extension) enabled\n");
+    }
+
+    // argv[40]: pass the literal word 'fusemerge' to ALSO enable Phase B
+    // (see SlamWorker::setLandmarkFuseMergeEnabled()) -- genuine-conflict
+    // merging on top of Phase A's coverage extension. Requires 'fuse' to
+    // also be passed. NOT RECOMMENDED: measured negative (DEBUGGING.md
+    // item 20), 51.273m -> 161.117m, loop closures dropped 71->33 (merging
+    // leaves Keyframe::localMapPoints/localMapPointIds stale, corrupting
+    // tryLoopClosure()'s own PnP/Sim3Solver measurement). Kept available
+    // for anyone who wants to fix that synchronization gap and re-measure.
+    if (argc > 40 && std::strcmp(argv[40], "fusemerge") == 0) {
+        worker.setLandmarkFuseMergeEnabled(true);
+        std::fprintf(stderr, "[config] landmark fuse Phase B (genuine-conflict merging) enabled -- "
+                              "NOT RECOMMENDED, see DEBUGGING.md item 20\n");
+    }
+
+    // argv[41]: pass the literal word 'loopspatialconsensus' to enable
+    // setLoopSpatialConsensusEnabled() -- a DIFFERENT mechanism from
+    // 'loopconsistency' (see its own doc comment): checks consensus among
+    // several independently-scored candidates within a SINGLE
+    // tryLoopClosure() call, instead of requiring re-confirmation ACROSS
+    // separate calls (which items 15/21/22 showed doesn't work on this
+    // pipeline's own detection cadence). Detector-agnostic.
+    if (argc > 41 && std::strcmp(argv[41], "loopspatialconsensus") == 0) {
+        worker.setLoopSpatialConsensusEnabled(true);
+        std::fprintf(stderr, "[config] loop-closure spatial-consensus gate enabled\n");
+    }
+
+    // argv[42]: overrides SlamWorker::setLocalBaWindowKeyframes() (default
+    // 8) -- untested at any other value before this session.
+    if (argc > 42) {
+        const int windowKeyframes = std::atoi(argv[42]);
+        if (windowKeyframes > 0) {
+            worker.setLocalBaWindowKeyframes(windowKeyframes);
+            std::fprintf(stderr, "[config] local BA window keyframes=%d\n", windowKeyframes);
+        }
+    }
 
     if (argc > 9 && std::strcmp(argv[9], "groundplane") == 0) {
         worker.setGroundPlaneEnabled(true);
@@ -560,6 +619,8 @@ int main(int argc, char *argv[])
 
     QTimer::singleShot(seconds * 1000, &app, &QCoreApplication::quit);
     app.exec();
+
+    std::fprintf(stderr, "[fuse] landmarks merged this run: %lld\n", worker.fusedLandmarkCount());
 
     const QVector<QPointF> &traj = worker.trajectoryPoints();
     const QVector<int> &frames = worker.trajectoryFrameIndices();
