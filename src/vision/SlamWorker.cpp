@@ -250,34 +250,29 @@ constexpr int kLoopSpatialConsensusWindow = 5; // setLoopSpatialConsensusEnabled
 constexpr int kFuseWindowKeyframes = 15; // fuseWindowLandmarks()'s own recent-activity window --
                                           // roughly 2x kLocalBaWindowKeyframes, wide enough to catch a
                                           // duplicate triangulated a handful of keyframes apart, still
-                                          // narrow enough that local scale is roughly self-consistent
-                                          // (see kFuseMaxWorldDistance's own comment) and the O(new x
-                                          // active) pairwise distance sweep stays cheap. Untuned.
-constexpr float kFuseMaxWorldDistance = 0.5f; // fuseWindowLandmarks()'s CANDIDATE-narrowing gate (a
-                                               // cheap first pass, not the actual merge decision -- see
-                                               // kFuseMaxDescriptorDistance below for that) -- world units
-                                               // (this pipeline's own internal, not-yet-Umeyama-aligned
-                                               // scale, which item 11 already established isn't perfectly
-                                               // constant over a FULL sequence -- assumed roughly self-
-                                               // consistent within a kFuseWindowKeyframes-sized recent
-                                               // window, not validated). Untuned-per-sequence estimate,
-                                               // same spirit as kDbowMinScore/kVladMinScore.
-constexpr double kFuseMaxDescriptorDistance = 0.4; // fuseWindowLandmarks()'s actual "same physical
-                                                    // point" decision, among whatever
-                                                    // kFuseMaxWorldDistance already narrowed the field
-                                                    // to -- RootSIFT L2 distance, same convention this
-                                                    // pipeline's descriptor space already uses elsewhere.
-                                                    // Directly informed by a real measurement (item 16,
-                                                    // DEBUGGING.md): a diagnostic run of the earlier
-                                                    // pure-3D-distance version found its false merges had
-                                                    // a median descriptor distance of 0.7987 (72.3% >=
-                                                    // 0.6), while genuine same-feature matches elsewhere
-                                                    // in this codebase are expected well under ~0.4 -- so
-                                                    // 0.4 sits at the boundary of that observed gap, not a
-                                                    // blind guess, though still not independently verified
-                                                    // as the right cutoff for GENUINE matches specifically
-                                                    // (only for excluding the false ones that were
-                                                    // measured).
+                                          // narrow enough that the O(new candidates x window keyframes)
+                                          // projection search stays cheap. Untuned.
+constexpr double kFuseMergeMaxReprojErrorPixels = 3.0; // fuseWindowLandmarks()'s Phase B (see
+                                                        // setLandmarkFuseMergeEnabled()) applies this
+                                                        // STRICTER reprojection-error gate on TOP of the
+                                                        // shared kMaxObservationReprojErrorPixels (8px)
+                                                        // check every candidate match already passed --
+                                                        // merging changes a landmark's identity/history
+                                                        // permanently (items 18/20/25 all found real,
+                                                        // measurable harm from merges that were only
+                                                        // individually "good enough"), so it deserves a
+                                                        // materially tighter bar than Phase A's coverage-
+                                                        // extension (which only ever adds a new
+                                                        // observation to an unambiguous, still-alive
+                                                        // landmark, never changes any existing identity).
+                                                        // Untuned-per-sequence estimate, item 26. Reused
+                                                        // by triangulateMultiView() as the mean-
+                                                        // reprojection-error acceptance gate for Phase B
+                                                        // v5's re-triangulated merge position (same
+                                                        // "how good does a merge decision need to be"
+                                                        // bar, now applied to the ACTUAL geometric
+                                                        // consistency of the combined observation set
+                                                        // instead of just one single-view pixel offset).
 constexpr int kSim3SolverMinCorrespondences = 8; // solveSim3Ransac()'s own call site in
                                                   // tryLoopClosure(): below this many descriptor-matched
                                                   // 3D-3D correspondences, don't even attempt RANSAC (the
@@ -2706,6 +2701,73 @@ std::vector<cv::Point3f> SlamWorker::triangulate(const cv::Mat &R1, const cv::Ma
     return out;
 }
 
+cv::Point3f SlamWorker::triangulateMultiView(const std::vector<std::pair<int, cv::Point2f>> &observations,
+                                              bool &valid) const
+{
+    valid = false;
+    if (observations.size() < 2)
+        return {};
+
+    const cv::Mat K = m_intrinsics.toMat();
+    cv::Mat A(2 * static_cast<int>(observations.size()), 4, CV_64F, cv::Scalar(0.0));
+    int row = 0;
+    for (const auto &ob : observations) {
+        const Keyframe &kf = m_keyframeHistory[static_cast<size_t>(ob.first)];
+        cv::Mat Rt;
+        cv::hconcat(kf.R, kf.t, Rt);
+        const cv::Mat P = K * Rt; // 3x4
+        const double u = ob.second.x, v = ob.second.y;
+        for (int c = 0; c < 4; ++c) {
+            A.at<double>(row, c) = u * P.at<double>(2, c) - P.at<double>(0, c);
+            A.at<double>(row + 1, c) = v * P.at<double>(2, c) - P.at<double>(1, c);
+        }
+        row += 2;
+    }
+
+    cv::Mat w, u_, vt;
+    cv::SVD::compute(A, w, u_, vt, cv::SVD::FULL_UV);
+    const cv::Mat X = vt.row(vt.rows - 1).t(); // smallest-singular-value solution
+    const double homog = X.at<double>(3);
+    if (std::abs(homog) < 1e-9)
+        return {}; // point at infinity -- degenerate view configuration
+
+    const cv::Point3f p(static_cast<float>(X.at<double>(0) / homog),
+                         static_cast<float>(X.at<double>(1) / homog),
+                         static_cast<float>(X.at<double>(2) / homog));
+
+    // Acceptance gate: this is the actual merge decision (see this
+    // function's own doc comment in SlamWorker.h), not just a diagnostic --
+    // every observing keyframe must see this candidate position at a
+    // plausible depth AND within Phase B's own tight reprojection bar,
+    // otherwise the two landmarks being merged are geometrically
+    // inconsistent (most likely genuinely different physical points that
+    // happened to share a similar-enough descriptor) and the merge itself
+    // must be rejected, not silently accepted with a worse position.
+    double sumSqErr = 0.0;
+    int validViews = 0;
+    for (const auto &ob : observations) {
+        const Keyframe &kf = m_keyframeHistory[static_cast<size_t>(ob.first)];
+        const cv::Mat Xw = (cv::Mat_<double>(3, 1) << p.x, p.y, p.z);
+        const cv::Mat camPt = kf.R * Xw + kf.t;
+        const double z = camPt.at<double>(2);
+        if (z < 1e-3 || z > kMaxTriangulationDepth)
+            continue;
+        const double u = m_intrinsics.fx * camPt.at<double>(0) / z + m_intrinsics.cx;
+        const double v = m_intrinsics.fy * camPt.at<double>(1) / z + m_intrinsics.cy;
+        const double du = u - ob.second.x, dv = v - ob.second.y;
+        sumSqErr += du * du + dv * dv;
+        ++validViews;
+    }
+    if (validViews < 2)
+        return {}; // fewer than 2 views agree on positive depth -- not a real triangulation
+    const double meanReprojErr = std::sqrt(sumSqErr / validViews);
+    if (meanReprojErr > kFuseMergeMaxReprojErrorPixels)
+        return {};
+
+    valid = true;
+    return p;
+}
+
 bool SlamWorker::initializeFromFrame(const std::vector<cv::KeyPoint> &kps, const cv::Mat &descriptors)
 {
     if (m_refDescriptors.empty()) {
@@ -3306,15 +3368,33 @@ void SlamWorker::fuseWindowLandmarks(int newKeyframeIndex)
                 continue; // genuine conflict, but Phase B is off -- see setLandmarkFuseMergeEnabled()'s
                            // own doc comment for why it's NOT recommended (measured negative, item 20)
 
+            if (existing >= 0 && du * du + dv * dv > kFuseMergeMaxReprojErrorPixels * kFuseMergeMaxReprojErrorPixels)
+                continue; // passed the shared 8px extension gate but not Phase B's own stricter
+                           // merge-specific bar (see kFuseMergeMaxReprojErrorPixels's own doc comment,
+                           // item 26) -- too consequential a decision to accept on the same margin as a
+                           // plain coverage extension
+
             if (existing >= 0) {
-                // Phase B: a GENUINE conflict -- newId and existing both
-                // demonstrably explain this exact detected keypoint in
-                // otherKf, confirmed via a real reprojection-gated
-                // descriptor match, not items 16-18's abstract 3D-distance
-                // heuristic (which item 18 confirmed was actively harmful).
-                // Richer-evidence-wins, same rule as before: whichever id
-                // has fewer recorded observations is absorbed into the one
-                // with more.
+                // Phase B v5 (untried redesign flagged in DEBUGGING.md's
+                // Phase B section, after v1-v4 all measured negative):
+                // newId and existing both demonstrably explain this exact
+                // detected keypoint in otherKf, confirmed via a real
+                // reprojection-gated descriptor match. Richer-evidence-wins
+                // decides who nominally "survives" the id, same rule as
+                // before -- but instead of then keeping that survivor's own
+                // stale, pre-merge 3D position (v1-v4's shared flaw, root-
+                // caused across items 20/25/26 as the actual source of
+                // every prior regression), re-triangulate a fresh position
+                // from the COMBINED observation set of both ids using ALL
+                // their accumulated multi-view constraint
+                // (triangulateMultiView()). If that combined set is
+                // geometrically inconsistent (its own internal reprojection
+                // gate fails), the merge is REJECTED outright -- newId and
+                // existing are left exactly as they were, as if this
+                // otherKf candidate had never matched. This makes
+                // triangulation success itself the real merge criterion,
+                // not just the earlier single-view pixel gate that only
+                // narrows candidates.
                 const auto newObsIt = m_landmarkObservations.find(newId);
                 const auto existingObsIt = m_landmarkObservations.find(existing);
                 const size_t newObsCount = newObsIt == m_landmarkObservations.end() ? 0 : newObsIt->second.size();
@@ -3324,37 +3404,49 @@ void SlamWorker::fuseWindowLandmarks(int newKeyframeIndex)
                 const long long loser = survivor == existing ? newId : existing;
 
                 const auto loserIt = m_landmarkObservations.find(loser);
-                if (loserIt != m_landmarkObservations.end()) {
-                    // Resync loser's OWNING keyframe's own local-map copy
+                const auto survivorIt = m_landmarkObservations.find(survivor);
+                if (loserIt != m_landmarkObservations.end() && survivorIt != m_landmarkObservations.end()) {
+                    std::vector<std::pair<int, cv::Point2f>> combinedObs = survivorIt->second;
+                    combinedObs.insert(combinedObs.end(), loserIt->second.begin(), loserIt->second.end());
+
+                    bool triangulationValid = false;
+                    const cv::Point3f newPos = triangulateMultiView(combinedObs, triangulationValid);
+                    if (!triangulationValid)
+                        continue; // geometrically inconsistent merge -- reject, leave both ids untouched
+
+                    m_landmarkPositions[survivor] = newPos;
+
+                    // Resync BOTH owning keyframes' own local-map copies
                     // (Keyframe::localMapPointIds/localMapPoints/
-                    // localMapDescriptors) BEFORE erasing loser's
-                    // observation list -- this is the exact stale-data gap
-                    // item 20 root-caused as Phase B's real regression
-                    // cause: tryLoopClosure()'s own PnP/Sim3Solver
-                    // measurement reads THESE arrays directly, not
-                    // m_landmarkObservations/m_landmarkPositions, so
-                    // without this fix a future loop closure could still
-                    // silently use loser's dead, no-longer-updated
-                    // position. The owning keyframe is always the FIRST
-                    // (oldest) entry in the observation list -- seeded at
-                    // triangulation time in insertKeyframe() and never
-                    // reordered, only ever appended to afterward.
-                    const int loserOwnerKfIdx = loserIt->second.front().first;
-                    Keyframe &loserOwnerKf = m_keyframeHistory[static_cast<size_t>(loserOwnerKfIdx)];
-                    const auto ownIt = std::find(loserOwnerKf.localMapPointIds.begin(),
-                                                  loserOwnerKf.localMapPointIds.end(), loser);
-                    if (ownIt != loserOwnerKf.localMapPointIds.end()) {
-                        const size_t localIdx =
-                            static_cast<size_t>(ownIt - loserOwnerKf.localMapPointIds.begin());
-                        loserOwnerKf.localMapPointIds[localIdx] = survivor;
-                        const auto survivorPosIt = m_landmarkPositions.find(survivor);
-                        if (survivorPosIt != m_landmarkPositions.end())
-                            loserOwnerKf.localMapPoints[localIdx] = survivorPosIt->second;
-                        const auto survivorDescIt = m_landmarkDescriptors.find(survivor);
+                    // localMapDescriptors) -- loser's, because its id is
+                    // being retired and tryLoopClosure()'s own PnP/
+                    // Sim3Solver measurement reads these arrays directly,
+                    // not m_landmarkObservations/m_landmarkPositions (item
+                    // 20's original finding); AND survivor's own, because
+                    // unlike v1-v4, survivor's position now genuinely
+                    // changes at merge time and its owning keyframe's copy
+                    // would otherwise go stale too -- a gap v1-v4 never had
+                    // to handle since they never moved the survivor. The
+                    // owning keyframe is always the FIRST (oldest) entry in
+                    // the observation list -- seeded at triangulation time
+                    // in insertKeyframe() and never reordered, only ever
+                    // appended to afterward.
+                    const auto survivorDescIt = m_landmarkDescriptors.find(survivor);
+                    auto syncOwnerLocalMap = [this, &survivorDescIt](long long ownedId, long long newOwnedId,
+                                                                      const cv::Point3f &pos, int ownerKfIdx) {
+                        Keyframe &ownerKf = m_keyframeHistory[static_cast<size_t>(ownerKfIdx)];
+                        const auto ownIt = std::find(ownerKf.localMapPointIds.begin(),
+                                                      ownerKf.localMapPointIds.end(), ownedId);
+                        if (ownIt == ownerKf.localMapPointIds.end())
+                            return;
+                        const size_t localIdx = static_cast<size_t>(ownIt - ownerKf.localMapPointIds.begin());
+                        ownerKf.localMapPointIds[localIdx] = newOwnedId;
+                        ownerKf.localMapPoints[localIdx] = pos;
                         if (survivorDescIt != m_landmarkDescriptors.end())
-                            survivorDescIt->second.copyTo(
-                                loserOwnerKf.localMapDescriptors.row(static_cast<int>(localIdx)));
-                    }
+                            survivorDescIt->second.copyTo(ownerKf.localMapDescriptors.row(static_cast<int>(localIdx)));
+                    };
+                    syncOwnerLocalMap(loser, survivor, newPos, loserIt->second.front().first);
+                    syncOwnerLocalMap(survivor, survivor, newPos, survivorIt->second.front().first);
 
                     std::vector<std::pair<int, cv::Point2f>> loserObs = std::move(loserIt->second);
                     m_landmarkObservations.erase(loserIt);

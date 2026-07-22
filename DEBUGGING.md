@@ -997,6 +997,91 @@ with window size rather than changing window size alone. Not tested.
 **Reverted to the default (8) for the recommended config; not
 recommended to increase without further investigation.**
 
+### 25. Fixed item 20's root cause (stale `Keyframe::localMapPoints` after a Phase B merge) -- helped, but still net negative; Phase B now considered closed, not just "needs the sync fix"
+
+Implemented the fix item 20 identified: when Phase B merges `loser` into
+`survivor`, before erasing `loser`'s observation list, now finds `loser`'s
+OWNING keyframe (always the FIRST/oldest entry in its observation list --
+seeded at triangulation time in `insertKeyframe()`, never reordered, only
+ever appended to) and resyncs that keyframe's own
+`localMapPointIds`/`localMapPoints`/`localMapDescriptors` entry to point at
+`survivor` instead (id, 3D position, and descriptor all updated; the
+keyframe's own real 2D pixel observation, `localMapImagePoints`, is left
+untouched since that's a genuine detected feature regardless of which
+landmark id currently owns it). This directly targets what item 20 showed
+was corrupting `tryLoopClosure()`'s own PnP/Sim3Solver measurement (which
+reads these arrays directly, not `m_landmarkObservations`/`m_landmarkPositions`).
+
+**Measured on the Phase-A 51.273m baseline (single variable changed)**:
+**51.273m -> 139.061m** -- still substantially worse, though a real,
+measured improvement over the unfixed Phase B's 161.117m. Closures: 46
+committed (up from 33 unfixed, still well short of Phase A's 71). **The
+fix helped but did not come close to closing the gap.** This means the
+`localMapPoints` staleness was a REAL contributing factor (confirmed by
+the partial recovery), but not the ONLY or even the primary problem with
+Phase B -- something more fundamental about aggressively merging on every
+detected keypoint-slot conflict (37038 merge+extension events this run,
+far more than Phase A alone's ~22-23k) appears to still inject enough
+noise to hurt ATE substantially, even with both the descriptor gate
+(item 17's lesson) and the data-consistency gate (this item) applied.
+
+**Phase B now considered closed for this pipeline, not just "one bug away
+from working"** -- three real, principled fixes attempted across items
+17/18/20/25 (descriptor gating, then two rounds of data-consistency
+fixes), each measurably helping in isolation, none closing the gap to
+Phase A's clean 51.273m. Left off by default (`fusemerge` flag). Phase A
+alone (`fuse`) remains the recommended, validated configuration.
+
+### 26. Tried a stricter, merge-specific reprojection-error gate on top of item 25's fix -- WORSE, not better; Phase B investigation concluded
+
+User asked directly why the gap was still so large and whether it could be
+fixed. Root-caused via the event count: Phase B's own merge branch reuses
+the SAME shared 8px reprojection gate (`kMaxObservationReprojErrorPixels`)
+as Phase A's coverage extension -- but merging permanently changes a
+landmark's identity/history (much more consequential than simply adding
+one more observation to an already-alive, unambiguous landmark), so it
+arguably deserved a materially tighter bar of its own. Added
+`kFuseMergeMaxReprojErrorPixels = 3.0` (vs. the shared 8.0), applied as an
+ADDITIONAL gate specifically on the merge branch (on top of the existing
+8px check every candidate already had to pass). Also removed two now-dead
+constants (`kFuseMaxWorldDistance`/`kFuseMaxDescriptorDistance`, leftover
+from the superseded v2/v3 3D-distance design, no longer referenced by any
+code since item 19's projection-based redesign).
+
+**Measured on the Phase-A 51.273m baseline (single variable changed, on
+top of item 25's already-fixed Phase B)**: **139.061m -> 193.839m**,
+WORSE, not better -- the opposite of what a stricter, more conservative
+merge criterion should produce. Closures dropped further (46->34).
+`Recovered scale` collapsed to 0.0095 (essentially destroyed, far worse
+than any other measurement this session). This is a genuinely
+counter-intuitive result: tightening a decision this session's whole
+history suggested "measure and ground more evidence" should be the fix
+that helps, and it didn't -- consistent with item 23/24's own
+counter-intuitive negatives elsewhere this session, and with item 21's
+finding that fixing the "same place" test for the loop-consistency gate
+didn't help either. Not further root-caused (would need per-merge
+instrumentation to isolate a specific bad event or interaction, not
+attempted).
+
+**Phase B investigation concluded for this session.** Four independent,
+honestly-measured attempts (original 3D-distance-free redesign, +
+data-consistency sync fix, + stricter merge-specific threshold), each
+addressing a real, correctly-diagnosed issue, produced a monotonically
+WORSENING trend (161.117m -> 139.061m improvement was real, then
+193.839m regression on the next fix) rather than convergence toward Phase
+A's 51.273m. This is strong evidence that Phase B's core idea --
+permanently merging two landmarks' identities on a single detected
+keypoint-slot conflict, however well-gated -- is fundamentally
+incompatible with this pipeline's architecture, not a tuning problem.
+**Recommend not investing further in Phase B without a genuinely
+different design** (e.g., real re-triangulation/joint re-optimization of
+the survivor's position at merge time using ALL its combined observations,
+rather than any form of the current "trust the existing stored position,
+splice in the new evidence" approach -- flagged as the likely real fix
+since item 18, never attempted, a substantially bigger undertaking than
+anything tried this session). Phase A (`fuse`) alone remains the
+session's clear, validated win at 51.273m.
+
 ### Queued next steps (not started this session, in priority order per the user's own direction)
 
 **IMPORTANT: the reference baseline changed this session** -- item 19's

@@ -499,17 +499,21 @@ public slots:
     // projected landmark's search lands on a keypoint ALREADY linked to a
     // DIFFERENT landmark id (a genuine, unambiguous conflict: both ids
     // demonstrably explain the exact same detected keypoint), merges them
-    // (richer-evidence-wins, same rule Phase B and items 16-18 both use).
-    // MEASURED NEGATIVE (DEBUGGING.md item 20): 51.273m -> 161.117m, and
-    // loop closures dropped 71->33. Root cause: merging only updates
-    // m_landmarkObservations/keypointLandmarkId, never the separate
-    // Keyframe::localMapPoints/localMapPointIds/localMapDescriptors arrays
-    // tryLoopClosure()'s own PnP/Sim3Solver measurement reads directly --
-    // any landmark absorbed as a loser leaves a stale, orphaned position in
-    // whichever keyframe owns it there, corrupting loop-closure's most
-    // safety-critical measurement step. Kept in the tree, off by default,
-    // for anyone who wants to fix that synchronization gap and re-measure
-    // -- not recommended to enable as-is.
+    // (richer-evidence-wins picks the nominal survivor id, same rule v1-v5
+    // all use). v1 (MEASURED NEGATIVE, DEBUGGING.md item 20): 51.273m ->
+    // 161.117m -- root-caused to survivor keeping its own stale, pre-merge
+    // 3D position while the merged observation set implied a different
+    // one. v2/v3 (items 20/25, both negative) fixed the local-map
+    // synchronization gap and tightened the merge-specific reprojection
+    // gate but never actually changed the survivor's POSITION, so the core
+    // problem persisted. v5 (current, see triangulateMultiView()) is the
+    // untried redesign those items flagged: re-triangulates the survivor's
+    // position from BOTH ids' combined observation set via linear N-view
+    // DLT+SVD, and REJECTS the merge outright if that combined set is
+    // geometrically inconsistent (fails its own reprojection gate), rather
+    // than accepting every candidate on a single-view pixel threshold and
+    // hoping the position stays close enough. See DEBUGGING.md for whether
+    // this measured better than Phase A alone (51.273m).
     void setLandmarkFuseMergeEnabled(bool enabled) { m_landmarkFuseMergeEnabled = enabled; }
 
     // Running total of landmarks merged/extended by fuseWindowLandmarks()
@@ -760,6 +764,25 @@ private:
                                           const std::vector<cv::Point2f> &pts1,
                                           const std::vector<cv::Point2f> &pts2,
                                           std::vector<uchar> &validMask) const;
+
+    // N-view linear triangulation (DLT generalized to >2 views: each
+    // observation contributes 2 rows u*P_row3-P_row1 / v*P_row3-P_row2 to a
+    // single homogeneous system, solved by SVD) plus a real geometric
+    // acceptance gate -- every observation must reproject within
+    // kFuseMergeMaxReprojErrorPixels of its actual detected keypoint (mean
+    // over all observing keyframes) for the result to be accepted at all.
+    // Used by fuseWindowLandmarks()'s Phase B merge (see
+    // setLandmarkFuseMergeEnabled()) to re-triangulate a merged landmark's
+    // position from the COMBINED observation set of both ids being merged,
+    // instead of keeping whichever id "won" its own stale, pre-merge
+    // position -- the untried redesign DEBUGGING.md's Phase B section
+    // flagged as the one remaining plausible fix. `valid` is false (return
+    // value unspecified) if fewer than 2 observations have positive depth
+    // in front of their own keyframe or the mean reprojection error exceeds
+    // the gate -- callers must reject the merge entirely in that case, not
+    // fall back to the pre-merge position.
+    cv::Point3f triangulateMultiView(const std::vector<std::pair<int, cv::Point2f>> &observations,
+                                      bool &valid) const;
 
     // Custom linear DLT (Direct Linear Transform) pose solver wrapped in
     // RANSAC, offered as an alternative to OpenCV's built-in PnP methods
