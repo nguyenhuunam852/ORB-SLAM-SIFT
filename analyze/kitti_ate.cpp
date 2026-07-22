@@ -652,6 +652,33 @@ int main(int argc, char *argv[])
         std::fprintf(stderr, "[config] loop-closure quality gate enabled\n");
     }
 
+    // argv[56]: 'poseonlystepgate' (with 'poseonlyba') -- per-frame
+    // step-consistency gate (item 41 #1, setPoseOnlyStepGateEnabled()).
+    if (argc > 56 && std::strcmp(argv[56], "poseonlystepgate") == 0) {
+        worker.setPoseOnlyStepGateEnabled(true);
+        std::fprintf(stderr, "[config] pose-only BA per-frame step-consistency gate enabled\n");
+    }
+
+    // argv[57]: 'poseonlyleash' (with 'poseonlyba') -- SQPnP-primary +
+    // pose-only BA leashed to the SQPnP solution (item 41 #2,
+    // setPoseOnlyLeashEnabled()).
+    if (argc > 57 && std::strcmp(argv[57], "poseonlyleash") == 0) {
+        worker.setPoseOnlyLeashEnabled(true);
+        std::fprintf(stderr, "[config] pose-only BA leash-to-SQPnP enabled\n");
+    }
+
+    // argv[58]/[59]: override leash rot/trans weights (item 41 #2 sweep). Use
+    // '-' or 0 to keep defaults (30/5). Lower = looser leash = more pose-only
+    // refinement accuracy at higher collapse risk.
+    if (argc > 59) {
+        const double lr = std::atof(argv[58]);
+        const double lt = std::atof(argv[59]);
+        if (lr > 0.0 || lt > 0.0) {
+            worker.setPoseOnlyLeashWeights(lr, lt);
+            std::fprintf(stderr, "[config] leash weights override rot=%.2f trans=%.2f\n", lr, lt);
+        }
+    }
+
     if (argc > 9 && std::strcmp(argv[9], "groundplane") == 0) {
         worker.setGroundPlaneEnabled(true);
         std::fprintf(stderr, "[config] ground-plane scale correction enabled (VISO2-M-style fallback)\n");

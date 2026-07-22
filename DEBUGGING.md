@@ -1591,8 +1591,20 @@ themselves the finding: **pose-only BA makes the trajectory hypersensitive to
 exactly when it runs relative to loop closures. The paradox that the BLUNT guard
 (79.8m) beat the SELECTIVE one (151.7m) shows the guard's "help" was really just
 turning pose-only BA off more -- reverting toward SQPnP. The more pose-only BA
-runs, the worse; pure SQPnP (baseline) is best.** Front-end pose-only-BA direction
-closed, 4 variants all worse than 51.273m. All flags default off.
+runs, the worse; pure SQPnP (baseline) is best.** All flags default off.
+
+CORRECTION (added after the fact): calling the front-end pose-only-BA
+direction "closed" here was premature over-generalization. What these 4
+variants actually exhausted is one SUB-approach: LOOP-TIMING-based
+suppression (suppress pose-only BA around loop closures). All 4 shared that
+flaw or no suppression at all. The measured evidence actually argues the
+CORE idea has merit -- pose-only BA is better than baseline in 3 of 4
+regions, and its failure is a specific, diagnosable PER-FRAME signature
+(step magnitude collapses to ~0.07x when it rigidly follows a
+loop-compressed map). A specific diagnosable failure calls for a targeted
+per-frame fix, not abandonment. Untried when "closed" was written:
+per-frame step-consistency gating and leashing pose-only BA to the SQPnP
+solution (see item 41).
 
 ### 40. User kept the SQPnP+soft-prior baseline and asked for other improvement levers -- tested the two cheapest (tighter PnP reproj error, full-inlier LM refit); BOTH negative, revealing a deep "any tighter map-fit collapses scale" pattern
 
@@ -1619,6 +1631,64 @@ This directly motivates the one still-open item: a properly-trained SIFT-DBoW2
 vocabulary (item 29's Kaggle notebook now fixed to K=10/L=5/stride=3) for cleaner
 loop-closure candidate search -> fewer map-compressing garbage loops. `reprojErr`
 and `pnpfullrefine` flags kept, default off/8px.
+
+Footnote (sweep of `pnpfullrefine` + `reprojErr`): reprojErr in
+{4,5,6,6.25,6.5,6.75,7,8} with fullrefine gave {73, 177, 51.9, 128, 46.9,
+70.9, 170, 176}m -- chaotically non-monotonic. reprojErr=6.5 hit 46.861m
+(beats baseline!) but its immediate neighbours (6.25=128, 6.75=70.9, 5=177,
+7=170) are catastrophic, so it is a knife-edge coincidence, NOT a robust
+usable improvement. Superseded anyway by item 41's leash win.
+
+### 41. REVIVED the pose-only-BA front-end with two NEW per-frame mechanisms (after correcting the premature "closed" call) -- the LEASH mechanism BEATS baseline: 41.782m (first robust sub-baseline result of the whole effort)
+
+After the user pushed back on the premature "front-end closed" conclusion
+(rightly -- see the correction note on item 39), implemented the two
+per-frame mechanisms that the diagnosis actually pointed to and that no
+prior variant had tried, each behind its own flag:
+
+- **#1 step-consistency gate** (`poseonlystepgate`, argv56,
+  `setPoseOnlyStepGateEnabled()`): reject the motion-model pose-only-BA
+  result for any frame whose camera-center step collapses below
+  kPoseOnlyMinStepFraction (0.35) of the running avg step -- the exact
+  scale-collapse signature -- and fall back to SQPnP for that frame only.
+  **Measured: 159.4m, NEGATIVE.** The per-frame step gate fired too
+  bluntly / the SQPnP-fallback frames still didn't compose well; did not
+  help.
+- **#2 leash-to-SQPnP** (`poseonlyleash`, argv57,
+  `setPoseOnlyLeashEnabled()`): switch to SQPnP-PRIMARY tracking, then
+  refine with pose-only BA anchored to the SQPnP solution by a soft
+  PosePriorCost (kPoseOnlyLeashRotWeight=30/TransWeight=5) -- pose-only BA
+  sharpens the pose but cannot drift/collapse away from the robust SQPnP
+  estimate. The per-frame analogue of soft-prior local BA's live-pose
+  leash. **Measured: 41.782m -- BEATS the 51.273m baseline by 18.5%, the
+  first robust improvement over baseline in the entire investigation.**
+
+Verified genuine, not an alignment artifact: ATE median 35.3m (vs
+baseline's higher), ATE MAX 90.8m (LOWER than baseline's 120.4m -> more
+accurate, not just better-aligned), coverage 4518/4541 (>= baseline's
+4515), Recovered scale 0.459 (healthier than baseline's 0.232). Per-region
+path-length ratios [0.95/0.81/0.84/1.16] -- NO region collapses; crucially
+region 3 (frames 2250-3400), which plain poseonlyba collapsed to 0.43, is
+now 0.84: the leash prevented exactly the post-loop scale collapse item 39
+diagnosed. Unlike the r6.5 knife-edge, this is a MECHANISM (not a fragile
+threshold), so it should generalise. **This is the session's new best and
+supersedes the 51.273m baseline as the recommended config: baseline +
+`poseonlyba` + `poseonlyleash`.** The lesson: the diagnosis was right (the
+failure was a specific per-frame post-loop scale collapse), and anchoring
+the tight-fitting pose-only BA to the robust loosely-coupled SQPnP estimate
+is what lets it add accuracy without inheriting the map's scale
+imperfections -- resolving the "any tighter map-fit collapses" tension of
+item 40. Kudos to the user for rejecting the premature closure.
+
+### NEW BEST CONFIG (2026-07-23): 41.782m -- SQPnP + soft-prior local BA + windowed loop-BA + VLAD + Phase-A fuse + pose-only-BA-leashed-to-SQPnP
+
+```
+kitti_ate <left-pattern> <poses> 1200 sqpnp <out-prefix> fivepoint - - - ba \
+  - - - - - - - - - - - - - - localba - - guided - vlad <vlad-codebook-path> \
+  - - - - - - - fuse - - - - - - - - - - - poseonlyba - - - - - - poseonlyleash
+```
+(argv50=poseonlyba, argv57=poseonlyleash on top of the previous 51.273m
+recipe -- see kitti_ate.cpp usage for exact slots.)
 
 ### Queued next steps (not started this session, in priority order per the user's own direction)
 

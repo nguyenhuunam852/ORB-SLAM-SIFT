@@ -361,6 +361,15 @@ constexpr int kPoseOnlyLoopSuppressFrames = 30; // DEBUGGING.md item 39: after a
                                                  // into a local scale collapse (the diagnosed frames-2500-3300
                                                  // failure); SQPnP's RANSAC is robust to it. ~4 keyframes at
                                                  // the default keyframe spacing. Untuned.
+constexpr double kPoseOnlyMinStepFraction = 0.35; // item 41 #1: reject a pose-only-BA frame whose
+                                                   // camera-center step is below this fraction of the
+                                                   // running avg step (m_avgStepScale) -- the scale-collapse
+                                                   // signature -- and fall back to SQPnP for that frame.
+                                                   // Untuned.
+constexpr double kPoseOnlyLeashRotWeight = 30.0;  // item 41 #2: soft-prior leash weights anchoring pose-only
+constexpr double kPoseOnlyLeashTransWeight = 5.0; // BA to the SQPnP solution (see optimizePoseOnly's prior).
+                                                   // Same spirit/scale as kLocalBaPosePriorRotWeight/Trans.
+                                                   // Untuned.
 constexpr double kOctaveWeightRefSize = 2.0; // octave/scale information weighting reference (item 38, see
                                               // optimizePoseOnly()): a SIFT keypoint at/below this SIZE
                                               // (diameter, ~the finest detectable scale) keeps full unit
@@ -3016,7 +3025,8 @@ bool SlamWorker::initializeFromFrame(const std::vector<cv::KeyPoint> &kps, const
 bool SlamWorker::optimizePoseOnly(const std::vector<cv::Point3f> &objectPoints,
                                    const std::vector<cv::Point2f> &imagePoints,
                                    const std::vector<float> &imageScales, cv::Mat &R, cv::Mat &tvec,
-                                   int &inlierCountOut) const
+                                   int &inlierCountOut, const std::array<double, 6> *priorPose,
+                                   double priorRotWeight, double priorTransWeight) const
 {
     // Real ORB-SLAM3-style pose-only BA (Optimizer::PoseOptimization): the
     // map is held fixed; only this frame's 6-DOF pose is optimized against
@@ -3051,6 +3061,14 @@ bool SlamWorker::optimizePoseOnly(const std::vector<cv::Point3f> &objectPoints,
     for (int pass = 0; pass < kPoseOnlyPasses; ++pass) {
         ceres::Problem problem;
         problem.AddParameterBlock(pose.data(), 6);
+        // Optional leash toward a reference pose (item 41, #2): a soft
+        // PosePriorCost anchoring the refined pose near the robust SQPnP
+        // solution, so pose-only BA can refine but cannot drift/collapse
+        // far from it -- the per-frame analogue of soft-prior local BA's
+        // live-pose leash.
+        if (priorPose)
+            problem.AddResidualBlock(PosePriorCost::Create(*priorPose, priorRotWeight, priorTransWeight),
+                                      nullptr, pose.data());
         int used = 0;
         for (size_t i = 0; i < n; ++i) {
             if (!isInlier[i])
@@ -3217,17 +3235,44 @@ bool SlamWorker::trackFrame(const std::vector<cv::KeyPoint> &kps, const cv::Mat 
     // Keeping SQPnP as the fallback is what guarantees coverage can't
     // collapse (the user's explicit requirement) on hard frames (sharp
     // turns, where the constant-velocity prediction is worst).
-    if (m_poseOnlyBaEnabled && m_poseOnlyLoopSuppressFrames == 0 && !m_currR.empty()) {
+    // Motion-model-primary runs unless leash mode (item 41 #2) is on, which
+    // instead does SQPnP-primary + leashed refine below.
+    if (m_poseOnlyBaEnabled && !m_poseOnlyLeashEnabled && m_poseOnlyLoopSuppressFrames == 0 &&
+        !m_currR.empty()) {
         cv::Mat mmR = m_velocityR * m_currR;
         cv::Mat mmT = m_velocityR * m_currT + m_velocityT;
         int mmInliers = 0;
         if (optimizePoseOnly(objectPoints, imagePoints, imageScales, mmR, mmT, mmInliers) &&
             mmInliers >= m_minTrackInliers) {
-            R = mmR;
-            tvec = mmT;
-            inlierCount = mmInliers;
-            ok = true;
-            trackedByMotionModel = true;
+            // Per-frame step-consistency gate (item 41 #1): the diagnosed
+            // failure is a SCALE collapse -- the refined step shrinks to a
+            // tiny fraction of the real motion. Reject the pose-only result
+            // and fall through to SQPnP for THIS frame only when its camera-
+            // center step is implausibly small vs the running average step
+            // (m_avgStepScale). Surgical: keeps pose-only BA on everywhere
+            // else, unlike the loop-timing suppression that degraded clean
+            // regions. isPlausibleStep() already bounds steps from ABOVE;
+            // this adds the missing lower bound, specific to pose-only BA.
+            bool stepOk = true;
+            if (m_poseOnlyStepGateEnabled && m_avgStepScale > 1e-6) {
+                const cv::Mat prevC = -m_currR.t() * m_currT;
+                const cv::Mat curC = -mmR.t() * mmT;
+                const double step = cv::norm(curC - prevC);
+                if (step < kPoseOnlyMinStepFraction * m_avgStepScale) {
+                    stepOk = false;
+                    std::fprintf(stderr,
+                                  "[track] pose-only step-gate: step=%.3f < %.2f*avgStep(%.3f) -- SQPnP "
+                                  "recovery this frame\n",
+                                  step, kPoseOnlyMinStepFraction, m_avgStepScale);
+                }
+            }
+            if (stepOk) {
+                R = mmR;
+                tvec = mmT;
+                inlierCount = mmInliers;
+                ok = true;
+                trackedByMotionModel = true;
+            }
         } else {
             std::fprintf(stderr, "[track] motion-model tracking lost (inliers=%d min=%d) -- SQPnP recovery\n",
                          mmInliers, m_minTrackInliers);
@@ -3295,10 +3340,24 @@ bool SlamWorker::trackFrame(const std::vector<cv::KeyPoint> &kps, const cv::Mat 
     // the SQPnP minimal-sample pose against ALL matched map points with the
     // map fixed + iterative outlier rejection. Falls through to the SQPnP
     // result untouched if it declines, so it can only help.
-    if (m_poseOnlyBaEnabled && m_poseOnlyLoopSuppressFrames == 0 && !trackedByMotionModel) {
+    if (m_poseOnlyBaEnabled && m_poseOnlyLoopSuppressFrames == 0 && !trackedByMotionModel && ok) {
         cv::Mat refinedR = R.clone(), refinedT = tvec.clone();
         int refinedInliers = inlierCount;
-        if (optimizePoseOnly(objectPoints, imagePoints, imageScales, refinedR, refinedT, refinedInliers) &&
+        // Leash mode (item 41 #2): anchor the refinement to the robust SQPnP
+        // solution (R/tvec here) via a soft PosePriorCost -- pose-only BA
+        // sharpens the pose but cannot collapse away from SQPnP. Non-leash
+        // mode refines unanchored (item 36's original recovery-path behavior).
+        std::array<double, 6> priorPose;
+        const std::array<double, 6> *prior = nullptr;
+        if (m_poseOnlyLeashEnabled) {
+            cv::Mat rv;
+            cv::Rodrigues(R, rv);
+            priorPose = {rv.at<double>(0), rv.at<double>(1), rv.at<double>(2),
+                         tvec.at<double>(0), tvec.at<double>(1), tvec.at<double>(2)};
+            prior = &priorPose;
+        }
+        if (optimizePoseOnly(objectPoints, imagePoints, imageScales, refinedR, refinedT, refinedInliers, prior,
+                              m_poseOnlyLeashRotWeight, m_poseOnlyLeashTransWeight) &&
             refinedInliers >= m_minTrackInliers) {
             R = refinedR;
             tvec = refinedT;

@@ -717,6 +717,30 @@ public slots:
     // quality (fewer bad map perturbations) without the new DBoW2 vocabulary.
     void setLoopQualityGateEnabled(bool enabled) { m_loopQualityGateEnabled = enabled; }
 
+    // Default off, with setPoseOnlyBaEnabled(): item 41 #1. Per-frame
+    // step-consistency gate -- reject the motion-model pose-only-BA result
+    // for a frame whose camera-center step collapses below a fraction of
+    // the running average step (the diagnosed scale-collapse signature),
+    // falling back to SQPnP for that frame only. Surgical alternative to
+    // loop-timing suppression.
+    void setPoseOnlyStepGateEnabled(bool enabled) { m_poseOnlyStepGateEnabled = enabled; }
+
+    // Default off, with setPoseOnlyBaEnabled(): item 41 #2. Leash mode --
+    // switches to SQPnP-primary tracking, then refines with pose-only BA
+    // anchored (soft PosePriorCost) to the SQPnP solution so it cannot
+    // drift/collapse away from that robust estimate. The per-frame analogue
+    // of soft-prior local BA's live-pose leash.
+    void setPoseOnlyLeashEnabled(bool enabled) { m_poseOnlyLeashEnabled = enabled; }
+
+    // Override the leash strength (item 41 #2). Lower = looser leash = more
+    // pose-only refinement (more accuracy, more collapse risk); higher =
+    // tighter = closer to raw SQPnP. Defaults match the original constants.
+    void setPoseOnlyLeashWeights(double rot, double trans)
+    {
+        if (rot > 0.0) m_poseOnlyLeashRotWeight = rot;
+        if (trans > 0.0) m_poseOnlyLeashTransWeight = trans;
+    }
+
     // Default off: when on, trackFrame() inserts a new keyframe once the
     // tracked-inlier ratio degrades past kKeyframeQualityRatioThreshold
     // (bounded by kKeyframeMinInterval/kKeyframeMaxInterval) instead of
@@ -964,7 +988,9 @@ private:
     // (leaving R/tvec untouched) if it declines.
     bool optimizePoseOnly(const std::vector<cv::Point3f> &objectPoints,
                            const std::vector<cv::Point2f> &imagePoints, const std::vector<float> &imageScales,
-                           cv::Mat &R, cv::Mat &tvec, int &inlierCountOut) const;
+                           cv::Mat &R, cv::Mat &tvec, int &inlierCountOut,
+                           const std::array<double, 6> *priorPose = nullptr, double priorRotWeight = 0.0,
+                           double priorTransWeight = 0.0) const;
     void insertKeyframe(const std::vector<cv::KeyPoint> &kps, const cv::Mat &descriptors,
                          const cv::Mat &R, const cv::Mat &t);
     bool recoverViaEpipolar(const std::vector<cv::KeyPoint> &kps, const cv::Mat &descriptors);
@@ -1434,6 +1460,10 @@ private:
     bool m_poseOnlyLoopSuppressEnabled = false; // see setPoseOnlyLoopSuppressEnabled()
     int m_poseOnlyLoopSuppressFrames = 0; // countdown; >0 means suppress pose-only BA this frame (item 39)
     bool m_loopQualityGateEnabled = false; // see setLoopQualityGateEnabled() (item 40)
+    bool m_poseOnlyStepGateEnabled = false; // see setPoseOnlyStepGateEnabled() (item 41 #1)
+    bool m_poseOnlyLeashEnabled = false; // see setPoseOnlyLeashEnabled() (item 41 #2)
+    double m_poseOnlyLeashRotWeight = 30.0; // see setPoseOnlyLeashWeights(); defaults = the item-41 constants
+    double m_poseOnlyLeashTransWeight = 5.0;
     bool m_qualityDrivenKeyframesEnabled = false; // see setQualityDrivenKeyframesEnabled()
 
     // Parallel to m_mapPoints -- a stable ID per live map point, surviving
