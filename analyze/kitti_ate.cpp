@@ -527,6 +527,16 @@ int main(int argc, char *argv[])
         std::fprintf(stderr, "[config] global BA async (deferred-integration simulation) enabled\n");
     }
 
+    // argv[44]: pass the literal word 'gapba' (requires 'globalbaasync') to
+    // enable SlamWorker::setGlobalBaGapRefinementEnabled() -- DEBUGGING.md
+    // item 31: re-optimizes the async simulation's gap keyframes against
+    // real reprojection residuals instead of trusting the rigid-delta
+    // chain propagation alone (item 30's negative result).
+    if (argc > 44 && std::strcmp(argv[44], "gapba") == 0) {
+        worker.setGlobalBaGapRefinementEnabled(true);
+        std::fprintf(stderr, "[config] global BA async gap refinement enabled\n");
+    }
+
     if (argc > 9 && std::strcmp(argv[9], "groundplane") == 0) {
         worker.setGroundPlaneEnabled(true);
         std::fprintf(stderr, "[config] ground-plane scale correction enabled (VISO2-M-style fallback)\n");

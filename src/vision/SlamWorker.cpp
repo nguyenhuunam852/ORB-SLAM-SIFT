@@ -4146,6 +4146,150 @@ bool SlamWorker::runGlobalBundleAdjustment(int newKfIdx, const cv::Mat &loopR, c
     return true;
 }
 
+bool SlamWorker::runGapBundleAdjustment(int anchorKfIdx, int endKfIdx)
+{
+    if (endKfIdx <= anchorKfIdx)
+        return false;
+    if (endKfIdx - anchorKfIdx + 1 > kBaMaxWindowKeyframes)
+        return false; // too large -- same runtime bound loop-BA uses
+
+    // Same dense any-observation-in-window rule as loop/global BA (items
+    // 8/10/28) -- see their own doc comments.
+    std::unordered_map<long long, std::vector<std::pair<int, cv::Point2f>>> windowObservations;
+    std::unordered_set<long long> processedLandmarkIds;
+    for (int i = anchorKfIdx; i <= endKfIdx; ++i) {
+        for (long long id : m_keyframeObservedLandmarkIds[static_cast<size_t>(i)]) {
+            if (!processedLandmarkIds.insert(id).second)
+                continue;
+            const auto it = m_landmarkObservations.find(id);
+            if (it == m_landmarkObservations.end())
+                continue;
+            auto &dst = windowObservations[id];
+            for (const auto &obs : it->second) {
+                if (obs.first >= anchorKfIdx && obs.first <= endKfIdx)
+                    dst.push_back(obs);
+            }
+        }
+    }
+
+    const int windowSize = endKfIdx - anchorKfIdx + 1;
+    std::vector<std::array<double, 6>> poses(static_cast<size_t>(windowSize));
+    auto fillPose = [](std::array<double, 6> &block, const cv::Mat &R, const cv::Mat &t) {
+        cv::Mat rvec;
+        cv::Rodrigues(R, rvec);
+        for (int k = 0; k < 3; ++k)
+            block[static_cast<size_t>(k)] = rvec.at<double>(k);
+        for (int k = 0; k < 3; ++k)
+            block[static_cast<size_t>(3 + k)] = t.at<double>(k);
+    };
+    // Warm-started from each keyframe's OWN current pose -- for the gap
+    // keyframes that's whatever tryIntegratePendingGlobalBa()'s rigid-delta
+    // chain propagation already put there (a starting guess, not trusted
+    // as final -- that's the whole point of this function existing).
+    for (int i = anchorKfIdx; i <= endKfIdx; ++i) {
+        const Keyframe &kf = m_keyframeHistory[static_cast<size_t>(i)];
+        fillPose(poses[static_cast<size_t>(i - anchorKfIdx)], kf.R, kf.t);
+    }
+
+    const CameraIntrinsics &intr = m_intrinsics;
+    std::unordered_map<long long, std::array<double, 3>> landmarks;
+    for (auto &entry : windowObservations) {
+        if (entry.second.size() < static_cast<size_t>(kBaMinObservationsPerLandmark))
+            continue;
+        const cv::Point3f &p = m_landmarkPositions.at(entry.first);
+        landmarks[entry.first] = {static_cast<double>(p.x), static_cast<double>(p.y), static_cast<double>(p.z)};
+    }
+    if (landmarks.empty())
+        return false;
+
+    ceres::Problem problem;
+    for (int i = 0; i < windowSize; ++i)
+        problem.AddParameterBlock(poses[static_cast<size_t>(i)].data(), 6);
+
+    int residualCount = 0;
+    for (auto &entry : landmarks) {
+        const auto &obsList = windowObservations.at(entry.first);
+        for (const auto &obs : obsList) {
+            ceres::CostFunction *cost =
+                ReprojectionCost::Create(obs.second.x, obs.second.y, intr.fx, intr.fy, intr.cx, intr.cy);
+            ceres::LossFunction *loss = new ceres::HuberLoss(kBaHuberDeltaPixels);
+            problem.AddResidualBlock(cost, loss, poses[static_cast<size_t>(obs.first - anchorKfIdx)].data(),
+                                      entry.second.data());
+            ++residualCount;
+        }
+    }
+    if (residualCount == 0)
+        return false;
+
+    // ONLY ONE hard anchor -- anchorKfIdx, held at its just-integrated
+    // corrected pose. Unlike loop-BA/global-BA's double anchor, endKfIdx is
+    // a free parameter: there is no independent measurement of its "true"
+    // pose here (that's the whole gap-keyframe problem), so it must be
+    // solved for, not pinned.
+    problem.SetParameterBlockConstant(poses.front().data());
+
+    ceres::Solver::Options options;
+    options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
+    options.max_num_iterations = kBaMaxIterations;
+    options.minimizer_progress_to_stdout = false;
+    options.num_threads = 1; // pinned for run-to-run reproducibility
+    ceres::Solver::Summary summary;
+    ceres::Solve(options, &problem, &summary);
+    if (!summary.IsSolutionUsable()) {
+        options.linear_solver_type = ceres::ITERATIVE_SCHUR;
+        options.preconditioner_type = ceres::JACOBI;
+        ceres::Solve(options, &problem, &summary);
+    }
+    if (!summary.IsSolutionUsable()) {
+        std::fprintf(stderr, "[globalba][async][gapba] did not converge, falling back: %s\n",
+                     summary.BriefReport().c_str());
+        return false;
+    }
+
+    std::fprintf(stderr,
+                  "[globalba][async][gapba] kf#%d..kf#%d, %d landmarks, %d observations, "
+                  "initial cost=%.3f final cost=%.3f\n",
+                  anchorKfIdx, endKfIdx, static_cast<int>(landmarks.size()), residualCount,
+                  summary.initial_cost, summary.final_cost);
+
+    auto poseToRT = [](const std::array<double, 6> &block, cv::Mat &R, cv::Mat &t) {
+        const cv::Mat rvec = (cv::Mat_<double>(3, 1) << block[0], block[1], block[2]);
+        cv::Rodrigues(rvec, R);
+        t = (cv::Mat_<double>(3, 1) << block[3], block[4], block[5]);
+    };
+    for (int i = anchorKfIdx + 1; i <= endKfIdx; ++i) { // anchorKfIdx held constant -- unchanged
+        cv::Mat R, t;
+        poseToRT(poses[static_cast<size_t>(i - anchorKfIdx)], R, t);
+        m_keyframeHistory[static_cast<size_t>(i)].R = R;
+        m_keyframeHistory[static_cast<size_t>(i)].t = t;
+    }
+
+    std::unordered_map<long long, size_t> mapIndexById;
+    mapIndexById.reserve(m_mapPointIds.size());
+    for (size_t i = 0; i < m_mapPointIds.size(); ++i)
+        mapIndexById[m_mapPointIds[i]] = i;
+
+    for (const auto &entry : landmarks) {
+        const cv::Point3f newPos(static_cast<float>(entry.second[0]), static_cast<float>(entry.second[1]),
+                                  static_cast<float>(entry.second[2]));
+        m_landmarkPositions[entry.first] = newPos;
+        const auto mapIt = mapIndexById.find(entry.first);
+        if (mapIt != mapIndexById.end())
+            m_mapPoints[mapIt->second] = newPos;
+        for (int i = anchorKfIdx; i <= endKfIdx; ++i) {
+            Keyframe &kf = m_keyframeHistory[static_cast<size_t>(i)];
+            const auto idIt = std::find(kf.localMapPointIds.begin(), kf.localMapPointIds.end(), entry.first);
+            if (idIt != kf.localMapPointIds.end()) {
+                const size_t localIdx = static_cast<size_t>(idIt - kf.localMapPointIds.begin());
+                kf.localMapPoints[localIdx] = newPos;
+                break;
+            }
+        }
+    }
+
+    return true;
+}
+
 void SlamWorker::tryIntegratePendingGlobalBa()
 {
     if (!m_pendingGlobalBaValid)
@@ -4215,6 +4359,14 @@ void SlamWorker::tryIntegratePendingGlobalBa()
                   "[globalba][async] integrated pending solve (trigger kf#%d) at kf#%d, propagated to %d "
                   "gap keyframes, %zu landmarks\n",
                   trigger, currentCount - 1, propagatedCount, m_pendingGlobalBaLandmarks.size());
+
+    // DEBUGGING.md item 31: the rigid-delta propagation above is only a
+    // WARM START, not trusted as final (item 30 measured the rigid patch
+    // alone as a net regression, 64.667m -> 136.095m) -- now actually
+    // re-optimize the gap keyframes against real reprojection residuals,
+    // anchored at the just-corrected trigger keyframe.
+    if (m_globalBaGapRefinementEnabled && currentCount - 1 > trigger)
+        runGapBundleAdjustment(trigger, currentCount - 1);
 
     m_pendingGlobalBaValid = false;
     m_pendingGlobalBaR.clear();

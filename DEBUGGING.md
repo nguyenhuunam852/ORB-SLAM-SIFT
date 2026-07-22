@@ -1169,6 +1169,110 @@ a much larger simultaneous problem, the smooth warm-start's rigid-drift
 assumption breaking down over a longer span, or accumulated small pose
 errors elsewhere in the map outweighing what the early closures fix).
 
+### 29. Tested a real trained SIFT-DBoW2 vocabulary (queued infra from item 4) -- negative, root-caused to an under-trained vocabulary, not the mechanism
+
+Same follow-up session: the Kaggle vocabulary-training job queued in item 4
+finished (`sift_dbow_vocab.txt`, 7928 words, header confirms K=10/L=5 i.e.
+100,000-word theoretical capacity). Measured with `siftdbow
+sift_dbow_vocab.txt` REPLACING `vlad` (single-variable swap, same
+`fuse`+`ba`+`localba`+`guided`+sqpnp config otherwise): **51.273m ->
+115.309m**, worse than VLAD.
+
+Root-caused directly from the log, not speculation: `siftDbowScore`s on
+real revisits clustered 0.15-0.42 (VLAD typically scores 0.55-0.75 on
+equivalent events), and the very first loop closure this vocabulary
+supported (kf#16<->kf#182, frame 138<->1581) applied a 521-world-unit
+translation correction -- roughly 20-40x every other nearby closure's
+correction -- this early in the sequence, poisoning the whole downstream
+trajectory (the same "early bad correction compounds" failure mode as
+globalBA below). Cause: 7928 actual words vs. 100,000 theoretical capacity
+at L=5 means most of the tree's deeper nodes never saw enough DISTINCT
+training descriptors to actually split into k=10 children -- a
+training-DATA-volume problem (`FRAME_STRIDE=10` in the Kaggle notebook was
+too sparse), not a tree-depth or mechanism problem.
+
+**Not closed** -- this is a data-volume gap, not a structural dead end like
+Phase B. Fixed the Kaggle notebook
+(`kaggle/train_sift_dbow_vocabulary_kaggle.ipynb`, cell [5/6]) for the next
+attempt: kept L=5 (now confirmed to actually compile/run, the old L=4
+fallback comment was stale/obsolete), dropped `FRAME_STRIDE` 10 -> 3 (~3.3x
+more training descriptors from the same attached sequences), and corrected
+the comment block to explain the real bottleneck. Re-run and re-measure
+before drawing further conclusions about SIFT-DBoW2 vs VLAD.
+
+### 30. User asked why real ORB-SLAM3's global BA works when this pipeline's doesn't -- read `Optimizer.cc`/`LoopClosing.cc` directly, found 3 real mechanism differences, implemented the two testable ones
+
+Direct comparison against `third_party/ORB_SLAM3/src/Optimizer.cc`'s
+`GlobalBundleAdjustemnt()`/`BundleAdjustment()` and
+`LoopClosing.cc`'s `RunGlobalBundleAdjustment()` found three concrete
+differences from `SlamWorker::runGlobalBundleAdjustment()`:
+1. **Warm-start**: ORB-SLAM3 fixes ONLY the map's origin keyframe and
+   initializes every other keyframe from its own current live pose,
+   trusting Levenberg-Marquardt to converge. This pipeline instead spread
+   ONE rigid drift transform LINEARLY across every intermediate keyframe
+   (`alpha=i/newKfIdx`) -- a uniform-drift assumption real drift doesn't
+   satisfy (it accrues faster through turns/low-texture stretches).
+2. **Runs in a background thread** (`LoopClosing.cc:1206`,
+   `mpThreadGBA = new thread(...)`) -- tracking/local BA keep running
+   concurrently while GBA solves.
+3. **Correction is propagated through a parent/child SPANNING TREE**
+   afterward (`LoopClosing.cc:2334-2358`), not written back 1:1 -- any
+   keyframe inserted DURING the (possibly slow) background solve gets
+   corrected via a relative transform from its tree parent, not left
+   stale or overwritten wholesale.
+
+**Mechanism 1 (warm-start) was implemented and measured**: replaced the
+rigid-interpolation warm-start with direct live-pose initialization (kf#0
+and newKfIdx still hard-anchored exactly as before -- that scheme has its
+own separate justification, untouched). **Measured: item 28's 150.016m ->
+64.667m**, a real ~57% improvement, confirming the warm-start WAS a major
+contributor to global BA's badness -- but still worse than the 51.273m
+baseline (globalba off).
+
+**Mechanisms 2+3 (async + spanning-tree propagation) were explicitly
+requested despite the known risk** (a REAL background `std::thread` would
+reintroduce run-to-run non-determinism this project deliberately
+eliminated -- see processNext()'s keypoint-sort fix and the pinned
+`ceres::num_threads=1` -- since this codebase has no locking infrastructure
+around `m_keyframeHistory`/`m_landmarkPositions`). Given the explicit
+constraint that any experiment must stay deterministically reproducible,
+implemented a **deterministic stand-in** instead (no real thread):
+`runGlobalBundleAdjustment()` still solves synchronously, but when
+`setGlobalBundleAdjustmentAsyncEnabled()` is on, defers WRITING the result
+(both keyframe poses and landmark positions) until
+`kGlobalBaIntegrationDelayKeyframes` (15) keyframes later
+(`tryIntegratePendingGlobalBa()`, called from `insertKeyframe()`).
+Keyframes inserted during that simulated gap -- which never had a residual
+in the original optimization, exactly ORB-SLAM3's own reason for needing
+spanning-tree propagation -- get corrected by a single rigid delta derived
+from how the anchor keyframe's own pose changed during integration, chained
+forward (a simplified stand-in for a real parent/child tree walk, since
+this codebase has no such graph).
+
+**Measured (`globalbaasync` flag, on top of item 30's mechanism-1 fix)**:
+**64.667m -> 136.095m**, WORSE than immediate write-back, though still
+slightly better than the original v1's 150.016m. **Conclusion: the
+deferred-integration + chain-propagation approximation is a net negative,
+not a fix.** Most likely explanation: the chain-propagation step applies
+exactly the same kind of uniform-rigid-delta assumption across the gap
+keyframes that mechanism 1 just proved harmful for BA's own warm-start,
+just relocated to a different part of the pipeline -- and unlike real
+ORB-SLAM3, the gap keyframes here get NO further real optimization (no
+concurrent local BA actively re-grounding them against real image
+observations) before the correction is stamped on, only a rigid patch
+after the fact. **Closed, negative** -- do not re-attempt this specific
+deterministic-delay approximation without a fundamentally different way to
+handle the gap keyframes (e.g. re-running a small local BA over just the
+gap after integration, using the corrected anchor as a new prior, instead
+of a single rigid chain delta).
+
+**Overall globalBA conclusion this item**: baseline (off) 51.273m < v2
+warm-start-only 64.667m < async 136.095m < v1 original 150.016m. Warm-start
+is a real, load-bearing fix and should be kept in the code even though
+`globalba` stays off by default (the fix reduces harm if anyone re-enables
+it later); the async/propagation experiment is closed negative for this
+codebase's simplified architecture.
+
 ### Queued next steps (not started this session, in priority order per the user's own direction)
 
 **IMPORTANT: the reference baseline changed this session** -- item 19's

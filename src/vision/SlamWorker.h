@@ -571,6 +571,19 @@ public slots:
     // immediate-write default.
     void setGlobalBundleAdjustmentAsyncEnabled(bool enabled) { m_globalBundleAdjustmentAsyncEnabled = enabled; }
 
+    // Default off, requires setGlobalBundleAdjustmentAsyncEnabled() to also
+    // be on: DEBUGGING.md item 31. Item 30 measured the async simulation's
+    // rigid-delta chain propagation (see tryIntegratePendingGlobalBa()) as
+    // a net regression on its own (64.667m -> 136.095m) -- root-caused to
+    // gap keyframes getting only a rigid geometric patch, never any real
+    // re-optimization against actual reprojection residuals, unlike real
+    // ORB-SLAM3 where continuous local mapping keeps refining them the
+    // whole time GBA solves in the background. When this is on, the rigid
+    // propagation is still applied first (as a warm start, not a final
+    // answer), then runGapBundleAdjustment() re-solves the gap window for
+    // real, anchored only at the just-corrected trigger keyframe.
+    void setGlobalBaGapRefinementEnabled(bool enabled) { m_globalBaGapRefinementEnabled = enabled; }
+
     // Default off: when on, trackFrame() matches against the covisibility-
     // driven local map (see buildCovisibilityLocalMap()) instead of the
     // flat rolling m_mapPoints/m_mapDescriptors -- more relevant candidate
@@ -983,6 +996,24 @@ private:
     // spanning the whole graph.
     bool runGlobalBundleAdjustment(int newKfIdx, const cv::Mat &loopR, const cv::Mat &loopT,
                                     const std::unordered_set<long long> &loopVerifiedIds);
+
+    // See tryIntegratePendingGlobalBa()/DEBUGGING.md item 31: called AFTER
+    // a pending async global BA result integrates, to properly re-optimize
+    // the "gap" keyframes (anchorKfIdx, endKfIdx] that were inserted during
+    // the simulated background-solve window and never had a residual in
+    // the original GBA problem. UNLIKE runLoopBundleAdjustment()/
+    // runGlobalBundleAdjustment(), only ONE hard anchor exists here
+    // (anchorKfIdx, held at its just-integrated corrected pose) --
+    // everything through endKfIdx is a free parameter, warm-started from
+    // whatever tryIntegratePendingGlobalBa()'s rigid-delta chain
+    // propagation already put there (a reasonable starting guess, not a
+    // final answer) and then actually refined against real reprojection
+    // residuals, unlike the plain rigid patch alone (item 30's negative
+    // result). This is this codebase's stand-in for what real ORB-SLAM3
+    // gets "for free" from continuous local mapping re-grounding gap
+    // keyframes against actual observations while GBA solves in the
+    // background.
+    bool runGapBundleAdjustment(int anchorKfIdx, int endKfIdx);
 
     // See setCovisibilityLocalMapEnabled(). Rebuilds m_localMapPoints/
     // m_localMapDescriptors/m_localMapPointIds from the keyframes covisible
@@ -1460,6 +1491,7 @@ private:
 
     // See setGlobalBundleAdjustmentAsyncEnabled()/tryIntegratePendingGlobalBa().
     bool m_globalBundleAdjustmentAsyncEnabled = false;
+    bool m_globalBaGapRefinementEnabled = false; // see setGlobalBaGapRefinementEnabled()
     bool m_pendingGlobalBaValid = false;
     int m_pendingGlobalBaTriggerKfIdx = -1;
     int m_pendingGlobalBaIntegrateAtKfIdx = -1;
