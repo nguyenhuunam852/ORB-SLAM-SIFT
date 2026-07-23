@@ -271,6 +271,28 @@ protected:
     // part 58.
     bool TrackWithKLT();
 
+    // Full replacement for TrackWithKLT (per user request): drop KLT optical
+    // flow entirely and track exactly like the custom SlamWorker pipeline --
+    // a pose-projected SearchByProjection (constant-velocity/position, no
+    // optical flow) for appearance-verified 2D-3D correspondences, a robust
+    // SQPnP RANSAC pose solve (cv::SOLVEPNP_SQPNP, that pipeline's primary,
+    // better than P3P/MLPnP on KITTI), then the same g2o PoseOptimization
+    // refine. Same nmatchesMap>=10 success bar as TrackWithMotionModel().
+    bool TrackWithSQPnP();
+
+    // Epipolar-bridge recovery (transplant of the custom SlamWorker
+    // pipeline's recoverViaEpipolar): when the normal trackers + reloc all
+    // fail because the car has driven into NEW territory (no existing map
+    // point / KF-DB candidate to recover against -- the measured ~74%-of-
+    // dropout regime), CREATE new geometry by two-view triangulating the
+    // current frame against the last keyframe and appending it to the SAME
+    // active map, instead of resetting. Scale is anchored to the last KF's
+    // existing scene median depth so the new piece stays metrically
+    // continuous. Returns true (and leaves mState=OK, a fresh KF inserted)
+    // on success; false (no side effects) if it can't bridge, so the caller
+    // falls through to the existing reset path with no regression.
+    bool TrackWithEpipolarBridge();
+
     void UpdateLocalMap();
     void UpdateLocalPoints();
     void UpdateLocalKeyFrames();

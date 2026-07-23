@@ -30,6 +30,7 @@
 #include "GeometricTools.h"
 
 #include <opencv2/video/tracking.hpp>
+#include <opencv2/calib3d.hpp> // solvePnPRansac / SOLVEPNP_SQPNP (TrackWithSQPnP)
 
 #include <iostream>
 
@@ -1978,8 +1979,8 @@ void Tracking::Track()
                 // TrackLocalMap, untouched); only this frame-to-frame
                 // correspondence step changed. See DEBUGGING.md part 58 and
                 // Tracking.h's TrackWithKLT() doc comment.
-                Verbose::PrintMess("TRACK: Track with KLT+PnP", Verbose::VERBOSITY_DEBUG);
-                bOK = TrackWithKLT();
+                Verbose::PrintMess("TRACK: Track with SearchByProjection+SQPnP", Verbose::VERBOSITY_DEBUG);
+                bOK = TrackWithSQPnP();
 
 
                 if (!bOK)
@@ -2035,7 +2036,7 @@ void Tracking::Track()
                         // existing heavy VLAD-database Relocalization()
                         // unchanged if KLT recovery also fails. See
                         // DEBUGGING.md part 58.
-                        const bool bKltOK = TrackWithKLT();
+                        const bool bKltOK = TrackWithSQPnP();
                         bOK = bKltOK;
                         bool bRelocAttempted = false;
                         if(!bOK)
@@ -2044,6 +2045,14 @@ void Tracking::Track()
                             bRelocAttempted = true;
                             bOK = Relocalization();
                         }
+                        // Epipolar-bridge recovery (see TrackWithEpipolarBridge()):
+                        // last resort before the reset path -- when KLT and reloc
+                        // both fail because we're in NEW territory (nothing to
+                        // recover against), CREATE new geometry against the last
+                        // keyframe to keep THIS map alive instead of resetting.
+                        // On success it sets mState=OK and inserts a KF itself.
+                        if(!bOK)
+                            bOK = TrackWithEpipolarBridge();
                         // [recently-lost] TEMPORARY diagnostic, see DEBUGGING.md
                         // part 18 -- confirms/refutes whether the ~3s recovery
                         // window is structurally unable to succeed for young/
@@ -2704,8 +2713,29 @@ void Tracking::MonocularInitialization()
         }
         else
         {
-            fprintf(stderr, "[mono-init] reconstruct FAILED id=%lu ref id=%lu nmatches=%d meanDisparityPx=%.1f -- keeping reference, retrying next frame\n",
-                    mCurrentFrame.mnId, mInitialFrame.mnId, nmatches, meanDisparity);
+            // Stuck-stale-reference fix (seq01 highway): the reference is only
+            // ever advanced when nmatches drops below 100, but on a fast
+            // forward-motion sequence reconstruct keeps FAILING (low lateral
+            // parallax -> degenerate essential matrix) while nmatches stays
+            // high, so the reference froze at one frame and every later frame
+            // retried against it with an ever-growing, useless baseline (ref
+            // stuck ~1000 frames back, disparity ~400px, 1007 consecutive
+            // fails, zero maps built). Once the matched disparity exceeds a
+            // sane baseline, the two views are past the usable range -- drop
+            // the stale reference and re-seed from the current frame so init
+            // keeps trying fresh, reasonable-baseline pairs instead of one
+            // hopeless old one. kMaxInitDisparityPx is generous (a good init
+            // runs ~15-100px, see the SUCCESS logs) so this only fires on
+            // clearly-stale references, not on a still-healthy retry.
+            constexpr double kMaxInitDisparityPx = 150.0;
+            const char *action = "keeping reference, retrying next frame";
+            if(meanDisparity > kMaxInitDisparityPx)
+            {
+                mbReadyToInitializate = false; // re-seed reference next frame
+                action = "reference too stale (disparity>150px) -- re-seeding";
+            }
+            fprintf(stderr, "[mono-init] reconstruct FAILED id=%lu ref id=%lu nmatches=%d meanDisparityPx=%.1f -- %s\n",
+                    mCurrentFrame.mnId, mInitialFrame.mnId, nmatches, meanDisparity, action);
         }
     }
 }
@@ -4306,6 +4336,272 @@ bool Tracking::TrackWithKLT()
             mCurrentFrame.mnId, nKltTracked, nInliers, nmatches, nGood, nmatchesMap, (int)bMatch);
 
     return bMatch;
+}
+
+bool Tracking::TrackWithSQPnP()
+{
+    // Full replacement for TrackWithKLT (user request, "bỏ KLT hẳn"): track
+    // exactly like the custom SlamWorker pipeline. Structure mirrors the
+    // real TrackWithMotionModel() (SearchByProjection + PoseOptimization);
+    // the one change is that a robust SQPnP RANSAC solve over the
+    // appearance-verified correspondences supplies the pose seed (and its
+    // geometric inlier set) instead of the raw constant-velocity guess,
+    // matching that pipeline's SQPnP-primary design. No optical flow.
+    ORBmatcher matcher(0.9, true);
+
+    UpdateLastFrame();
+
+    // Pose prior for the projection search window: constant velocity if we
+    // have one, else constant position (last frame's pose).
+    if(mbVelocity)
+        mCurrentFrame.SetPose(mVelocity * mLastFrame.GetPose());
+    else
+        mCurrentFrame.SetPose(mLastFrame.GetPose());
+
+    fill(mCurrentFrame.mvpMapPoints.begin(), mCurrentFrame.mvpMapPoints.end(),
+         static_cast<MapPoint*>(NULL));
+
+    const bool bMono = (mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR);
+    int th = (mSensor==System::STEREO) ? 7 : 15;
+    // 4-arg SearchByProjection: pure pose-projected search, KLT-prediction
+    // args left at their nullptr defaults (no optical flow).
+    int nmatches = matcher.SearchByProjection(mCurrentFrame, mLastFrame, th, bMono);
+    if(nmatches < 20)
+    {
+        fill(mCurrentFrame.mvpMapPoints.begin(), mCurrentFrame.mvpMapPoints.end(),
+             static_cast<MapPoint*>(NULL));
+        nmatches = matcher.SearchByProjection(mCurrentFrame, mLastFrame, 2*th, bMono);
+    }
+    if(nmatches < 20)
+    {
+        fprintf(stderr, "[sqpnp-track-diag] id=%lu projMatches=%d<20 -- FAIL\n",
+                mCurrentFrame.mnId, nmatches);
+        return false;
+    }
+
+    // Gather the appearance-verified 2D-3D correspondences and solve SQPnP
+    // RANSAC. solvePnPRansac's own inlier set replaces the constant-velocity
+    // pose's implicit trust in every projection match.
+    std::vector<cv::Point3f> objPts;
+    std::vector<cv::Point2f> imgPts;
+    std::vector<int> corrIdx;
+    objPts.reserve(nmatches); imgPts.reserve(nmatches); corrIdx.reserve(nmatches);
+    for(int i=0; i<mCurrentFrame.N; i++)
+    {
+        MapPoint* pMP = mCurrentFrame.mvpMapPoints[i];
+        if(pMP && !mCurrentFrame.mvbOutlier[i])
+        {
+            Eigen::Vector3f Pw = pMP->GetWorldPos();
+            objPts.emplace_back(Pw(0), Pw(1), Pw(2));
+            imgPts.push_back(mCurrentFrame.mvKeysUn[i].pt);
+            corrIdx.push_back(i);
+        }
+    }
+
+    int nSqInliers = 0;
+    if(static_cast<int>(objPts.size()) >= 6)
+    {
+        cv::Mat rvec, tvec, inliers;
+        bool ok = false;
+        try {
+            ok = cv::solvePnPRansac(objPts, imgPts, mCurrentFrame.mK, cv::Mat(),
+                                    rvec, tvec, false, 300, 3.0f, 0.99, inliers,
+                                    cv::SOLVEPNP_SQPNP);
+        } catch(const cv::Exception&) {
+            ok = false;
+        }
+        if(ok && inliers.rows >= 6)
+        {
+            nSqInliers = inliers.rows;
+            // Adopt the SQPnP pose (rvec/tvec are world->camera) as the
+            // PoseOptimization seed -- build a 4x4 and use the same
+            // Sophus::SE3f(Matrix4f) path TrackWithKLT uses.
+            cv::Mat Rcw_cv;
+            cv::Rodrigues(rvec, Rcw_cv);
+            Eigen::Matrix4f eigTcw = Eigen::Matrix4f::Identity();
+            for(int r=0; r<3; r++)
+            {
+                for(int c=0; c<3; c++)
+                    eigTcw(r,c) = static_cast<float>(Rcw_cv.at<double>(r,c));
+                eigTcw(r,3) = static_cast<float>(tvec.at<double>(r));
+            }
+            mCurrentFrame.SetPose(Sophus::SE3f(eigTcw));
+
+            // Drop the RANSAC-rejected correspondences before the g2o refine.
+            std::vector<bool> keep(corrIdx.size(), false);
+            for(int r=0; r<inliers.rows; r++)
+                keep[static_cast<size_t>(inliers.at<int>(r))] = true;
+            for(size_t k=0; k<corrIdx.size(); k++)
+                if(!keep[k])
+                    mCurrentFrame.mvpMapPoints[corrIdx[k]] = static_cast<MapPoint*>(NULL);
+        }
+        // else: fall through on the constant-velocity pose + all matches;
+        // PoseOptimization below is then exactly TrackWithMotionModel's path,
+        // so this is never worse than the motion-model tracker.
+    }
+
+    Optimizer::PoseOptimization(&mCurrentFrame);
+
+    // Outlier bookkeeping -- identical to TrackWithMotionModel().
+    int nmatchesMap = 0;
+    for(int i=0; i<mCurrentFrame.N; i++)
+    {
+        if(mCurrentFrame.mvpMapPoints[i])
+        {
+            if(mCurrentFrame.mvbOutlier[i])
+            {
+                MapPoint* pMP = mCurrentFrame.mvpMapPoints[i];
+                mCurrentFrame.mvpMapPoints[i] = static_cast<MapPoint*>(NULL);
+                mCurrentFrame.mvbOutlier[i] = false;
+                if(i < mCurrentFrame.Nleft)
+                    pMP->mbTrackInView = false;
+                else
+                    pMP->mbTrackInViewR = false;
+                pMP->mnLastFrameSeen = mCurrentFrame.mnId;
+                nmatches--;
+            }
+            else if(mCurrentFrame.mvpMapPoints[i]->Observations()>0)
+                nmatchesMap++;
+        }
+    }
+
+    const bool bMatch = nmatchesMap>=10;
+    fprintf(stderr, "[sqpnp-track-diag] id=%lu projMatches=%d sqpnpInliers=%d nmatchesMap=%d accept=%d\n",
+            mCurrentFrame.mnId, nmatches, nSqInliers, nmatchesMap, (int)bMatch);
+
+    if(mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+        return true;
+    return bMatch;
+}
+
+bool Tracking::TrackWithEpipolarBridge()
+{
+    // See Tracking.h's doc comment. All geometric checks happen BEFORE any
+    // KeyFrame/MapPoint is created, so a failure returns cleanly with no
+    // half-built map state.
+    if(!mpLastKeyFrame || mpLastKeyFrame->isBad())
+        return false;
+    if(mCurrentFrame.mDescriptors.empty() || mpLastKeyFrame->mDescriptors.empty())
+        return false;
+
+    const std::vector<cv::KeyPoint>& kf1Keys = mpLastKeyFrame->mvKeysUn; // view 1 = last KF
+    const std::vector<cv::KeyPoint>& f2Keys  = mCurrentFrame.mvKeysUn;   // view 2 = current frame
+
+    // 1) Appearance match last-KF <-> current frame. RootSIFT float
+    //    descriptors -> L2 + Lowe ratio, mutual-uniqueness on the train side.
+    //    vMatches12[i] = current keypoint matched to last-KF keypoint i (or -1).
+    std::vector<int> vMatches12(kf1Keys.size(), -1);
+    int nMatched = 0;
+    {
+        cv::BFMatcher bf(cv::NORM_L2);
+        std::vector<std::vector<cv::DMatch>> knn;
+        bf.knnMatch(mpLastKeyFrame->mDescriptors, mCurrentFrame.mDescriptors, knn, 2);
+        std::vector<bool> usedTrain(f2Keys.size(), false);
+        for(size_t i=0;i<knn.size();i++)
+        {
+            if(knn[i].size()<2) continue;
+            if(knn[i][0].distance < 0.75f*knn[i][1].distance)
+            {
+                const int q = knn[i][0].queryIdx, j = knn[i][0].trainIdx;
+                if(q>=0 && q<(int)kf1Keys.size() && j>=0 && j<(int)f2Keys.size() && !usedTrain[j])
+                {
+                    vMatches12[q] = j;
+                    usedTrain[j] = true;
+                    nMatched++;
+                }
+            }
+        }
+    }
+    if(nMatched < 50)
+    {
+        fprintf(stderr, "[bridge] id=%lu matches=%d<50 -- SKIP\n", mCurrentFrame.mnId, nMatched);
+        return false;
+    }
+
+    // 2) Two-view E/H reconstruction. T21 = current-from-last (unit scale);
+    //    vP3D in the last-KF camera frame (unit scale).
+    Sophus::SE3f T21;
+    std::vector<cv::Point3f> vP3D;
+    std::vector<bool> vbTri;
+    if(!mpCamera->ReconstructWithTwoViews(kf1Keys, f2Keys, vMatches12, T21, vP3D, vbTri))
+    {
+        fprintf(stderr, "[bridge] id=%lu reconstruct FAIL -- SKIP\n", mCurrentFrame.mnId);
+        return false;
+    }
+
+    // 3) Scale anchor: match the new points' median depth to the last KF's
+    //    existing scene median depth (metric, map scale). No step-size guess.
+    std::vector<float> depths;
+    depths.reserve(vP3D.size());
+    for(size_t i=0;i<vMatches12.size();i++)
+        if(vMatches12[i]>=0 && i<vbTri.size() && vbTri[i] && vP3D[i].z>0.0f)
+            depths.push_back(vP3D[i].z);
+    if(depths.size() < 20)
+    {
+        fprintf(stderr, "[bridge] id=%lu triangulated=%zu<20 -- SKIP\n", mCurrentFrame.mnId, depths.size());
+        return false;
+    }
+    std::nth_element(depths.begin(), depths.begin()+depths.size()/2, depths.end());
+    const float reconMedian = depths[depths.size()/2];
+    const float targetMedian = mpLastKeyFrame->ComputeSceneMedianDepth(2);
+    if(!(reconMedian>1e-6f) || !(targetMedian>1e-6f))
+    {
+        fprintf(stderr, "[bridge] id=%lu bad median recon=%.4f target=%.4f -- SKIP\n",
+                mCurrentFrame.mnId, reconMedian, targetMedian);
+        return false;
+    }
+    const float scale = targetMedian / reconMedian;
+
+    // 4) World poses. Tlw = last KF world pose; Twl = its inverse.
+    const Sophus::SE3f Tlw = mpLastKeyFrame->GetPose();
+    const Sophus::SE3f Twl = mpLastKeyFrame->GetPoseInverse();
+    Sophus::SE3f T21s = T21;
+    T21s.translation() *= scale;
+    mCurrentFrame.SetPose(T21s * Tlw); // current-from-world
+
+    // 5) All checks passed -- create the current KeyFrame + new MapPoints in
+    //    the ACTIVE map (CreateInitialMapMonocular's API pattern).
+    Map* pMap = mpAtlas->GetCurrentMap();
+    KeyFrame* pKFcur = new KeyFrame(mCurrentFrame, pMap, mpKeyFrameDB);
+    pKFcur->ComputeBoW();
+    mpAtlas->AddKeyFrame(pKFcur);
+
+    int nCreated = 0;
+    for(size_t i=0;i<vMatches12.size();i++)
+    {
+        const int j = vMatches12[i];
+        if(j<0 || i>=vbTri.size() || !vbTri[i] || vP3D[i].z<=0.0f)
+            continue;
+        const Eigen::Vector3f Xc(vP3D[i].x*scale, vP3D[i].y*scale, vP3D[i].z*scale);
+        const Eigen::Vector3f Xw = Twl * Xc;
+        MapPoint* pMP = new MapPoint(Xw, pKFcur, pMap);
+        pMP->AddObservation(mpLastKeyFrame, i);
+        pMP->AddObservation(pKFcur, j);
+        mpLastKeyFrame->AddMapPoint(pMP, i);
+        pKFcur->AddMapPoint(pMP, j);
+        pMP->ComputeDistinctiveDescriptors();
+        pMP->UpdateNormalAndDepth();
+        mpAtlas->AddMapPoint(pMP);
+        mCurrentFrame.mvpMapPoints[j] = pMP;
+        mCurrentFrame.mvbOutlier[j] = false;
+        nCreated++;
+    }
+
+    mpLastKeyFrame->UpdateConnections();
+    pKFcur->UpdateConnections();
+
+    // Hand the new KF to LocalMapping and advance the keyframe bookkeeping so
+    // the normal NeedNewKeyFrame() path doesn't also insert one this frame.
+    mpLocalMapper->InsertKeyFrame(pKFcur);
+    mnLastKeyFrameId = mCurrentFrame.mnId;
+    mpLastKeyFrame = pKFcur;
+    mpReferenceKF = pKFcur;
+    mCurrentFrame.mpReferenceKF = pKFcur;
+
+    mState = OK;
+    fprintf(stderr, "[bridge] id=%lu SUCCESS matches=%d created=%d scale=%.3f (recon=%.3f target=%.3f)\n",
+            mCurrentFrame.mnId, nMatched, nCreated, scale, reconMedian, targetMedian);
+    return true;
 }
 
 bool Tracking::Relocalization()
