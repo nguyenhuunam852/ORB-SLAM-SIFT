@@ -196,6 +196,11 @@ else
     BUILD_DIR="${WORK_DIR}/build"
 fi
 
+if [ "${BUILD_ONLY:-0}" = "1" ]; then
+    echo "=== BUILD_ONLY=1 -- skipping [7/7] locate-dataset-and-run, build finished ==="
+    exit 0
+fi
+
 echo "=== [7/7] Locate KITTI dataset and run ==="
 DEFAULT_SEQ="${KITTI_SEQ_NUM:-00}" # which sequence to default to when auto-detecting
 if [ -z "${KITTI_SEQ_DIR:-}" ]; then
