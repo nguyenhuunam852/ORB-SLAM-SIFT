@@ -2141,6 +2141,20 @@ void Tracking::Track()
                 }
                 else if (mState == LOST)
                 {
+                    // Epipolar-bridge, LOST-path attempt (Kaggle seq00 finding):
+                    // most maps die YOUNG (<10 KFs) so the OK->tracking-fail
+                    // path sends them straight to LOST, bypassing the
+                    // RECENTLY_LOST branch where the bridge above lives -- 405
+                    // "Fail to track local map" -> 317 resets, bridge fired only
+                    // 45x. Try the bridge here too, before giving up the map, so
+                    // young maps get the same keep-alive chance. On success it
+                    // sets mState=OK + inserts a KF; just continue (no reset).
+                    if(TrackWithEpipolarBridge())
+                    {
+                        fprintf(stderr, "[bridge] id=%lu LOST-path rescue -- map kept alive\n",
+                                mCurrentFrame.mnId);
+                        return;
+                    }
 
                     Verbose::PrintMess("A new map is started...", Verbose::VERBOSITY_NORMAL);
 
