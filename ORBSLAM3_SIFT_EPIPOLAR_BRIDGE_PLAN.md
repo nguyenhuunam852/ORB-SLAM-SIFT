@@ -100,3 +100,48 @@ Mirrors `recoverViaEpipolar()` + `CreateInitialMapMonocular()`'s map-creation pa
 Per-sequence coverage (tracked/total) AND ATE. A result counts only if it holds across
 BOTH local sequences — a seq00 win that regresses seq01 is NOT success (the standing
 lesson from the custom-pipeline generalization work).
+
+## Results table — SQPnP + init-fix + epipolar bridge (Kaggle, CudaSIFT GPU, nFeatures=5000)
+
+Commit `ca00d94` bundles all three changes (SQPnP tracker + mono-init stale-reference
+fix + epipolar bridge), so the "new" column below is the combined recipe. The
+"baseline" column is the pre-commit fail-fast state (KLT + reset, no bridge) — take it
+from the last Kaggle run at the same nFeatures, or re-run once with the pre-`ca00d94`
+tree (`git stash`/checkout `ca00d94^`) for a matched comparison.
+
+**Metrics to fill (extract from each run's stdout):**
+- `Coverage` = summed aligned fragment pathLen / GT path length (`[fragment … pathLen=…]`
+  lines summed, over `GT path length`). Report meters and %.
+- `ATE` = per-fragment RMSE (`[fragment … ATE(rmse/…)]`); note worst fragment + whether
+  any exceeds the 20 m budget.
+- `Resets` = `grep -c 'A new map is started\|Reseting current map'`.
+- `Bridge` = `grep -c '\[bridge\].*SUCCESS'` (fires that kept a map alive; 0 = bridge
+  never helped, e.g. a sequence that never reaches RECENTLY_LOST).
+- `Init%` = `mono-init SUCCESS` / (`SUCCESS`+`reconstruct FAILED`) — did the stale-ref fix
+  raise it on seq01?
+
+| Seq | Config | Coverage (m / %) | ATE (worst frag / budget) | Resets | Bridge SUCCESS | Init% | Notes |
+|----|--------|------------------|---------------------------|--------|----------------|-------|-------|
+| 00 | baseline (KLT, reset) |  |  |  | 0 |  | prior fail-fast |
+| 00 | **new (SQPnP+bridge+initfix)** |  |  |  |  |  |  |
+| 01 | baseline (KLT, reset) |  |  |  | 0 |  | highway, prior |
+| 01 | **new (SQPnP+bridge+initfix)** |  |  |  |  |  | watch init% + degeneracy |
+| 02 | baseline |  |  |  | 0 |  |  |
+| 02 | **new** |  |  |  |  |  |  |
+| 05 | baseline |  |  |  | 0 |  |  |
+| 05 | **new** |  |  |  |  |  |  |
+| 08 | baseline |  |  |  | 0 |  |  |  |
+| 08 | **new** |  |  |  |  |  |  |  |
+
+**Local (CPU cv::SIFT, nFeatures=5000) reference points already measured this session:**
+- seq01 baseline (KLT): coverage ~255 m / 2451 m (10.4%), 39 resets, 3 fragments (ATE 0.5–1.9 m/frag).
+- seq01 new: INCONCLUSIVE — stuck in mono-init (bridge never reached; the init-fix + SQPnP
+  are what target this, re-measure with `ca00d94`).
+- seq00 new (partial, killed at ~42%): bridge fired 316× @ 99% success; resets still
+  accrued in the hard zone (~64 by frame 1917) — coverage impact needs a full run.
+
+**Open question the table should answer:** does the bridge's map-keep-alive raise *coverage*
+even where reset *count* stays near baseline (longer-lived maps between resets)? And does
+SQPnP+init-fix rescue seq01's init failure? If resets stay high on hard zones, the next
+lever is wiring the bridge into the `LOST` path too (for maps that die with <10 KFs and
+currently bypass the RECENTLY_LOST/bridge path).
