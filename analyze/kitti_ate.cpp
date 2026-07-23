@@ -679,6 +679,42 @@ int main(int argc, char *argv[])
         }
     }
 
+    // argv[60]/[61]: override local-BA pose-prior rot/trans weights (item 41
+    // Backend #1 sweep -- the map-side analogue of the argv58/59 FE leash).
+    // Use '-' or 0 to keep defaults (20/3). Lower = looser prior = local BA
+    // free to move window poses further from their PnP-tracked value (more
+    // map-fit accuracy, more scale-collapse risk). Detector-agnostic; requires
+    // 'localba' (argv25) to be active to have any effect.
+    if (argc > 61) {
+        const double br = std::atof(argv[60]);
+        const double bt = std::atof(argv[61]);
+        if (br > 0.0 || bt > 0.0) {
+            worker.setLocalBaPosePriorWeights(br, bt);
+            std::fprintf(stderr, "[config] local-BA pose-prior weights override rot=%.2f trans=%.2f\n", br, bt);
+        }
+    }
+
+    // argv[62]: pass the literal word 'retriangulate' (item 41 Backend #2) to
+    // re-triangulate each landmark from ALL its keyframe observations once it
+    // has kRetriangulateMinViews of them (multi-view DLT via
+    // triangulateMultiView(), accepting only a strict reprojection improvement)
+    // instead of leaving it at its original 2-view estimate. Better map quality
+    // -> local BA can tight-fit without backfiring (item 40 lever). Meaningful
+    // with 'localba'; detector-agnostic.
+    if (argc > 62 && std::strcmp(argv[62], "retriangulate") == 0) {
+        worker.setRetriangulateEnabled(true);
+        std::fprintf(stderr, "[config] multi-view landmark re-triangulation enabled\n");
+    }
+
+    // argv[63]: pass the literal word 'parallaxgate' (item 41 Backend #2) to
+    // reject newly-triangulated landmarks whose two viewing rays are nearly
+    // parallel (kMinTriangulationParallaxCos, ~1 deg) -- noise-dominated depth
+    // that pollutes the map. Creation-time complement to 'retriangulate'.
+    if (argc > 63 && std::strcmp(argv[63], "parallaxgate") == 0) {
+        worker.setParallaxGateEnabled(true);
+        std::fprintf(stderr, "[config] triangulation parallax gate enabled\n");
+    }
+
     if (argc > 9 && std::strcmp(argv[9], "groundplane") == 0) {
         worker.setGroundPlaneEnabled(true);
         std::fprintf(stderr, "[config] ground-plane scale correction enabled (VISO2-M-style fallback)\n");
@@ -786,6 +822,8 @@ int main(int argc, char *argv[])
     app.exec();
 
     std::fprintf(stderr, "[fuse] landmarks merged this run: %lld\n", worker.fusedLandmarkCount());
+    std::fprintf(stderr, "[retri] landmarks re-triangulated this run: %lld\n",
+                 worker.retriangulatedLandmarkCount());
 
     const QVector<QPointF> &traj = worker.trajectoryPoints();
     const QVector<int> &frames = worker.trajectoryFrameIndices();

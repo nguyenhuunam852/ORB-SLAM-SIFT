@@ -391,6 +391,19 @@ constexpr double kMaxObservationReprojErrorPixels = 8.0; // recordLandmarkObserv
                                                           // unverified matches silently corrupting BA's
                                                           // data associations, not just diluting it, was
                                                           // the real remaining problem.
+constexpr int kRetriangulateMinViews = 3; // item 41 Backend #2 (setRetriangulateEnabled()): only re-
+                                          // triangulate a landmark once it has at least this many
+                                          // distinct-keyframe observations. 2 is the trivial creation
+                                          // case (already what triangulate() did); the first genuine
+                                          // multi-view improvement is at 3. Untuned.
+constexpr double kMinTriangulationParallaxCos = 0.99985; // item 41 Backend #2 (setParallaxGateEnabled()):
+                                                          // reject a newly-triangulated landmark whose two
+                                                          // viewing rays are more parallel than this cosine
+                                                          // (~1.0 deg). Low-parallax points triangulate to
+                                                          // noisy, far, unreliable depths that pollute the
+                                                          // map and make tight map-fitting backfire (item
+                                                          // 40); real ORB-SLAM3 culls with the same
+                                                          // cosParallax test. Untuned.
 constexpr double kLoopVerifiedResidualWeight = 25.0; // squared-cost multiplier for the one observation
                                                       // per loop closure that's the actual PnP-RANSAC-
                                                       // verified correspondence proving the loop (see
@@ -523,13 +536,16 @@ constexpr int kCovisibilityMapStaleFrames = 24; // see m_framesSinceCovisibility
 // 8/10's observation-density fix unlocked real multi-view constraint in a window that previously only
 // had ownership-only landmarks to work with -- a bigger window may now capture meaningfully more of it,
 // untested before this session (see DEBUGGING.md).
-constexpr double kLocalBaPosePriorRotWeight = 20.0; // radians -- deliberately tight: rotation is
-                                                     // well-observed even in a small window (unlike
-                                                     // scale), so there's little reason to let it drift
-constexpr double kLocalBaPosePriorTransWeight = 3.0; // world-units -- looser than rotation (real local
-                                                      // corrections need room to move translation a
-                                                      // bit) but still firmly bounded, unlike the prior
-                                                      // attempt's unconstrained-until-window-exit scheme
+// kLocalBaPosePriorRotWeight/kLocalBaPosePriorTransWeight moved to
+// SlamWorker::m_localBaPosePriorRotWeight/m_localBaPosePriorTransWeight (see
+// setLocalBaPosePriorWeights()) -- were fixed constexpr here, now runtime-
+// overridable (item 41 Backend #1, argv60/61); default values (20 radians /
+// 3 world-units) unchanged. Same soft-prior-on-every-window-pose principle the
+// FE pose-only leash (setPoseOnlyLeashWeights) just validated at the per-frame
+// level: rotation kept deliberately tight (well-observed even in a small window,
+// unlike scale), translation looser (real local corrections need room to move it
+// a bit) but still firmly bounded -- unlike the reverted attempt's
+// unconstrained-until-window-exit scheme. Untuned until this sweep.
 
 constexpr double kGlobalBaLoopPosePriorRotWeight = 50.0; // runGlobalBundleAdjustment()'s v3 (DEBUGGING.md
                                                           // item 32): SOFT prior pulling newKfIdx toward
@@ -3492,9 +3508,36 @@ void SlamWorker::insertKeyframe(const std::vector<cv::KeyPoint> &kps, const cv::
                                           // kf.keypointLandmarkId (matches[i].trainIdx is only available
                                           // inside this loop, over the unfiltered triangulated/valid index
                                           // space)
+    // Backend #2 parallax gate (setParallaxGateEnabled()): world-space camera
+    // centers of the two views this batch was triangulated from (reference and
+    // current keyframe, C = -R^T t), used to reject low-parallax points below.
+    // Cheap to precompute once outside the per-point loop.
+    cv::Mat parallaxC1, parallaxC2;
+    if (m_parallaxGateEnabled) {
+        parallaxC1 = -m_refR.t() * m_refT;
+        parallaxC2 = -R.t() * t;
+    }
     for (size_t i = 0; i < triangulated.size(); ++i) {
         if (!valid[i])
             continue;
+        // Backend #2 (item 41): cull points whose two viewing rays are nearly
+        // parallel -- their triangulated depth is dominated by pixel noise, so
+        // admitting them pollutes the map that local BA then tight-fits to
+        // (item 40's backfire mechanism). Same cosParallax test real ORB-SLAM3
+        // uses at landmark creation. Default off; enable via 'parallaxgate'.
+        if (m_parallaxGateEnabled) {
+            const cv::Point3f &X = triangulated[i];
+            const cv::Vec3d r1(X.x - parallaxC1.at<double>(0), X.y - parallaxC1.at<double>(1),
+                               X.z - parallaxC1.at<double>(2));
+            const cv::Vec3d r2(X.x - parallaxC2.at<double>(0), X.y - parallaxC2.at<double>(1),
+                               X.z - parallaxC2.at<double>(2));
+            const double n1 = cv::norm(r1), n2 = cv::norm(r2);
+            if (n1 < 1e-9 || n2 < 1e-9)
+                continue;
+            const double cosParallax = r1.dot(r2) / (n1 * n2);
+            if (cosParallax > kMinTriangulationParallaxCos)
+                continue; // rays too parallel -- unreliable depth, reject
+        }
         newPoints.push_back(triangulated[i]);
         newImagePoints.push_back(pts2[i]); // this keyframe's own 2D observation of the point
         newDescriptors.push_back(descriptors.row(matches[i].trainIdx));
@@ -3634,6 +3677,12 @@ void SlamWorker::insertKeyframe(const std::vector<cv::KeyPoint> &kps, const cv::
     // (SearchInNeighbors() before LocalBundleAdjustment()).
     if (m_landmarkFuseEnabled)
         fuseWindowLandmarks(static_cast<int>(m_keyframeHistory.size()) - 1);
+
+    // Backend #2 (item 41): re-triangulate this keyframe's landmarks from all
+    // their views now that the keyframe is in m_keyframeHistory and fuse has
+    // extended observation coverage -- but BEFORE local BA, so BA refines from
+    // the better-conditioned seed. No-op unless 'retriangulate' is set.
+    retriangulateKeyframeLandmarks(static_cast<int>(m_keyframeHistory.size()) - 1);
 
     if (m_localBundleAdjustmentEnabled && m_localBaHardAnchorEnabled)
         runLocalBundleAdjustmentHardAnchor();
@@ -3867,6 +3916,87 @@ void SlamWorker::recordLandmarkObservations(int keyframeIndex, const std::vector
     }
 }
 
+// Backend #2 (item 41, setRetriangulateEnabled()): re-triangulate every
+// landmark this just-inserted keyframe observes that now has enough cross-
+// keyframe views, from ALL of them (multi-view DLT via triangulateMultiView()),
+// replacing the original 2-view estimate. Better map quality is the item-40
+// lever that lets local BA's soft-prior fit tightly without backfiring.
+//
+// MUST run AFTER the keyframe is appended to m_keyframeHistory: the current
+// keyframe's own observations carry its history index, and triangulateMultiView()
+// dereferences m_keyframeHistory[obs.first] for every view -- calling this
+// before the push (e.g. from inside recordLandmarkObservations) would index
+// one past the end.
+void SlamWorker::retriangulateKeyframeLandmarks(int keyframeIndex)
+{
+    if (!m_retriangulateEnabled)
+        return;
+    if (keyframeIndex < 0 || static_cast<size_t>(keyframeIndex) >= m_keyframeObservedLandmarkIds.size())
+        return;
+
+    // id -> rolling-map slot, built once for this keyframe's touched landmarks
+    // so the accepted position can be synced into m_mapPoints (parallel to
+    // m_mapPointIds) without a per-landmark scan -- same lookup local BA's
+    // write-back uses.
+    std::unordered_map<long long, size_t> mapIndexById;
+    mapIndexById.reserve(m_mapPointIds.size());
+    for (size_t i = 0; i < m_mapPointIds.size(); ++i)
+        mapIndexById[m_mapPointIds[i]] = i;
+
+    const auto meanReproj = [&](const cv::Point3f &X,
+                                const std::vector<std::pair<int, cv::Point2f>> &obs) -> double {
+        double sumSq = 0.0;
+        int views = 0;
+        for (const auto &o : obs) {
+            if (o.first < 0 || static_cast<size_t>(o.first) >= m_keyframeHistory.size())
+                continue;
+            const Keyframe &kf = m_keyframeHistory[static_cast<size_t>(o.first)];
+            const cv::Mat Xw = (cv::Mat_<double>(3, 1) << X.x, X.y, X.z);
+            const cv::Mat cp = kf.R * Xw + kf.t;
+            const double zz = cp.at<double>(2);
+            if (zz < 1e-3)
+                continue;
+            const double pu = m_intrinsics.fx * cp.at<double>(0) / zz + m_intrinsics.cx - o.second.x;
+            const double pv = m_intrinsics.fy * cp.at<double>(1) / zz + m_intrinsics.cy - o.second.y;
+            sumSq += pu * pu + pv * pv;
+            ++views;
+        }
+        return views ? std::sqrt(sumSq / views) : std::numeric_limits<double>::max();
+    };
+
+    // Copy the id list: the accepted-position write-backs below don't touch
+    // m_keyframeObservedLandmarkIds, but iterate a stable snapshot regardless.
+    const std::vector<long long> touched = m_keyframeObservedLandmarkIds[static_cast<size_t>(keyframeIndex)];
+    for (const long long id : touched) {
+        const auto obsIt = m_landmarkObservations.find(id);
+        if (obsIt == m_landmarkObservations.end() ||
+            obsIt->second.size() < static_cast<size_t>(kRetriangulateMinViews))
+            continue;
+        const auto posIt = m_landmarkPositions.find(id);
+        if (posIt == m_landmarkPositions.end())
+            continue;
+        bool triOk = false;
+        const cv::Point3f cand = triangulateMultiView(obsIt->second, triOk);
+        if (!triOk)
+            continue; // fails triangulateMultiView()'s own depth/reprojection gate
+        // Strict-improvement guard: triangulateMultiView() is a raw DLT with no
+        // robust loss, so accept it only if it reprojects BETTER than the
+        // current position across the SAME observations -- this can never
+        // regress a landmark local BA (Huber) already refined below the DLT
+        // optimum, making re-triangulation monotone and BA-safe.
+        if (meanReproj(cand, obsIt->second) >= meanReproj(posIt->second, obsIt->second))
+            continue;
+        posIt->second = cand;
+        const auto mapIt = mapIndexById.find(id);
+        if (mapIt != mapIndexById.end())
+            m_mapPoints[mapIt->second] = cand; // keep the rolling map in sync
+        // The owning keyframe's localMapPoints copy is left for the following
+        // local BA to re-sync -- the same out-of-window staleness tolerance
+        // local BA's own write-back already has.
+        ++m_retriangulatedLandmarkCount;
+    }
+}
+
 void SlamWorker::refineLocalKeyframes()
 {
     const int start = std::max(0, static_cast<int>(m_keyframeHistory.size()) - kLocalRefineWindow);
@@ -3980,8 +4110,8 @@ bool SlamWorker::runLocalBundleAdjustment()
         // kLocalBaWindowKeyframes's doc comment for why a single
         // hard-anchor scheme (the reverted prior attempt) let scale
         // collapse over hundreds of highly-overlapping windows.
-        problem.AddResidualBlock(PosePriorCost::Create(priors[static_cast<size_t>(i)], kLocalBaPosePriorRotWeight,
-                                                         kLocalBaPosePriorTransWeight),
+        problem.AddResidualBlock(PosePriorCost::Create(priors[static_cast<size_t>(i)], m_localBaPosePriorRotWeight,
+                                                         m_localBaPosePriorTransWeight),
                                   nullptr, poses[static_cast<size_t>(i)].data());
     }
 

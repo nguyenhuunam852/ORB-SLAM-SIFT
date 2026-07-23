@@ -520,6 +520,25 @@ public slots:
     // so far this run -- for end-of-run reporting (see kitti_ate.cpp).
     long long fusedLandmarkCount() const { return m_fusedLandmarkCount; }
 
+    // Default off (item 41 Backend #2): once a landmark accrues
+    // kRetriangulateMinViews cross-keyframe observations, re-triangulate its
+    // position from ALL of them (triangulateMultiView()) rather than leaving
+    // it at the original 2-view estimate, accepting only a strict reprojection
+    // improvement over the current position (BA-safe). Feeds local BA a
+    // better-conditioned map -- the item-40 map-quality lever toward <20m.
+    void setRetriangulateEnabled(bool enabled) { m_retriangulateEnabled = enabled; }
+
+    // Default off (item 41 Backend #2): reject a newly-triangulated landmark
+    // whose two viewing rays are more parallel than kMinTriangulationParallaxCos
+    // (~1 deg) -- low-parallax points have noise-dominated depth that pollutes
+    // the map. The creation-time complement to setRetriangulateEnabled().
+    void setParallaxGateEnabled(bool enabled) { m_parallaxGateEnabled = enabled; }
+
+    // Running total of landmarks whose position was improved by a multi-view
+    // re-triangulation this run (see setRetriangulateEnabled()) -- end-of-run
+    // reporting, mirrors fusedLandmarkCount().
+    long long retriangulatedLandmarkCount() const { return m_retriangulatedLandmarkCount; }
+
     // Default off: periodically (every kCullingCheckIntervalKeyframes
     // insertions, see cullRedundantKeyframes()) builds a covisibility graph
     // from m_landmarkObservations (edge weight = landmarks two keyframes
@@ -739,6 +758,18 @@ public slots:
     {
         if (rot > 0.0) m_poseOnlyLeashRotWeight = rot;
         if (trans > 0.0) m_poseOnlyLeashTransWeight = trans;
+    }
+
+    // Override the soft pose-prior on every keyframe in the local-BA sliding
+    // window (item 41 Backend #1). This is the map-side analogue of the FE
+    // leash above: lower = looser prior = local BA free to move poses further
+    // from their pre-BA (PnP-tracked) value (more map-fit accuracy, more
+    // scale-collapse risk); higher = tighter = local BA barely corrects.
+    // Defaults (20 rot / 3 trans) match the original constexpr constants.
+    void setLocalBaPosePriorWeights(double rot, double trans)
+    {
+        if (rot > 0.0) m_localBaPosePriorRotWeight = rot;
+        if (trans > 0.0) m_localBaPosePriorTransWeight = trans;
     }
 
     // Default off: when on, trackFrame() inserts a new keyframe once the
@@ -1062,6 +1093,14 @@ private:
     void recordLandmarkObservations(int keyframeIndex, const std::vector<cv::KeyPoint> &kps,
                                      const cv::Mat &descriptors, const cv::Mat &R, const cv::Mat &t,
                                      std::vector<long long> &keypointLandmarkId);
+
+    // See setRetriangulateEnabled() (item 41 Backend #2). Re-triangulates each
+    // landmark keyframeIndex observes that has >= kRetriangulateMinViews views,
+    // from ALL of them, accepting only a strict reprojection improvement. Must
+    // be called AFTER the keyframe is in m_keyframeHistory (triangulateMultiView
+    // dereferences it) and BEFORE local BA (which then refines the better seed).
+    // No-op unless m_retriangulateEnabled.
+    void retriangulateKeyframeLandmarks(int keyframeIndex);
 
     // See setLandmarkFuseEnabled(). Simplified adaptation of real
     // ORB-SLAM3's LocalMapping::SearchInNeighbors()/ORBmatcher::Fuse():
@@ -1464,6 +1503,8 @@ private:
     bool m_poseOnlyLeashEnabled = false; // see setPoseOnlyLeashEnabled() (item 41 #2)
     double m_poseOnlyLeashRotWeight = 30.0; // see setPoseOnlyLeashWeights(); defaults = the item-41 constants
     double m_poseOnlyLeashTransWeight = 5.0;
+    double m_localBaPosePriorRotWeight = 20.0; // see setLocalBaPosePriorWeights() (item 41 Backend #1); was the
+    double m_localBaPosePriorTransWeight = 3.0; // kLocalBaPosePrior* constexpr, default values unchanged
     bool m_qualityDrivenKeyframesEnabled = false; // see setQualityDrivenKeyframesEnabled()
 
     // Parallel to m_mapPoints -- a stable ID per live map point, surviving
@@ -1667,6 +1708,14 @@ private:
     bool m_landmarkFuseEnabled = false;
     bool m_landmarkFuseMergeEnabled = false;
     long long m_fusedLandmarkCount = 0;
+
+    // See setRetriangulateEnabled()/setParallaxGateEnabled() (item 41 Backend
+    // #2). Both default off so the validated 41.8m recipe is unchanged unless
+    // explicitly opted in. m_retriangulatedLandmarkCount is a running total,
+    // reported at shutdown like m_fusedLandmarkCount.
+    bool m_retriangulateEnabled = false;
+    bool m_parallaxGateEnabled = false;
+    long long m_retriangulatedLandmarkCount = 0;
 
     bool m_keyframeCullingEnabled = false; // see setKeyframeCullingEnabled()
     int m_minTrackInliers = 10; // see setMinTrackInliers(); must match kMinTrackInliers's own default in

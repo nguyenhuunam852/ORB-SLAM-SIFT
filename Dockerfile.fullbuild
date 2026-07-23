@@ -1,0 +1,59 @@
+# Full build of the CUSTOM kitti_ate pipeline (root CMakeLists target) so the
+# Backend #1/#2 changes can actually run on KITTI seq00. Mirrors kaggle/
+# setup_and_run.sh's dependency strategy (build ORB-SLAM3's own g2o from source;
+# override the dev-machine-specific CMake cache paths) but targets kitti_ate,
+# not the ORB_SLAM3_SIFT fork.
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake git pkg-config ca-certificates \
+        qt6-base-dev \
+        libopencv-dev \
+        libceres-dev \
+        libeigen3-dev \
+        libboost-dev libboost-serialization-dev \
+        libssl-dev libcurl4-openssl-dev libxml2-dev \
+        libgoogle-glog-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# ORB-SLAM3's own (modified) g2o, built from source -> /opt/g2o/lib/libg2o.so,
+# exactly the layout the root CMakeLists' g2o_ext IMPORTED target expects at
+# ${G2O_ROOT}/lib/libg2o.so. Same source setup_and_run.sh uses.
+RUN git clone --depth 1 https://github.com/UZ-SLAMLab/ORB_SLAM3.git /tmp/orbslam3_upstream \
+    && cp -r /tmp/orbslam3_upstream/Thirdparty/g2o /opt/g2o \
+    && mkdir -p /opt/g2o/build \
+    && cmake -S /opt/g2o -B /opt/g2o/build -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build /opt/g2o/build -j6 \
+    && test -f /opt/g2o/lib/libg2o.so
+
+# The root CMakeLists hardcodes ${CONDA_ENV_ROOT}/lib/libboost_serialization.so;
+# provide a prefix that resolves to the apt-installed multiarch copy.
+RUN mkdir -p /opt/bfix/lib \
+    && ln -sf /usr/lib/x86_64-linux-gnu/libboost_serialization.so /opt/bfix/lib/libboost_serialization.so
+
+COPY . /work
+WORKDIR /work
+
+# Recreate the two symlinks the Windows checkout can't materialize:
+#  - DBoW2 -> ../../DBoW2 (real vendored copy)
+#  - g2o   -> the g2o we just built (was an absolute symlink to the dev machine)
+RUN rm -f third_party/ORB_SLAM3/Thirdparty/DBoW2 \
+    && ln -s ../../DBoW2 third_party/ORB_SLAM3/Thirdparty/DBoW2 \
+    && rm -f third_party/ORB_SLAM3/Thirdparty/g2o \
+    && ln -s /opt/g2o third_party/ORB_SLAM3/Thirdparty/g2o
+
+# Configure with the dev-machine paths overridden, then build ONLY kitti_ate
+# (its deps: DBoW2, orbslam3_ext [28k lines, C++14], g2o_ext). BUILD_JOBS kept
+# at 6 -- the Eigen/g2o-heavy ORB-SLAM3 TUs use ~1GB RAM each; -j8 risks OOM in
+# the Docker VM (setup_and_run.sh defaults to 4 for the same reason).
+ARG BUILD_JOBS=6
+RUN cmake -S . -B build_docker \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DG2O_ROOT=/opt/g2o \
+        -DBOOST_INCLUDE_DIR=/usr/include \
+        -DCONDA_ENV_ROOT=/opt/bfix \
+        -DORBSLAM3_VOCAB_PATH=/nonexistent/ORBvoc.txt \
+    && cmake --build build_docker --target kitti_ate -j"${BUILD_JOBS}" \
+    && test -x build_docker/kitti_ate \
+    && echo "BUILD OK: build_docker/kitti_ate"

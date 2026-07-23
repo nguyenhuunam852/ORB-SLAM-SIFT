@@ -51,25 +51,41 @@ soft-prior local BA's live-pose leash, and resolves the deep item-40 tension:
 - **FE leash-weight sweep** (argv58/59): {60/10, 20/3.5, 15/2.5, 8/1.5} vs default
   30/5=41.8m. Looser = more pose-only refinement (accuracy) at higher collapse risk.
   RESULTS: _pending — fill in when the runs finish._
+- **Backend #1 + #2 implemented (2026-07-23), runs pending.** Code landed; all
+  three levers are default-OFF CLI flags so the validated 41.8m recipe is byte-for-
+  byte unchanged unless opted in. Sweep/verify on the Linux box, fill in below.
+- **Retrained SIFT-DBoW2 vocabulary is now on disk** (`sift_dbow_vocab (2).txt`,
+  10 MB, header `10 5` = K=10/L=5 as trained). No longer an external blocker — see
+  the combined recipe.
+
+## Combined recipe (41.8m + new SIFT-DBoW2 vocab + backend knobs)
+Start from the exact 41.8m recipe and set these positional slots (all others as in
+the 41.8m recipe above; `-` = leave default):
+
+| argv | word / value              | what it does                                        |
+|------|---------------------------|-----------------------------------------------------|
+| 36/37| `siftdbow <vocab-path>`   | new retrained vocab for loop-candidate search. Takes precedence over `vlad` (argv30/31) when both are passed — so you can drop it onto the 41.8m recipe as-is. RootSIFT-trained, matches this build. |
+| 60/61| `<rot> <trans>`           | **Backend #1**: local-BA pose-prior weights (default 20/3). `-`/0 = keep. Lower = looser = local BA moves poses further from PnP (more map-fit accuracy, more collapse risk). |
+| 62   | `retriangulate`           | **Backend #2a**: re-triangulate a landmark from ALL its views once it has ≥3, accept only a strict reprojection improvement (BA-safe). Reported at shutdown: `[retri] landmarks re-triangulated this run`. |
+| 63   | `parallaxgate`            | **Backend #2b**: reject new landmarks whose two rays are <~1° apart (noise-dominated depth). |
+
+The vocab path has a space and `(2)` — quote it: `"sift_dbow_vocab (2).txt"` (or
+rename to `sift_dbow_vocab.txt`). Sweep 60/61 like the FE leash; try
+`retriangulate`/`parallaxgate` independently first, then together, so each lever's
+effect on ATE + scale + coverage is attributable.
 
 ## NEXT (user's plan: finish FE, then Backend)
 1. **FE**: pick best leash weights from the sweep above; if a looser weight beats
    41.8m without collapse, that's the new FE optimum.
-2. **Backend #1 (cheap, same soft-prior principle the leash just validated)**:
-   tune local-BA pose-prior weights `kLocalBaPosePriorRotWeight`(20)/`TransWeight`(3)
-   — never tuned. Consider making them CLI-overridable like the leash weights.
-3. **Backend #2 (deeper, the real lever toward <20m)**: landmark/map QUALITY —
-   multi-view triangulation of NEW landmarks (reuse `triangulateMultiView()`, today
-   only used in the closed Phase-B merge) and/or a triangulation quality gate.
-   Item 40 established better map quality is what lets tight-fitting stop
-   backfiring — this is the gate to the <20m goal.
-
-## Open external item
-- **Retrained SIFT-DBoW2 vocabulary** (K=10/L=5/stride=3, trained on Kaggle, file
-  currently left at the office). When available: drop in as `sift_dbow_vocab.txt`,
-  run with `siftdbow <path>` (argv36/37). Cleaner loop-closure candidate search →
-  fewer map-compressing garbage loops → directly helps the map-quality lever.
-  Must be RootSIFT-trained (notebook's FRootSift adapter does this).
+2. **Backend #1** (DONE, code): local-BA pose-prior weights are now CLI-overridable
+   via argv60/61 (`setLocalBaPosePriorWeights()`), mirroring the leash weights.
+   Same soft-prior principle the leash validated, applied map-side. Sweep pending.
+3. **Backend #2** (DONE, code): map QUALITY — `retriangulate` (argv62) re-triangulates
+   NEW landmarks multi-view via `triangulateMultiView()` (was only used in the closed
+   Phase-B merge), `parallaxgate` (argv63) culls low-parallax garbage at creation.
+   Item 40's <20m gate: better map quality lets tight-fitting stop backfiring. The
+   new vocab feeds the same lever (cleaner loops → fewer map-compressing corrections).
+   Runs pending.
 
 ## Standing reference points
 - Real ORB-SLAM3 (vendored, `third_party/ORB_SLAM3`): 6.4–10.7m on seq00.
