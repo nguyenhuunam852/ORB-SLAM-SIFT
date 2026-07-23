@@ -197,24 +197,46 @@ else
 fi
 
 echo "=== [7/7] Locate KITTI dataset and run ==="
+DEFAULT_SEQ="${KITTI_SEQ_NUM:-00}" # which sequence to default to when auto-detecting
 if [ -z "${KITTI_SEQ_DIR:-}" ]; then
-    # Common layouts for a Kaggle "KITTI odometry" dataset attachment.
-    CANDIDATE=$(find /kaggle/input -maxdepth 6 -type d -iname "image_0" 2>/dev/null | head -1)
-    if [ -n "${CANDIDATE}" ]; then
-        KITTI_SEQ_DIR="$(dirname "${CANDIDATE}")"
-    fi
+    # Common layouts for a Kaggle "KITTI odometry" dataset attachment. Print
+    # every candidate found (not just the first) so a wrong pick or an
+    # outright miss is diagnosable from the log, not a silent guess.
+    mapfile -t CANDIDATES < <(find /kaggle/input -maxdepth 8 -type d -iname "image_0" 2>/dev/null | sort)
+    echo "image_0 candidates under /kaggle/input:"
+    printf '  %s\n' "${CANDIDATES[@]}"
+    # Prefer one whose path names the default sequence (.../00/image_0 or
+    # .../sequences/00/image_0) if more than one candidate exists.
+    PICK=""
+    for c in "${CANDIDATES[@]}"; do
+        case "$(dirname "$c")" in
+            */"${DEFAULT_SEQ}") PICK="$c"; break ;;
+        esac
+    done
+    [ -z "${PICK}" ] && PICK="${CANDIDATES[0]:-}"
+    [ -n "${PICK}" ] && KITTI_SEQ_DIR="$(dirname "${PICK}")"
 fi
 if [ -z "${KITTI_SEQ_DIR:-}" ] || [ ! -d "${KITTI_SEQ_DIR}/image_0" ]; then
     echo "Could not find a KITTI sequence directory (expected .../image_0/*.png)." >&2
-    echo "Attach a KITTI odometry (sequence 00) Kaggle Dataset, or set KITTI_SEQ_DIR explicitly." >&2
+    echo "Attach a KITTI odometry Kaggle Dataset, or set KITTI_SEQ_DIR explicitly." >&2
     exit 1
 fi
+SEQ_NUM="$(basename "${KITTI_SEQ_DIR}")" # e.g. ".../sequences/00" -> "00"
 if [ -z "${KITTI_POSES:-}" ]; then
-    CANDIDATE=$(find /kaggle/input -maxdepth 6 -type f -iname "00.txt" -path "*poses*" 2>/dev/null | head -1)
+    # Ground-truth poses are NOT bundled in every Kaggle KITTI-odometry
+    # dataset attachment (e.g. xuehu12/kitti-odometry-gray ships images
+    # only) -- try the dataset first, then fall back to this repo's own
+    # kitti_poses/<seq>.txt (always present, confirmed byte-identical to
+    # the official KITTI poses for the sequences checked locally).
+    CANDIDATE=$(find /kaggle/input -maxdepth 8 -type f -iname "${SEQ_NUM}.txt" -path "*poses*" 2>/dev/null | sort | head -1)
+    if [ -z "${CANDIDATE}" ] && [ -f "${REPO_ROOT}/kitti_poses/${SEQ_NUM}.txt" ]; then
+        CANDIDATE="${REPO_ROOT}/kitti_poses/${SEQ_NUM}.txt"
+        echo "No poses/${SEQ_NUM}.txt found under /kaggle/input -- using this repo's kitti_poses/${SEQ_NUM}.txt instead."
+    fi
     KITTI_POSES="${CANDIDATE:-}"
 fi
 if [ -z "${KITTI_POSES:-}" ] || [ ! -f "${KITTI_POSES}" ]; then
-    echo "Could not find ground-truth poses/00.txt." >&2
+    echo "Could not find ground-truth poses/${SEQ_NUM}.txt (checked /kaggle/input and ${REPO_ROOT}/kitti_poses/)." >&2
     echo "Set KITTI_POSES explicitly (needed for the final ATE report; tracking itself still runs without it)." >&2
     exit 1
 fi
