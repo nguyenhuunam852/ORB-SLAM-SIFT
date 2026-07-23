@@ -94,4 +94,106 @@ double estimateScaleCorrection(const std::vector<cv::Point3f> &pointsInCameraFra
     return config.knownCameraHeight / estimatedHeight;
 }
 
+bool estimateGroundNormal(const std::vector<cv::Point3f> &pointsInCameraFrame, cv::Vec3d &normalOut)
+{
+    // Road-candidate selection: below the camera (Y > 0 in the X-right,
+    // Y-down, Z-forward frame), in front (Z > 0), and among the nearer half
+    // by L1 distance (same near-half filter estimateCameraHeight() uses --
+    // distant triangulations are noisy and less likely genuine road). This
+    // deliberately does NOT assume a normal (that is what we are solving
+    // for); it only assumes the road is roughly below and ahead, which is
+    // true regardless of the exact pitch.
+    std::vector<cv::Point3f> cand;
+    cand.reserve(pointsInCameraFrame.size());
+    std::vector<double> l1;
+    l1.reserve(pointsInCameraFrame.size());
+    for (const auto &p : pointsInCameraFrame) {
+        if (p.y <= 0.0f || p.z <= 0.0f)
+            continue; // above camera or behind it -- not a road point
+        cand.push_back(p);
+        l1.push_back(std::abs(p.x) + std::abs(p.y) + std::abs(p.z));
+    }
+    const int m = static_cast<int>(cand.size());
+    if (m < 8)
+        return false; // too few road candidates to fit a plane robustly
+
+    std::vector<double> sortedL1 = l1;
+    std::sort(sortedL1.begin(), sortedL1.end());
+    const double medianL1 = sortedL1[static_cast<size_t>(m) / 2];
+    std::vector<cv::Point3f> road;
+    road.reserve(static_cast<size_t>(m) / 2 + 1);
+    for (int i = 0; i < m; ++i)
+        if (l1[static_cast<size_t>(i)] <= medianL1)
+            road.push_back(cand[static_cast<size_t>(i)]);
+    const int r = static_cast<int>(road.size());
+    if (r < 8)
+        return false;
+
+    // Deterministic RANSAC plane fit (fixed LCG seed -- no Math.random /
+    // std::rand nondeterminism, so a given point set always calibrates to
+    // the same normal). Inlier threshold is scaled to the point cloud's own
+    // size (medianL1/50), the same adaptive scale estimateCameraHeight()'s
+    // consensus vote uses.
+    const double inlierThresh = medianL1 / 50.0;
+    unsigned int lcg = 0x9e3779b9u; // fixed seed
+    auto nextRand = [&lcg]() {
+        lcg = lcg * 1664525u + 1013904223u;
+        return lcg;
+    };
+
+    cv::Vec3d bestNormal(0.0, -1.0, 0.0);
+    int bestInliers = -1;
+    const int kIterations = 200;
+    for (int it = 0; it < kIterations; ++it) {
+        const cv::Point3f &a = road[nextRand() % static_cast<unsigned int>(r)];
+        const cv::Point3f &b = road[nextRand() % static_cast<unsigned int>(r)];
+        const cv::Point3f &c = road[nextRand() % static_cast<unsigned int>(r)];
+        const cv::Vec3d ab(b.x - a.x, b.y - a.y, b.z - a.z);
+        const cv::Vec3d ac(c.x - a.x, c.y - a.y, c.z - a.z);
+        cv::Vec3d nrm = ab.cross(ac);
+        const double len = cv::norm(nrm);
+        if (len < 1e-9)
+            continue; // collinear sample
+        nrm /= len;
+        const double d = -(nrm[0] * a.x + nrm[1] * a.y + nrm[2] * a.z);
+        int inliers = 0;
+        for (const auto &p : road) {
+            const double dist = std::abs(nrm[0] * p.x + nrm[1] * p.y + nrm[2] * p.z + d);
+            if (dist <= inlierThresh)
+                ++inliers;
+        }
+        if (inliers > bestInliers) {
+            bestInliers = inliers;
+            bestNormal = nrm;
+        }
+    }
+    if (bestInliers < 6)
+        return false;
+
+    // Orient the normal to point UP towards the camera (ny < 0), matching
+    // GroundPlaneConfig::groundNormalCam's convention.
+    if (bestNormal[1] > 0.0)
+        bestNormal = -bestNormal;
+    normalOut = bestNormal;
+    return true;
+}
+
+double pitchDegreesFromNormal(const cv::Vec3d &normal)
+{
+    cv::Vec3d n = normal;
+    const double len = cv::norm(n);
+    if (len < 1e-9)
+        return 0.0;
+    n /= len;
+    // Level normal is (0,-1,0). A downward (nose-down) pitch tilts it
+    // towards +Z: (0, -cos, sin). So pitch = atan2(nz, -ny), signed.
+    return std::atan2(n[2], -n[1]) * 180.0 / M_PI;
+}
+
+cv::Mat groundNormalFromPitchDegrees(double pitchDeg)
+{
+    const double th = pitchDeg * M_PI / 180.0;
+    return (cv::Mat_<double>(3, 1) << 0.0, -std::cos(th), std::sin(th));
+}
+
 } // namespace ground_plane_scale

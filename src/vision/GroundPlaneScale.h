@@ -65,4 +65,31 @@ double estimateCameraHeight(const std::vector<cv::Point3f> &pointsInCameraFrame,
 // estimateCameraHeight() itself returns unavailable/degenerate.
 double estimateScaleCorrection(const std::vector<cv::Point3f> &pointsInCameraFrame, const GroundPlaneConfig &config);
 
+// Pitch calibration (item 46): estimateCameraHeight() above ASSUMES a
+// ground normal (config.groundNormalCam, default the level-camera
+// (0,-1,0)) and only estimates the scalar height. That level-camera
+// assumption is the documented residual bias (~9x scale error, DEBUGGING.md
+// Session 6) -- KITTI's real rig has a small downward pitch. This function
+// MEASURES the ground normal instead: a deterministic RANSAC plane fit over
+// the near, below-camera ("road candidate") subset of the points, oriented
+// so the normal points up towards the camera (ny < 0). Returns false (no
+// write to normalOut) if there are too few road candidates or the fit is
+// degenerate. Aggregating normalOut's pitch across many frames (median)
+// gives the calibrated camera pitch to bake into GroundPlaneConfig, once,
+// offline. Camera frame convention: X=right, Y=down, Z=forward, so a road
+// point is at large positive Y and the level normal is (0,-1,0).
+bool estimateGroundNormal(const std::vector<cv::Point3f> &pointsInCameraFrame, cv::Vec3d &normalOut);
+
+// The signed downward pitch (degrees) a unit ground normal implies, i.e.
+// the angle that tilts (0,-1,0) into `normal` about the camera X axis.
+// Positive = nose-down (normal tilted towards +Z), matching
+// GroundPlaneConfig::groundNormalCam's own doc comment. Pure geometry, no
+// road-point dependency -- the readout side of estimateGroundNormal().
+double pitchDegreesFromNormal(const cv::Vec3d &normal);
+
+// Inverse of pitchDegreesFromNormal(): the unit ground normal for a given
+// downward pitch, (0, -cos, sin) in the camera frame. Used to set
+// GroundPlaneConfig::groundNormalCam from a calibrated pitch value.
+cv::Mat groundNormalFromPitchDegrees(double pitchDeg);
+
 } // namespace ground_plane_scale

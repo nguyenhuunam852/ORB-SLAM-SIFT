@@ -322,6 +322,65 @@ public slots:
     void setGroundPlaneEnabled(bool enabled) { m_groundPlaneEnabled = enabled; }
     void setGroundPlaneConfig(const ground_plane_scale::GroundPlaneConfig &config) { m_groundPlaneConfig = config; }
 
+    // Continuous ground-plane scale anchor: unlike setGroundPlaneEnabled()'s
+    // one-shot bootstrap-only correction, this re-estimates the ground-
+    // plane-implied scale from EVERY window's latest keyframe during
+    // runLocalBundleAdjustment() and adds a soft PosePriorCost nudging just
+    // that keyframe's translation toward the corrected step length from the
+    // previous keyframe (rotation untouched). Self-referential: doesn't need
+    // m_groundPlaneConfig's height/pitch assumption to be exactly right,
+    // because the same assumption is already baked into the metric scale
+    // from bootstrap onward -- if nothing has drifted since, the implied
+    // factor stays near 1.0 regardless of the assumption's absolute
+    // accuracy; it only pulls when this keyframe's implied height has
+    // drifted from that baseline. Purpose: give per-frame reprojection-only
+    // mechanisms (the leash, retriangulate) a scale signal that doesn't
+    // depend on a loop closure ever happening, unlike
+    // setPoseOnlyLeashRequireLoopAnchorEnabled()/
+    // setRetriangulateRequireLoopAnchorEnabled()'s gate-and-wait fix.
+    // Default off; default weight mirrors m_localBaPosePriorTransWeight's
+    // order of magnitude, soft by design (see PosePriorCost's doc comment).
+    // Default on (current behavior). When off, a tracking-loss frame does
+    // NOT fall back to recoverViaEpipolar() -- it is simply skipped (the
+    // trajectory holds its last pose) and the next frame retries the normal
+    // full-map PnP in trackFrame(). Rationale (item 45): recoverViaEpipolar()
+    // rescales its unit-length recovered baseline by the m_avgStepScale
+    // heuristic, which is an INDEPENDENT scale-injection path separate from
+    // the map geometry -- on a sparse/loop-free sequence (seq01) it was
+    // measured dragging global scale toward collapse (0.10) every time it
+    // fired. Real ORB-SLAM3 has no such per-loss rescaling (scale propagates
+    // purely through the map + BA); this flag makes the pipeline behave the
+    // same way, to test whether removing that heuristic reduces intra-
+    // sequence scale drift.
+    void setRecoverViaEpipolarEnabled(bool enabled) { m_recoverViaEpipolarEnabled = enabled; }
+
+    void setGroundPlaneContinuousEnabled(bool enabled) { m_groundPlaneContinuousEnabled = enabled; }
+    void setGroundPlaneContinuousWeight(double weight)
+    {
+        if (weight > 0.0)
+            m_groundPlaneContinuousWeight = weight;
+    }
+
+    // Sets the ground-plane pitch (degrees, nose-down positive) used by BOTH
+    // the bootstrap (setGroundPlaneEnabled()) and continuous
+    // (setGroundPlaneContinuousEnabled()) corrections -- replaces the
+    // hardcoded level-camera (pitch 0) assumption with the calibrated value
+    // (see setGroundPlaneCalibEnabled() / item 46). Recomputes
+    // m_groundPlaneConfig.groundNormalCam.
+    void setGroundPlanePitchDegrees(double pitchDeg)
+    {
+        m_groundPlaneConfig.groundNormalCam = ground_plane_scale::groundNormalFromPitchDegrees(pitchDeg);
+    }
+
+    // Pitch-calibration collection mode (item 46, offline/one-time). When on,
+    // every local-BA call fits the ground normal from the window's latest
+    // keyframe's triangulated points (ground_plane_scale::estimateGroundNormal)
+    // and accumulates the implied pitch. calibratedGroundPitchDegrees()
+    // returns the median at the end of a run. Does NOT change tracking; pure
+    // measurement.
+    void setGroundPlaneCalibEnabled(bool enabled) { m_groundPlaneCalibEnabled = enabled; }
+    double calibratedGroundPitchDegrees(int &nSamplesOut) const;
+
     // Default off (new/expensive, and untested against every sequence this
     // codebase has been run on so far -- the existing interpolated
     // correction in tryLoopClosure() remains the fallback when this is
@@ -527,6 +586,41 @@ public slots:
     // improvement over the current position (BA-safe). Feeds local BA a
     // better-conditioned map -- the item-40 map-quality lever toward <20m.
     void setRetriangulateEnabled(bool enabled) { m_retriangulateEnabled = enabled; }
+
+    // Override kRetriangulateMinViews (default 3) -- item 42. Lower = more
+    // landmarks eligible for re-triangulation (less multi-view support per
+    // one, noisier); higher = fewer, better-conditioned candidates.
+    void setRetriangulateMinViews(int views)
+    {
+        if (views >= 2) m_retriangulateMinViews = views;
+    }
+
+    // Default off, meaningful only with setRetriangulateEnabled(): item 43.
+    // GENERALIZATION FIX for a real regression found when validating
+    // retriangulate on a held-out sequence: on KITTI seq01 (long, near-
+    // straight highway) retriangulate-alone regressed the 122.6m SQPnP
+    // baseline to 186.6m, scale overshooting to 1.59 -- the multi-view DLT's
+    // own reprojection-error accept gate does NOT catch a narrow-baseline,
+    // poorly-conditioned solve (near-collinear camera path -> weak depth
+    // constraint despite a locally-low reprojection error). When on, rejects
+    // a re-triangulation candidate whose BEST (least-parallel) observing
+    // view pair still has near-parallel rays, using the same
+    // kMinTriangulationParallaxCos threshold setParallaxGateEnabled() already
+    // uses at landmark creation -- applied here to the ACCEPT decision
+    // instead.
+    void setRetriangulateParallaxGateEnabled(bool enabled) { m_retriangulateParallaxGateEnabled = enabled; }
+
+    // Default off, meaningful only with setRetriangulateEnabled(): item 43
+    // (2nd attempt -- see retriangulateLandmarkIds()'s own doc comment for
+    // why the parallax gate above was the wrong hypothesis). Same fix as
+    // setPoseOnlyLeashRequireLoopAnchorEnabled(), applied to retriangulate:
+    // no landmark position update is accepted until at least one loop
+    // closure has committed, since reprojection-error-only optimization is
+    // scale-blind and otherwise just locks in whatever bias already exists.
+    void setRetriangulateRequireLoopAnchorEnabled(bool enabled)
+    {
+        m_retriangulateRequireLoopAnchorEnabled = enabled;
+    }
 
     // Default off (item 41 Backend #2): reject a newly-triangulated landmark
     // whose two viewing rays are more parallel than kMinTriangulationParallaxCos
@@ -750,6 +844,24 @@ public slots:
     // drift/collapse away from that robust estimate. The per-frame analogue
     // of soft-prior local BA's live-pose leash.
     void setPoseOnlyLeashEnabled(bool enabled) { m_poseOnlyLeashEnabled = enabled; }
+
+    // Default off, meaningful only with setPoseOnlyLeashEnabled(): item 43.
+    // GENERALIZATION FIX for a real regression found when validating the
+    // leash on a held-out sequence: on KITTI seq00 the leash measured a
+    // genuine win (37.003m vs 51.273m baseline), but on seq01 (zero loop
+    // closures over 1101 frames) the SAME config LOST badly to plain SQPnP
+    // (265.4m leash-alone vs 122.6m baseline, scale collapsed to 0.097) --
+    // with nothing to periodically re-anchor it, the leash's per-frame
+    // refinement bias compounds unboundedly over a long loop-free stretch.
+    // When this is on, pose-only refinement is skipped entirely (falling
+    // through to the untouched, safe SQPnP result) until at least one real
+    // loop closure has committed -- on a sequence that never gets one, this
+    // makes the whole leash mechanism a no-op, degrading gracefully to
+    // baseline instead of regressing below it.
+    void setPoseOnlyLeashRequireLoopAnchorEnabled(bool enabled)
+    {
+        m_poseOnlyLeashRequireLoopAnchorEnabled = enabled;
+    }
 
     // Override the leash strength (item 41 #2). Lower = looser leash = more
     // pose-only refinement (more accuracy, more collapse risk); higher =
@@ -1102,6 +1214,21 @@ private:
     // No-op unless m_retriangulateEnabled.
     void retriangulateKeyframeLandmarks(int keyframeIndex);
 
+    // Item 42: re-triangulates the UNION of every landmark touched by any
+    // keyframe in [oldKfIdx, newKfIdx] -- called after a loop closure's
+    // correction/loop-BA lands, when fuse has given many of them the
+    // densest cross-keyframe observation set of the whole run. Same
+    // enable flag/guard and accept-only-if-strictly-better rule as
+    // retriangulateKeyframeLandmarks(); shares its implementation via
+    // retriangulateLandmarkIds().
+    void retriangulateWindowLandmarks(int oldKfIdx, int newKfIdx);
+
+    // Shared implementation both retriangulate entry points above delegate
+    // to: attempts triangulateMultiView() re-triangulation for each id in
+    // `ids` with >= kRetriangulateMinViews observations, accepting only a
+    // strict reprojection-error improvement. No-op unless m_retriangulateEnabled.
+    void retriangulateLandmarkIds(const std::vector<long long> &ids);
+
     // See setLandmarkFuseEnabled(). Simplified adaptation of real
     // ORB-SLAM3's LocalMapping::SearchInNeighbors()/ORBmatcher::Fuse():
     // for every landmark newKeyframeIndex just triangulated
@@ -1420,6 +1547,11 @@ private:
     bool m_groundPlaneEnabled = false;
     ground_plane_scale::GroundPlaneConfig m_groundPlaneConfig{
         (cv::Mat_<double>(3, 1) << 0.0, -1.0, 0.0), 1.65};
+    bool m_recoverViaEpipolarEnabled = true; // see setRecoverViaEpipolarEnabled() (item 45)
+    bool m_groundPlaneContinuousEnabled = false; // see setGroundPlaneContinuousEnabled()
+    double m_groundPlaneContinuousWeight = 1.0;
+    bool m_groundPlaneCalibEnabled = false; // see setGroundPlaneCalibEnabled() (item 46)
+    std::vector<double> m_groundPlaneCalibPitches; // per-keyframe fitted pitch samples (degrees)
 
     // Cumulative real-world distance (meters) from frame 0 to frame i, from
     // OXTS forward-velocity data (loadOxtsSpeeds()); index 0 is always 0.0.
@@ -1501,6 +1633,8 @@ private:
     bool m_loopQualityGateEnabled = false; // see setLoopQualityGateEnabled() (item 40)
     bool m_poseOnlyStepGateEnabled = false; // see setPoseOnlyStepGateEnabled() (item 41 #1)
     bool m_poseOnlyLeashEnabled = false; // see setPoseOnlyLeashEnabled() (item 41 #2)
+    bool m_poseOnlyLeashRequireLoopAnchorEnabled = false; // see setPoseOnlyLeashRequireLoopAnchorEnabled() (item 43)
+    bool m_everHadLoopClosure = false; // set true in tryLoopClosure() on a committed correction
     double m_poseOnlyLeashRotWeight = 30.0; // see setPoseOnlyLeashWeights(); defaults = the item-41 constants
     double m_poseOnlyLeashTransWeight = 5.0;
     double m_localBaPosePriorRotWeight = 20.0; // see setLocalBaPosePriorWeights() (item 41 Backend #1); was the
@@ -1716,6 +1850,10 @@ private:
     bool m_retriangulateEnabled = false;
     bool m_parallaxGateEnabled = false;
     long long m_retriangulatedLandmarkCount = 0;
+    int m_retriangulateMinViews = 3; // see setRetriangulateMinViews(); default matches the old
+                                      // kRetriangulateMinViews constexpr
+    bool m_retriangulateParallaxGateEnabled = false; // see setRetriangulateParallaxGateEnabled() (item 43)
+    bool m_retriangulateRequireLoopAnchorEnabled = false; // see setRetriangulateRequireLoopAnchorEnabled()
 
     bool m_keyframeCullingEnabled = false; // see setKeyframeCullingEnabled()
     int m_minTrackInliers = 10; // see setMinTrackInliers(); must match kMinTrackInliers's own default in

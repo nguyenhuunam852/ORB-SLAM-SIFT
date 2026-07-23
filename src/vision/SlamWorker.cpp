@@ -391,11 +391,6 @@ constexpr double kMaxObservationReprojErrorPixels = 8.0; // recordLandmarkObserv
                                                           // unverified matches silently corrupting BA's
                                                           // data associations, not just diluting it, was
                                                           // the real remaining problem.
-constexpr int kRetriangulateMinViews = 3; // item 41 Backend #2 (setRetriangulateEnabled()): only re-
-                                          // triangulate a landmark once it has at least this many
-                                          // distinct-keyframe observations. 2 is the trivial creation
-                                          // case (already what triangulate() did); the first genuine
-                                          // multi-view improvement is at 3. Untuned.
 constexpr double kMinTriangulationParallaxCos = 0.99985; // item 41 Backend #2 (setParallaxGateEnabled()):
                                                           // reject a newly-triangulated landmark whose two
                                                           // viewing rays are more parallel than this cosine
@@ -3349,6 +3344,27 @@ bool SlamWorker::trackFrame(const std::vector<cv::KeyPoint> &kps, const cv::Mat 
         return false;
     }
 
+    // Snapshot the ROBUST SQPnP pose BEFORE the leash refinement below can
+    // overwrite R/tvec (item 44 -- "decouple accurate output from stable
+    // prediction"). Diagnosis: the leash-refined pose is more ACCURATE (it's
+    // what the trajectory/map/keyframes use, via the local R/tvec passed to
+    // pushTrajectoryPoint()/insertKeyframe() below -- unchanged) but on a
+    // sparse-feature sequence (seq01, ~150-200 kps/frame) it carries per-
+    // frame JITTER from fitting a thin, scale-inconsistent map. m_currR/
+    // m_currT feed ONLY the next frame's constant-velocity prediction
+    // (the guided-search projection window + the motion model), and velocity
+    // is a pose DIFFERENCE, which amplifies that jitter -- mis-aiming the
+    // guided-search window and starving tracking: measured 285 match-count
+    // track-fails on seq01 leash-only vs 53 baseline / 51 retriangulate-only,
+    // the isolated cause of leash's seq01 regression. Fix: in leash mode feed
+    // the guided search + velocity from the STABLE SQPnP pose (robustPredR/T
+    // here) while the trajectory/map keep the accurate refined pose. On
+    // seq00 SQPnP ~= refined so prediction barely changes (37.003m expected
+    // to hold); on seq01 the prediction stops drifting. Non-leash modes are
+    // byte-identical (the else branch below still uses R/tvec exactly as
+    // before).
+    cv::Mat robustPredR = R.clone(), robustPredT = tvec.clone();
+
     // Pose-only BA refinement on the SQPnP RECOVERY path (see
     // optimizePoseOnly()/setPoseOnlyBaEnabled(), DEBUGGING.md item 36):
     // only when this frame fell back to SQPnP (motion model already ran
@@ -3356,7 +3372,16 @@ bool SlamWorker::trackFrame(const std::vector<cv::KeyPoint> &kps, const cv::Mat 
     // the SQPnP minimal-sample pose against ALL matched map points with the
     // map fixed + iterative outlier rejection. Falls through to the SQPnP
     // result untouched if it declines, so it can only help.
-    if (m_poseOnlyBaEnabled && m_poseOnlyLoopSuppressFrames == 0 && !trackedByMotionModel && ok) {
+    // Item 43: when leash mode requires a loop-closure anchor, skip pose-only
+    // refinement entirely until at least one has fired -- see
+    // setPoseOnlyLeashRequireLoopAnchorEnabled()'s own doc comment. Falls
+    // through to the untouched SQPnP result, i.e. exactly baseline behavior,
+    // for every frame before the first anchor (or for the whole run on a
+    // sequence that never gets one, like KITTI seq01).
+    const bool leashAnchorOk =
+        !m_poseOnlyLeashEnabled || !m_poseOnlyLeashRequireLoopAnchorEnabled || m_everHadLoopClosure;
+    if (m_poseOnlyBaEnabled && m_poseOnlyLoopSuppressFrames == 0 && !trackedByMotionModel && ok &&
+        leashAnchorOk) {
         cv::Mat refinedR = R.clone(), refinedT = tvec.clone();
         int refinedInliers = inlierCount;
         // Leash mode (item 41 #2): anchor the refinement to the robust SQPnP
@@ -3448,14 +3473,22 @@ bool SlamWorker::trackFrame(const std::vector<cv::KeyPoint> &kps, const cv::Mat 
 
     // Update the constant-velocity estimate (see m_velocityR/m_velocityT's
     // doc comment) from the PREVIOUS m_currR/m_currT (this step's starting
-    // pose) to the just-accepted (R, tvec) -- i.e. "the motion this step
-    // just made", used to predict the NEXT step's guided-search block.
+    // pose) to the just-accepted pose -- i.e. "the motion this step just
+    // made", used to predict the NEXT step's guided-search block. In leash
+    // mode this uses the ROBUST SQPnP pose (robustPredR/T), NOT the refined
+    // one, so per-frame refinement jitter can't corrupt the prediction seed
+    // (item 44 -- see robustPredR's snapshot comment above). m_currR/m_currT
+    // therefore track the robust pose in leash mode; the trajectory + map
+    // still get the refined pose via the local R/tvec below (unchanged).
+    // Non-leash modes keep the exact original behavior (refined == primary).
+    const cv::Mat &predR = m_poseOnlyLeashEnabled ? robustPredR : R;
+    const cv::Mat &predT = m_poseOnlyLeashEnabled ? robustPredT : tvec;
     if (!m_currR.empty()) {
-        m_velocityR = R * m_currR.t();
-        m_velocityT = tvec - m_velocityR * m_currT;
+        m_velocityR = predR * m_currR.t();
+        m_velocityT = predT - m_velocityR * m_currT;
     }
-    m_currR = R;
-    m_currT = tvec;
+    m_currR = predR;
+    m_currT = predT;
 
     pushTrajectoryPoint(R, tvec);
 
@@ -3929,9 +3962,44 @@ void SlamWorker::recordLandmarkObservations(int keyframeIndex, const std::vector
 // one past the end.
 void SlamWorker::retriangulateKeyframeLandmarks(int keyframeIndex)
 {
+    if (keyframeIndex < 0 || static_cast<size_t>(keyframeIndex) >= m_keyframeObservedLandmarkIds.size())
+        return;
+    retriangulateLandmarkIds(m_keyframeObservedLandmarkIds[static_cast<size_t>(keyframeIndex)]);
+}
+
+void SlamWorker::retriangulateWindowLandmarks(int oldKfIdx, int newKfIdx)
+{
+    if (!m_retriangulateEnabled || oldKfIdx < 0 || newKfIdx < oldKfIdx ||
+        static_cast<size_t>(newKfIdx) >= m_keyframeObservedLandmarkIds.size())
+        return;
+    // Union of every landmark touched by any keyframe in the window --
+    // dedup via a set since the same landmark legitimately appears under
+    // several keyframes (that's the whole point of fuse's coverage
+    // extension). retriangulateLandmarkIds() itself dedups too (it's called
+    // from two entry points now), but building the union here keeps this
+    // call a single O(window) pass instead of O(window^2).
+    std::unordered_set<long long> ids;
+    for (int i = oldKfIdx; i <= newKfIdx; ++i)
+        for (long long id : m_keyframeObservedLandmarkIds[static_cast<size_t>(i)])
+            ids.insert(id);
+    retriangulateLandmarkIds(std::vector<long long>(ids.begin(), ids.end()));
+}
+
+void SlamWorker::retriangulateLandmarkIds(const std::vector<long long> &touched)
+{
     if (!m_retriangulateEnabled)
         return;
-    if (keyframeIndex < 0 || static_cast<size_t>(keyframeIndex) >= m_keyframeObservedLandmarkIds.size())
+    // Item 43 (setRetriangulateRequireLoopAnchorEnabled()): the parallax-gate
+    // fix (kept below, off by default) turned out to be the WRONG hypothesis
+    // -- measured WORSE on seq01 (312.4m, vs 186.6m unfixed). The right
+    // explanation, by analogy with the leash's identical failure and fix
+    // (item 43 #1): retriangulate only ever optimizes REPROJECTION error,
+    // which is scale-BLIND -- a self-consistent map at the WRONG metric
+    // scale still reprojects perfectly, so with no loop closure ever
+    // providing an independent scale measurement, retriangulate just locks
+    // in whatever scale bias already exists more confidently over time,
+    // exactly like the leash did. Gating acceptance the same way fixed it.
+    if (m_retriangulateRequireLoopAnchorEnabled && !m_everHadLoopClosure)
         return;
 
     // id -> rolling-map slot, built once for this keyframe's touched landmarks
@@ -3964,13 +4032,10 @@ void SlamWorker::retriangulateKeyframeLandmarks(int keyframeIndex)
         return views ? std::sqrt(sumSq / views) : std::numeric_limits<double>::max();
     };
 
-    // Copy the id list: the accepted-position write-backs below don't touch
-    // m_keyframeObservedLandmarkIds, but iterate a stable snapshot regardless.
-    const std::vector<long long> touched = m_keyframeObservedLandmarkIds[static_cast<size_t>(keyframeIndex)];
     for (const long long id : touched) {
         const auto obsIt = m_landmarkObservations.find(id);
         if (obsIt == m_landmarkObservations.end() ||
-            obsIt->second.size() < static_cast<size_t>(kRetriangulateMinViews))
+            obsIt->second.size() < static_cast<size_t>(m_retriangulateMinViews))
             continue;
         const auto posIt = m_landmarkPositions.find(id);
         if (posIt == m_landmarkPositions.end())
@@ -3979,6 +4044,50 @@ void SlamWorker::retriangulateKeyframeLandmarks(int keyframeIndex)
         const cv::Point3f cand = triangulateMultiView(obsIt->second, triOk);
         if (!triOk)
             continue; // fails triangulateMultiView()'s own depth/reprojection gate
+        // Item 43 (setRetriangulateParallaxGateEnabled()): reject a candidate
+        // whose BEST-conditioned view pair still has near-parallel rays --
+        // triangulateMultiView()'s own reprojection-error gate does NOT catch
+        // this (a narrow-baseline, poorly-conditioned solve can still show a
+        // low mean reprojection error while its DEPTH is essentially
+        // unconstrained). Found on KITTI seq01 (long, near-straight highway):
+        // retriangulate-alone regressed 122.6m baseline to 186.6m with scale
+        // OVERSHOOTING to 1.59 -- consistent with landmarks re-triangulated
+        // from views collected along a nearly-collinear camera path (weak
+        // parallax diversity, unlike seq00's turnier urban driving).
+        if (m_retriangulateParallaxGateEnabled) {
+            double bestCosParallax = 2.0; // sentinel above valid [-1,1] range = "no valid pair seen yet";
+                                           // tracks the MINIMUM cosine seen, i.e. the LEAST-parallel
+                                           // (best-conditioned) pair
+            for (size_t i = 0; i < obsIt->second.size(); ++i) {
+                const int kfI = obsIt->second[i].first;
+                if (kfI < 0 || static_cast<size_t>(kfI) >= m_keyframeHistory.size())
+                    continue;
+                const Keyframe &ki = m_keyframeHistory[static_cast<size_t>(kfI)];
+                const cv::Mat ci = -ki.R.t() * ki.t;
+                const cv::Vec3d ri(cand.x - ci.at<double>(0), cand.y - ci.at<double>(1),
+                                    cand.z - ci.at<double>(2));
+                const double ni = cv::norm(ri);
+                if (ni < 1e-9)
+                    continue;
+                for (size_t j = i + 1; j < obsIt->second.size(); ++j) {
+                    const int kfJ = obsIt->second[j].first;
+                    if (kfJ < 0 || static_cast<size_t>(kfJ) >= m_keyframeHistory.size())
+                        continue;
+                    const Keyframe &kj = m_keyframeHistory[static_cast<size_t>(kfJ)];
+                    const cv::Mat cj = -kj.R.t() * kj.t;
+                    const cv::Vec3d rj(cand.x - cj.at<double>(0), cand.y - cj.at<double>(1),
+                                        cand.z - cj.at<double>(2));
+                    const double nj = cv::norm(rj);
+                    if (nj < 1e-9)
+                        continue;
+                    const double cosParallax = ri.dot(rj) / (ni * nj);
+                    if (cosParallax < bestCosParallax)
+                        bestCosParallax = cosParallax;
+                }
+            }
+            if (bestCosParallax > kMinTriangulationParallaxCos)
+                continue; // even the best-conditioned view pair is too parallel -- reject
+        }
         // Strict-improvement guard: triangulateMultiView() is a raw DLT with no
         // robust loss, so accept it only if it reprojects BETTER than the
         // current position across the SAME observations -- this can never
@@ -4092,6 +4201,65 @@ bool SlamWorker::runLocalBundleAdjustment()
         priors[static_cast<size_t>(i - windowStart)] = poses[static_cast<size_t>(i - windowStart)];
     }
 
+    // Pitch-calibration collection (setGroundPlaneCalibEnabled(), item 46):
+    // fit the ground normal from the window's latest keyframe's own
+    // triangulated points and record the implied pitch. Pure measurement --
+    // no effect on tracking/BA. Reuses the same world->camera transform the
+    // continuous anchor below uses.
+    if (m_groundPlaneCalibEnabled && n >= 1) {
+        const Keyframe &latestKf = m_keyframeHistory[static_cast<size_t>(n - 1)];
+        std::vector<cv::Point3f> camFramePoints;
+        camFramePoints.reserve(latestKf.localMapPoints.size());
+        for (const cv::Point3f &p : latestKf.localMapPoints) {
+            const cv::Mat Xw = (cv::Mat_<double>(3, 1) << p.x, p.y, p.z);
+            const cv::Mat Xc = latestKf.R * Xw + latestKf.t;
+            camFramePoints.emplace_back(static_cast<float>(Xc.at<double>(0)), static_cast<float>(Xc.at<double>(1)),
+                                         static_cast<float>(Xc.at<double>(2)));
+        }
+        cv::Vec3d fittedNormal;
+        if (ground_plane_scale::estimateGroundNormal(camFramePoints, fittedNormal))
+            m_groundPlaneCalibPitches.push_back(ground_plane_scale::pitchDegreesFromNormal(fittedNormal));
+    }
+
+    // Continuous ground-plane scale anchor (setGroundPlaneContinuousEnabled(),
+    // item 43 3rd attempt): re-estimate the ground-plane-implied scale from
+    // the window's LATEST keyframe's own currently-triangulated landmarks,
+    // every local BA call, and prepare a soft translation-only prior nudging
+    // that keyframe's step length (from the previous window keyframe) toward
+    // the corrected value. See the header doc comment for why this doesn't
+    // need m_groundPlaneConfig's height/pitch assumption to be exactly
+    // right. Computed here (pre-BA snapshot) so the residual references the
+    // same pre-optimization state priors[] does; actually added to the
+    // problem below, alongside the standard per-window-pose prior loop.
+    bool gpPriorValid = false;
+    std::array<double, 6> gpPrior{};
+    if (m_groundPlaneContinuousEnabled && windowSize >= 2) {
+        const Keyframe &latestKf = m_keyframeHistory[static_cast<size_t>(n - 1)];
+        std::vector<cv::Point3f> camFramePoints;
+        camFramePoints.reserve(latestKf.localMapPoints.size());
+        for (const cv::Point3f &p : latestKf.localMapPoints) {
+            const cv::Mat Xw = (cv::Mat_<double>(3, 1) << p.x, p.y, p.z);
+            const cv::Mat Xc = latestKf.R * Xw + latestKf.t;
+            camFramePoints.emplace_back(static_cast<float>(Xc.at<double>(0)), static_cast<float>(Xc.at<double>(1)),
+                                         static_cast<float>(Xc.at<double>(2)));
+        }
+        const double gpFactor = ground_plane_scale::estimateScaleCorrection(camFramePoints, m_groundPlaneConfig);
+        // Reject unavailable (-1.0 sentinel) and implausible corrections --
+        // a continuous per-keyframe signal needs its own outlier guard so
+        // one degenerate frame's estimate can't yank the trajectory, unlike
+        // the bootstrap site which only ever applies gpFactor once.
+        if (gpFactor > 0.5 && gpFactor < 2.0) {
+            const int latestLocal = windowSize - 1;
+            gpPrior = poses[static_cast<size_t>(latestLocal)];
+            for (int k = 0; k < 3; ++k) {
+                const double tPrevK = poses[static_cast<size_t>(latestLocal - 1)][static_cast<size_t>(3 + k)];
+                const double tCurrK = poses[static_cast<size_t>(latestLocal)][static_cast<size_t>(3 + k)];
+                gpPrior[static_cast<size_t>(3 + k)] = tPrevK + (tCurrK - tPrevK) * gpFactor;
+            }
+            gpPriorValid = true;
+        }
+    }
+
     std::unordered_map<long long, std::array<double, 3>> landmarks;
     for (auto &entry : windowObservations) {
         if (entry.second.size() < static_cast<size_t>(kBaMinObservationsPerLandmark))
@@ -4113,6 +4281,13 @@ bool SlamWorker::runLocalBundleAdjustment()
         problem.AddResidualBlock(PosePriorCost::Create(priors[static_cast<size_t>(i)], m_localBaPosePriorRotWeight,
                                                          m_localBaPosePriorTransWeight),
                                   nullptr, poses[static_cast<size_t>(i)].data());
+        if (gpPriorValid && i == windowSize - 1) {
+            // rotWeight=0.0: this term only ever pulls translation, leaving
+            // rotation solely to the reprojection residuals + the standard
+            // pose prior above.
+            problem.AddResidualBlock(PosePriorCost::Create(gpPrior, 0.0, m_groundPlaneContinuousWeight), nullptr,
+                                      poses[static_cast<size_t>(i)].data());
+        }
     }
 
     const CameraIntrinsics &intr = m_intrinsics;
@@ -5891,6 +6066,15 @@ void SlamWorker::tryLoopClosure(size_t newKeyframeIndex)
         }
     }
 
+    // Backend #2 extension (item 42): re-triangulate every landmark touched
+    // anywhere in the loop window NOW that (a) fuse/loop-BA has given many of
+    // them their densest cross-keyframe observation set of the whole run, and
+    // (b) keyframe poses just got corrected -- both make this the single best
+    // moment to re-triangulate the whole window, not just per-keyframe as
+    // retriangulateKeyframeLandmarks() already does on every insertion. No-op
+    // unless 'retriangulate' is set (shares the same enable flag/guard).
+    retriangulateWindowLandmarks(bestIdx, static_cast<int>(newKeyframeIndex));
+
     // The live pose (m_currR/m_currT) and short-term reference keyframe
     // (m_refR/m_refT) are both, by construction, at frameIndex == f1 right
     // now (this just-inserted keyframe is also the current reference
@@ -5929,12 +6113,32 @@ void SlamWorker::tryLoopClosure(size_t newKeyframeIndex)
             {bestIdx, static_cast<int>(newKeyframeIndex), loopRelR.clone(), loopRelT.clone(), scaleMeas});
     }
 
+    // Item 43 (setPoseOnlyLeashRequireLoopAnchorEnabled()): a loop closure
+    // just committed a real, independently-verified correction -- the map's
+    // scale now has external evidence behind it, which is what makes the
+    // leash's per-frame refinement safe to trust (see that setter's own doc
+    // comment for why this exists: on a sequence with ZERO loop closures,
+    // e.g. KITTI seq01, the leash was measured to compound a small per-frame
+    // bias unboundedly with nothing to ever correct it -- 265.4m vs plain
+    // SQPnP's 122.6m baseline, scale collapsed to 0.097).
+    m_everHadLoopClosure = true;
+
     // Fire off a background, off-thread re-estimate for this loop window --
     // see loopClosureDetected()'s doc comment. Snapshot is taken here, at
     // the very end, so it reflects the trajectory/keyframes *after*
     // whichever live correction (BA or interpolation) above just ran.
     emit loopClosureDetected(
         buildLoopEstimateSnapshot(bestIdx, static_cast<int>(newKeyframeIndex), loopR, loopT, loopVerifiedIds));
+}
+
+double SlamWorker::calibratedGroundPitchDegrees(int &nSamplesOut) const
+{
+    nSamplesOut = static_cast<int>(m_groundPlaneCalibPitches.size());
+    if (m_groundPlaneCalibPitches.empty())
+        return 0.0;
+    std::vector<double> sorted = m_groundPlaneCalibPitches;
+    std::sort(sorted.begin(), sorted.end());
+    return sorted[sorted.size() / 2]; // median across per-keyframe fits
 }
 
 bool SlamWorker::recoverViaEpipolar(const std::vector<cv::KeyPoint> &kps, const cv::Mat &descriptors)
@@ -6495,7 +6699,7 @@ void SlamWorker::processNext()
         if (trackFrame(kps, descriptors)) {
             m_trackFailStreak = 0;
             stateStr = QStringLiteral("Tracking");
-        } else if (recoverViaEpipolar(kps, descriptors)) {
+        } else if (m_recoverViaEpipolarEnabled && recoverViaEpipolar(kps, descriptors)) {
             m_trackFailStreak = 0;
             stateStr = QStringLiteral("Tracking (recovered)");
         } else {

@@ -265,6 +265,21 @@ target_include_directories(orbslam3_sift_ext PUBLIC
     third_party/ORB_SLAM3_SIFT/Thirdparty/Sophus
     /usr/include/onnxruntime
 )
+# ABI FIX (local non-CUDA build): this fork compiles at C++17 (for the
+# reverted-but-still-compiled LightGlue/onnxruntime headers, see the target's
+# C++-standard note above) while the shared g2o_ext (libg2o.so under
+# /home/nam/ORB_SLAM3/Thirdparty/g2o) was built at C++14. Under C++17 Eigen
+# switches on over-aligned global operator new/delete for its fixed-size
+# types; g2o's vertices/edges embed such Eigen members and were compiled with
+# C++14's member-operator-new path, so a vertex allocated inside libg2o.so and
+# freed here (g2o::HyperGraph::clear() during the optimizer destructor after
+# GlobalBundleAdjustemnt) uses mismatched new/delete -> `free(): invalid
+# pointer` heap corruption at map init. Confirmed via LD_PRELOAD backtrace:
+# abort in HyperGraph::clear <- ~OptimizableGraph. Forcing Eigen to keep the
+# C++14 (member-operator) alignment path makes the two sides agree. The Kaggle
+# build (kaggle/CMakeLists.txt) builds g2o from source consistently and is
+# unaffected by this main-tree-only setting.
+target_compile_definitions(orbslam3_sift_ext PUBLIC EIGEN_HAS_CXX17_OVERALIGN=0)
 target_include_directories(orbslam3_sift_ext SYSTEM PUBLIC
     "${BOOST_INCLUDE_DIR}"
 )

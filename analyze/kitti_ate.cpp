@@ -332,6 +332,28 @@ int main(int argc, char *argv[])
             }
         }
 
+        // argv[68], SIFT only: override SiftSettings::contrastThreshold
+        // (default 0.04, OpenCV's stock value, never tuned for this
+        // project -- see item 12/13's note in DEBUGGING.md: raw keypoint
+        // COUNT via detectionScale was tried and made things WORSE
+        // (72.550m->105.692m, full-res adds unstable high-frequency
+        // keypoints), but contrastThreshold/edgeThreshold were flagged as
+        // the untested remaining levers, with a stricter (not looser)
+        // threshold hypothesized as more promising -- fewer, higher-
+        // quality keypoints rather than more, noisier ones. Pass a float;
+        // lower = looser/more keypoints, higher = stricter/fewer.
+        if (argc > 68) {
+            const double contrastThreshold = std::atof(argv[68]);
+            if (contrastThreshold > 0.0) {
+                SiftSettings siftSettings;
+                if (argc > 33 && std::atoi(argv[33]) > 0)
+                    siftSettings.nFeatures = std::atoi(argv[33]);
+                siftSettings.contrastThreshold = contrastThreshold;
+                worker.setSiftSettings(siftSettings);
+                std::fprintf(stderr, "[config] SIFT contrastThreshold=%.4f\n", contrastThreshold);
+            }
+        }
+
         // argv[34], SIFT only (ORB's own detector already runs at full
         // resolution -- see FeatureDetector.h): overrides
         // SlamWorker::setDetectionScale() (default 0.5, half-resolution).
@@ -715,6 +737,93 @@ int main(int argc, char *argv[])
         std::fprintf(stderr, "[config] triangulation parallax gate enabled\n");
     }
 
+    // argv[64]: overrides SlamWorker::setRetriangulateMinViews() (default 3;
+    // requires 'retriangulate'). Item 42.
+    if (argc > 64) {
+        const int minViews = std::atoi(argv[64]);
+        if (minViews >= 2) {
+            worker.setRetriangulateMinViews(minViews);
+            std::fprintf(stderr, "[config] retriangulate min-views=%d\n", minViews);
+        }
+    }
+
+    // argv[65]: 'poseonlyleashanchor' (with 'poseonlyleash') -- generalization
+    // fix (item 43): require at least one committed loop closure before the
+    // leash's per-frame refinement ever runs, so a loop-closure-free
+    // sequence (e.g. KITTI seq01) degrades to plain SQPnP instead of
+    // regressing (see SlamWorker::setPoseOnlyLeashRequireLoopAnchorEnabled()).
+    if (argc > 65 && std::strcmp(argv[65], "poseonlyleashanchor") == 0) {
+        worker.setPoseOnlyLeashRequireLoopAnchorEnabled(true);
+        std::fprintf(stderr, "[config] pose-only BA leash requires a loop-closure anchor\n");
+    }
+
+    // argv[66]: 'retriparallaxgate' (with 'retriangulate') -- generalization
+    // fix (item 43): reject a re-triangulation whose best view pair is still
+    // near-parallel (see SlamWorker::setRetriangulateParallaxGateEnabled()).
+    if (argc > 66 && std::strcmp(argv[66], "retriparallaxgate") == 0) {
+        worker.setRetriangulateParallaxGateEnabled(true);
+        std::fprintf(stderr, "[config] retriangulate parallax gate enabled\n");
+    }
+
+    // argv[67]: 'retrianchor' (with 'retriangulate') -- generalization fix,
+    // 2nd attempt (item 43): require a committed loop closure before
+    // retriangulate accepts any position update (see
+    // SlamWorker::setRetriangulateRequireLoopAnchorEnabled()).
+    if (argc > 67 && std::strcmp(argv[67], "retrianchor") == 0) {
+        worker.setRetriangulateRequireLoopAnchorEnabled(true);
+        std::fprintf(stderr, "[config] retriangulate requires a loop-closure anchor\n");
+    }
+
+    // argv[69]: 'groundplanecontinuous' -- item 43 3rd attempt: unlike
+    // argv[9]'s one-shot bootstrap groundplane correction, re-estimates the
+    // ground-plane-implied scale every local BA call from the window's
+    // latest keyframe and softly nudges its translation (see
+    // SlamWorker::setGroundPlaneContinuousEnabled()). Independent of loop
+    // closures entirely -- should help loop-closure-free stretches (seq01)
+    // that Fix A/B's loop-anchor gates can only decline to worsen, not
+    // actually correct. argv[70] optionally overrides the soft weight
+    // (default 1.0, mirrors argv60/61's local-BA-prior-weight pattern).
+    if (argc > 69 && std::strcmp(argv[69], "groundplanecontinuous") == 0) {
+        worker.setGroundPlaneContinuousEnabled(true);
+        std::fprintf(stderr, "[config] continuous ground-plane scale anchor enabled\n");
+        if (argc > 70) {
+            const double w = std::atof(argv[70]);
+            if (w > 0.0) {
+                worker.setGroundPlaneContinuousWeight(w);
+                std::fprintf(stderr, "[config] ground-plane continuous weight=%.3f\n", w);
+            }
+        }
+    }
+
+    // argv[71]: 'norecover' (item 45) -- disable recoverViaEpipolar() on a
+    // tracking-loss frame, so no m_avgStepScale-rescaled pose is ever
+    // injected (see SlamWorker::setRecoverViaEpipolarEnabled()). Tests
+    // whether removing that heuristic scale-injection path reduces intra-
+    // sequence scale drift, matching ORB-SLAM3's pure-geometry scale
+    // propagation.
+    if (argc > 71 && std::strcmp(argv[71], "norecover") == 0) {
+        worker.setRecoverViaEpipolarEnabled(false);
+        std::fprintf(stderr, "[config] recoverViaEpipolar disabled (tracking-loss frames skipped)\n");
+    }
+
+    // argv[72]: 'groundplanecalib' (item 46) -- collect per-keyframe ground-
+    // normal fits and report the median calibrated pitch at shutdown
+    // ([gpcalib] line). Pure measurement, does not change tracking.
+    if (argc > 72 && std::strcmp(argv[72], "groundplanecalib") == 0) {
+        worker.setGroundPlaneCalibEnabled(true);
+        std::fprintf(stderr, "[config] ground-plane pitch calibration collection enabled\n");
+    }
+
+    // argv[73]: ground-plane pitch override (degrees, nose-down positive) --
+    // sets the calibrated pitch used by both bootstrap 'groundplane' and
+    // 'groundplanecontinuous' (see SlamWorker::setGroundPlanePitchDegrees()).
+    // '-' or empty leaves the default level-camera (0) assumption.
+    if (argc > 73 && std::strcmp(argv[73], "-") != 0) {
+        const double pitchDeg = std::atof(argv[73]);
+        worker.setGroundPlanePitchDegrees(pitchDeg);
+        std::fprintf(stderr, "[config] ground-plane pitch set to %.3f deg\n", pitchDeg);
+    }
+
     if (argc > 9 && std::strcmp(argv[9], "groundplane") == 0) {
         worker.setGroundPlaneEnabled(true);
         std::fprintf(stderr, "[config] ground-plane scale correction enabled (VISO2-M-style fallback)\n");
@@ -824,6 +933,13 @@ int main(int argc, char *argv[])
     std::fprintf(stderr, "[fuse] landmarks merged this run: %lld\n", worker.fusedLandmarkCount());
     std::fprintf(stderr, "[retri] landmarks re-triangulated this run: %lld\n",
                  worker.retriangulatedLandmarkCount());
+    {
+        int nPitch = 0;
+        const double pitch = worker.calibratedGroundPitchDegrees(nPitch);
+        if (nPitch > 0)
+            std::fprintf(stderr, "[gpcalib] calibrated ground pitch (median of %d keyframe fits): %.3f deg\n",
+                         nPitch, pitch);
+    }
 
     const QVector<QPointF> &traj = worker.trajectoryPoints();
     const QVector<int> &frames = worker.trajectoryFrameIndices();

@@ -6,6 +6,24 @@ this file is the actionable current state + next steps. Dataset:
 Pipeline runs on **RootSIFT** everywhere (toRootSift right after detection,
 `SlamWorker.cpp`), VLAD codebook `vocabulary_sift/vlad_codebook_all_rootsift.yml`.
 
+**⚠️ SEE `DEBUGGING_V3.md`'s correction note: the leash+retriangulate config
+below (and its 37.003m follow-up) is a real, verified seq00 result but does
+NOT generalize — it LOSES to plain baseline by ~2.4x on seq01 (122.6m vs
+292.8m), a held-out sequence with zero loop closures. Read "NEW BEST" in this
+file as "seq00-specific", not a validated general improvement.**
+
+**⚠️ FINAL STATE (item 43): tried to fix the above via loop-closure
+anchor-gates (`poseonlyleashanchor`/`retrianchor`) — confirmed clean on
+seq01 (122.622m, exact baseline match) but confirmed WORSE than plain
+baseline on seq00 (113.8m vs 51.273m; the gate's delayed activation lets
+more raw drift accumulate before the first loop closure, which then has to
+absorb a much larger, destabilizing correction). The anchor-gate direction
+is closed, not recommended for deployment. Standing recommendation is a
+two-tier choice, not one generalized recipe: plain baseline for
+unknown/loop-sparse sequences, leash+retriangulate UNGATED (this file's
+37.003m recipe) opt-in only for known loop-rich sequences like seq00. See
+`DEBUGGING_V3.md`'s "Final recommendation" section.**
+
 ## NEW BEST: 41.782m ATE (2026-07-23) — was 51.273m
 
 **Config: baseline + pose-only BA leashed to SQPnP** (`poseonlyba` + `poseonlyleash`).
