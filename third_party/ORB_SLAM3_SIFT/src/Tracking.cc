@@ -55,6 +55,32 @@ namespace {
                     g_postRelocGateFails.load());
         }
     } g_postRelocGatePrinter;
+
+    // Runtime toggles (read once from env, cached; printed once) so a single
+    // build can A/B every config on Kaggle without a ~20-min rebuild:
+    //   TRACKER = klt | sqpnp        (default sqpnp)
+    //   BRIDGE  = off | rl | lost | both   (default both; rl=RECENTLY_LOST only,
+    //                                       lost=LOST-path only)
+    //   INITFIX = on | off           (default on; mono-init stale-reference advance)
+    bool trackerUsesSqpnp() {
+        static const bool v = []{ const char *e = std::getenv("TRACKER");
+            bool s = !(e && std::string(e) == "klt");
+            std::fprintf(stderr, "[toggle] TRACKER=%s\n", s ? "sqpnp" : "klt"); return s; }();
+        return v;
+    }
+    int bridgeMode() { // bit0 = RECENTLY_LOST, bit1 = LOST
+        static const int m = []{ const char *e = std::getenv("BRIDGE");
+            std::string s = e ? e : "both";
+            int r = (s == "off") ? 0 : (s == "rl") ? 1 : (s == "lost") ? 2 : 3;
+            std::fprintf(stderr, "[toggle] BRIDGE=%s\n", s.c_str()); return r; }();
+        return m;
+    }
+    bool initFixEnabled() {
+        static const bool v = []{ const char *e = std::getenv("INITFIX");
+            bool s = !(e && std::string(e) == "off");
+            std::fprintf(stderr, "[toggle] INITFIX=%s\n", s ? "on" : "off"); return s; }();
+        return v;
+    }
 }
 
 namespace ORB_SLAM3
@@ -1980,7 +2006,7 @@ void Tracking::Track()
                 // correspondence step changed. See DEBUGGING.md part 58 and
                 // Tracking.h's TrackWithKLT() doc comment.
                 Verbose::PrintMess("TRACK: Track with SearchByProjection+SQPnP", Verbose::VERBOSITY_DEBUG);
-                bOK = TrackWithSQPnP();
+                bOK = trackerUsesSqpnp() ? TrackWithSQPnP() : TrackWithKLT();
 
 
                 if (!bOK)
@@ -2036,7 +2062,7 @@ void Tracking::Track()
                         // existing heavy VLAD-database Relocalization()
                         // unchanged if KLT recovery also fails. See
                         // DEBUGGING.md part 58.
-                        const bool bKltOK = TrackWithSQPnP();
+                        const bool bKltOK = trackerUsesSqpnp() ? TrackWithSQPnP() : TrackWithKLT();
                         bOK = bKltOK;
                         bool bRelocAttempted = false;
                         if(!bOK)
@@ -2051,7 +2077,8 @@ void Tracking::Track()
                         // recover against), CREATE new geometry against the last
                         // keyframe to keep THIS map alive instead of resetting.
                         // On success it sets mState=OK and inserts a KF itself.
-                        if(!bOK)
+                        // Gated by BRIDGE's bit0 (rl|both).
+                        if(!bOK && (bridgeMode() & 1))
                             bOK = TrackWithEpipolarBridge();
                         // [recently-lost] TEMPORARY diagnostic, see DEBUGGING.md
                         // part 18 -- confirms/refutes whether the ~3s recovery
@@ -2149,7 +2176,7 @@ void Tracking::Track()
                     // 45x. Try the bridge here too, before giving up the map, so
                     // young maps get the same keep-alive chance. On success it
                     // sets mState=OK + inserts a KF; just continue (no reset).
-                    if(TrackWithEpipolarBridge())
+                    if((bridgeMode() & 2) && TrackWithEpipolarBridge())
                     {
                         fprintf(stderr, "[bridge] id=%lu LOST-path rescue -- map kept alive\n",
                                 mCurrentFrame.mnId);
@@ -2743,7 +2770,7 @@ void Tracking::MonocularInitialization()
             // clearly-stale references, not on a still-healthy retry.
             constexpr double kMaxInitDisparityPx = 150.0;
             const char *action = "keeping reference, retrying next frame";
-            if(meanDisparity > kMaxInitDisparityPx)
+            if(initFixEnabled() && meanDisparity > kMaxInitDisparityPx)
             {
                 mbReadyToInitializate = false; // re-seed reference next frame
                 action = "reference too stale (disparity>150px) -- re-seeding";
