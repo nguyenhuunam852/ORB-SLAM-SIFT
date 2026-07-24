@@ -210,6 +210,19 @@ add_executable(orbslam3_visualize_keypoints analyze/orbslam3_visualize_keypoints
 target_include_directories(orbslam3_visualize_keypoints PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(orbslam3_visualize_keypoints PRIVATE orbslam3_ext)
 
+# Standalone SIFT-vs-ASIFT match-count probe on real seq07 wide-baseline
+# loop-closure keyframe pairs (the exact frames [loop][vlad-topk-diag]
+# measured plain SIFT failing on). cv::AffineFeature wraps cv::SIFT --
+# available in this OpenCV build's xfeatures2d/features2d, no extra dep.
+add_executable(asift_vs_sift_seq07_probe analyze/asift_vs_sift_seq07_probe.cpp)
+target_include_directories(asift_vs_sift_seq07_probe PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(asift_vs_sift_seq07_probe PRIVATE ${OpenCV_LIBS})
+
+# Standalone SIFT-DBoW2-vs-VLAD score probe on the same real seq07 keyframe
+# pairs -- reuses the already-vendored DBoW2 static lib (FRootSift).
+add_executable(siftdbow_vs_vlad_seq07_probe analyze/siftdbow_vs_vlad_seq07_probe.cpp)
+target_link_libraries(siftdbow_vs_vlad_seq07_probe PRIVATE DBoW2)
+
 # Standalone SIFT+LightGlue feasibility test (ASIFT investigation closed as
 # a NEGATIVE RESULT, see DEBUGGING.md part 57 -- LightGlue is the
 # follow-up: a learned matcher, official SIFT-trained weights exist, kept

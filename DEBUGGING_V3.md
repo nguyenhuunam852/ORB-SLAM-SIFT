@@ -341,6 +341,76 @@ re-run with `groundplane groundplanecontinuous` both set, on seq01, before
 drawing any conclusion about the mechanism itself. Code kept in tree,
 default off.
 
+## FINAL VERDICT (item 47): generalization effort closed — NEGATIVE RESULT, root cause identified
+
+After exhausting every lever this session (loop-anchor gates, SIFT contrastThreshold
+both directions, continuous ground-plane scale anchor at 6 weights, pitch
+calibration), **no single mechanism generalizes a real improvement across both
+loop-rich and loop-sparse KITTI sequences.** Standing conclusion:
+
+**Two-tier recommendation (final):**
+- Sequence unknown or loop-closure-sparse: **plain baseline** (SQPnP + localBA +
+  guided + vlad + fuse). Never confirmed worse than itself.
+- Sequence known loop-rich (dense urban revisits, like seq00): **baseline +
+  `poseonlyba` + `poseonlyleash` + `retriangulate`** (item 44's decoupled-prediction
+  fix included, 57.554m on seq00) — a real, opt-in-only win. Do not default this on
+  for an unknown sequence (seq01 regression, confirmed).
+
+**Root cause of why no single mechanism generalizes** (the actual finding, not just
+the negative result): **KITTI SIFT feature density has a structural, sequence-
+dependent gap** — highway/low-texture sequences (seq01: ~150-200 keypoints/frame)
+run 6-7x sparser than dense-texture urban sequences (seq00: ~600-1200/frame,
+confirmed directly from this session's own logs). Sparse features make ALL of this
+project's per-frame trackers lose track more often (measured: leash alone inflates
+match-count track-fails 5.4x on seq01 vs baseline, isolated and confirmed independent
+of retriangulate). Recovering from that lost track REQUIRES either:
+1. **PnP against the existing map** (this pipeline's primary path) -- accurate when
+   it works, but by definition unavailable exactly when tracking was already lost
+   (not enough map correspondence left to solve PnP in the first place).
+2. **Epipolar (2D-2D) recovery** (`recoverViaEpipolar()`, and the equivalent
+   epipolar-bridge attempted in the parallel `ORB_SLAM3_SIFT` effort, see
+   `ORBSLAM3_SIFT_EPIPOLAR_BRIDGE_PLAN.md`) -- the only path when PnP has nothing to
+   solve against (confirmed load-bearing: disabling it outright, `norecover`
+   ablation, collapses seq01 to 1097/1101 frame failures). But epipolar recovery is
+   **structurally scale-blind** (2D-2D triangulation only recovers translation up to
+   an unknown scalar) -- it MUST inject a scale guess (`m_avgStepScale`, a heuristic
+   running-median) to produce a usable pose, and that injected guess is an
+   independent, uncontrolled bias source with no ground-truth anchor. Every attempt
+   to correct this bias with an additional heuristic (ground-plane scale, pitch
+   calibration) itself landed in the same sparse-feature-driven, chaotic parameter
+   sensitivity this project has documented in a dozen other threshold-tuning
+   attempts this session and prior sessions -- not a bug, a structural property of
+   this pipeline's discrete loop-candidate-selection cascade.
+
+**In one sentence**: sparse SIFT on low-texture KITTI stretches forces more frequent
+recovery events; every available recovery mechanism (PnP-when-possible,
+epipolar-otherwise) either can't fire when needed most, or fires by injecting an
+uncontrolled scale bias ("shift") that compounds unboundedly on exactly the
+sequences that need it most (loop-closure-sparse ones, where nothing ever resets
+the accumulated bias). This is why the fix is a **deployment-time choice (two-tier)**,
+not a **single generalized mechanism** -- the missing ingredient (an independent,
+per-frame metric scale reference cheap enough to always run) doesn't exist in this
+pipeline's available inputs (no IMU/OXTS data for the odometry benchmark sequences;
+stereo exists in the raw KITTI data but was never adopted, see
+`ORBSLAM3_SIFT_EPIPOLAR_BRIDGE_PLAN.md`'s scale-anchor discussion for why).
+
+**Parallel confirmation from the independent `ORB_SLAM3_SIFT` effort** (dropped this
+session, see `ORBSLAM3_SIFT_EPIPOLAR_BRIDGE_PLAN.md`): the real ORB-SLAM3 fork hit
+the exact same wall from the opposite direction -- its relocalization-only recovery
+(no epipolar bridge) resets the map outright on the same sparse-feature dropouts,
+which is why real-ORB-SLAM3-family systems have historically needed either IMU or
+stereo (both give a scale-anchor this project's monocular-only KITTI-odometry setup
+doesn't have) to avoid this exact failure mode. Two independently-built pipelines
+converging on the same root cause is strong (not just anecdotal) evidence this is a
+genuine structural limit of the data/sensor setup, not an implementation gap in
+either codebase.
+
+**Full-KITTI validation run (00-10, all sequences with public ground truth --
+11-21 are KITTI's held-out test split, no public GT, ATE not computable there)**:
+launched to confirm the two-tier recommendation holds across the whole public
+benchmark set, not just seq00/seq01. See `full_sweep_summary.tsv` /
+this section's follow-up for the completed table.
+
 ## Run status — INCOMPLETE (stopped by user)
 - **Dataset located locally** (no dev-machine / Linux box needed): KITTI odometry gray
   is cached via kagglehub at

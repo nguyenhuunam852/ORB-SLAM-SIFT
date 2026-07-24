@@ -824,6 +824,51 @@ int main(int argc, char *argv[])
         std::fprintf(stderr, "[config] ground-plane pitch set to %.3f deg\n", pitchDeg);
     }
 
+    // argv[74]: 'vladtopk' (with 'vlad', item 48) -- try up to argv[75]
+    // (default 3) top-scoring VLAD candidates through the PnP re-measurement
+    // gate instead of only the single highest-scoring one. See
+    // SlamWorker::setVladTopKEnabled()'s doc comment for the measured
+    // discriminability-weakness motivation.
+    if (argc > 74 && std::strcmp(argv[74], "vladtopk") == 0) {
+        worker.setVladTopKEnabled(true);
+        std::fprintf(stderr, "[config] VLAD top-K candidate retry enabled\n");
+        if (argc > 75) {
+            const int k = std::atoi(argv[75]);
+            if (k > 0) {
+                worker.setVladTopK(k);
+                std::fprintf(stderr, "[config] VLAD top-K=%d\n", k);
+            }
+        }
+    }
+
+    // argv[76]: 'asiftfallback' (item 49) -- when the loop-closure PnP
+    // re-measurement's plain-SIFT match count is too low, escalate through
+    // ASIFT (maxTilt 2/4/8/16) re-extracted from the two keyframes' raw
+    // images instead of rejecting the candidate outright. See
+    // SlamWorker::setAsiftFallbackEnabled()'s doc comment for the measured
+    // seq07 wide-baseline motivation (standalone probe, this session).
+    if (argc > 76 && std::strcmp(argv[76], "asiftfallback") == 0) {
+        worker.setAsiftFallbackEnabled(true);
+        std::fprintf(stderr, "[config] ASIFT wide-baseline loop-closure fallback enabled\n");
+    }
+
+    // argv[77]: 'epipolarlaststep' (item 50) -- rescale recoverViaEpipolar()'s
+    // recovered translation using the single most-recent real step distance
+    // instead of the smoothed m_avgStepScale median. See
+    // SlamWorker::setEpipolarLastStepScaleEnabled()'s doc comment.
+    if (argc > 77 && std::strcmp(argv[77], "epipolarlaststep") == 0) {
+        worker.setEpipolarLastStepScaleEnabled(true);
+        std::fprintf(stderr, "[config] epipolar recovery: last-step scale (no smoothing) enabled\n");
+    }
+
+    // argv[78]: 'epipolarlineartrend' (item 50 alternative) -- extrapolate
+    // the two-point linear trend (last two real steps) instead of assuming
+    // constant speed. See SlamWorker::setEpipolarLinearTrendScaleEnabled().
+    if (argc > 78 && std::strcmp(argv[78], "epipolarlineartrend") == 0) {
+        worker.setEpipolarLinearTrendScaleEnabled(true);
+        std::fprintf(stderr, "[config] epipolar recovery: linear-trend scale extrapolation enabled\n");
+    }
+
     if (argc > 9 && std::strcmp(argv[9], "groundplane") == 0) {
         worker.setGroundPlaneEnabled(true);
         std::fprintf(stderr, "[config] ground-plane scale correction enabled (VISO2-M-style fallback)\n");

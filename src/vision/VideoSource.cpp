@@ -48,3 +48,13 @@ int VideoSource::frameHeight() const
 {
     return static_cast<int>(m_capture.get(cv::CAP_PROP_FRAME_HEIGHT));
 }
+
+bool VideoSource::readFrameAt(const std::string &path, int frameIndex, cv::Mat &frame)
+{
+    cv::VideoCapture cap(path);
+    if (!cap.isOpened())
+        return false;
+    if (!cap.set(cv::CAP_PROP_POS_FRAMES, frameIndex))
+        return false;
+    return cap.read(frame) && !frame.empty();
+}

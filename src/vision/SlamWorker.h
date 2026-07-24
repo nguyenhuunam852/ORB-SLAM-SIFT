@@ -354,6 +354,31 @@ public slots:
     // sequence scale drift.
     void setRecoverViaEpipolarEnabled(bool enabled) { m_recoverViaEpipolarEnabled = enabled; }
 
+    // Item 50: rescale recoverViaEpipolar()'s unit-length recovered
+    // translation using the SINGLE most-recently-measured real step
+    // distance (m_recentStepDistances.last()) instead of m_avgStepScale
+    // (the median of the last kScaleWindowSize(20) steps). Motivation:
+    // m_avgStepScale is deliberately smoothed to resist a single outlier,
+    // which is exactly why it can be stale relative to a genuine, recent
+    // speed change (braking/turning) -- often the same maneuver that
+    // caused tracking to fail in the first place, i.e. the worst possible
+    // moment for a 20-step-smoothed estimate to lag behind. Using just the
+    // last real step trades that smoothing away for responsiveness. Default
+    // off (falls back to m_avgStepScale, unchanged behavior).
+    void setEpipolarLastStepScaleEnabled(bool enabled) { m_epipolarLastStepScaleEnabled = enabled; }
+
+    // Item 50 alternative: instead of assuming a constant speed (either the
+    // smoothed m_avgStepScale or the single last step), fit a linear trend
+    // through the last TWO real step distances (d1, d2) and extrapolate it
+    // forward across the framesElapsed gap -- catches an accelerating or
+    // decelerating vehicle (the two-point slope d2-d1) instead of assuming
+    // whatever speed was last measured holds constant. Each projected
+    // per-frame term is floor-clamped at 0 (a real vehicle can't travel a
+    // negative distance) before summing. Checked before
+    // setEpipolarLastStepScaleEnabled() when both are somehow enabled.
+    // Default off.
+    void setEpipolarLinearTrendScaleEnabled(bool enabled) { m_epipolarLinearTrendScaleEnabled = enabled; }
+
     void setGroundPlaneContinuousEnabled(bool enabled) { m_groundPlaneContinuousEnabled = enabled; }
     void setGroundPlaneContinuousWeight(double weight)
     {
@@ -444,6 +469,39 @@ public slots:
     // particular keyframe has no vladVector -- zero behavior change for
     // anyone not using it.
     void setVladLoopClosureEnabled(bool enabled) { m_vladLoopClosureEnabled = enabled; }
+
+    // Item 48: VLAD's raw discriminability is weak enough that the
+    // geometrically-correct loop-closure candidate is often not the single
+    // highest-scoring one for many keyframes after it first qualifies (a
+    // real revisit measured trailing same-score-range decoys for ~500
+    // frames before finally ranking first). Default (off) behavior is
+    // unchanged: only the single best-scoring candidate is ever tried. When
+    // on, up to setVladTopK()'s candidates (by score, descending) are tried
+    // through the same PnP re-measurement gate every candidate already goes
+    // through, keeping the first one that passes -- a strictly additive
+    // widening of the search, not a replacement of the existing gates.
+    void setVladTopKEnabled(bool enabled) { m_vladTopKEnabled = enabled; }
+    void setVladTopK(int k)
+    {
+        if (k >= 1)
+            m_vladTopK = k;
+    }
+
+    // Item 49: ASIFT wide-baseline escalation fallback for the loop-closure
+    // PnP re-measurement gate (tryLoopClosure()'s
+    // `matchDescriptors(oldKf.localMapDescriptors, newKf.descriptors, ...)`
+    // check). Measured this session (standalone probe on real seq07
+    // wide-baseline keyframe pairs, not guessed): when that plain-SIFT match
+    // count is already below kLoopMinPnpInliers, re-extracting with
+    // cv::AffineFeature (ASIFT) at escalating maxTilt (2 -> 4 -> 8 -> 16,
+    // stopping at the first tilt whose match count clears the threshold)
+    // recovers enough correspondence on pairs plain SIFT structurally can't
+    // match (0-15 raw matches) due to genuine wide viewpoint change between
+    // the two keyframes. Only fires as a fallback -- never runs when the
+    // existing plain-SIFT match already clears the gate, so cost is paid
+    // only on the frames that would otherwise have rejected this candidate
+    // outright. Default off.
+    void setAsiftFallbackEnabled(bool enabled) { m_asiftFallbackEnabled = enabled; }
 
     // Loads a real DBoW2 vocabulary trained on RootSIFT descriptors (see
     // SiftVocabulary's own doc comment and
@@ -1507,6 +1565,8 @@ private:
     // single outlier the way an EMA isn't (see kMaxAvgStepUpdateMultiplier
     // for the belt-and-suspenders clamp kept on top of this).
     double m_avgStepScale = -1.0;
+    bool m_epipolarLastStepScaleEnabled = false; // see setEpipolarLastStepScaleEnabled() (item 50)
+    bool m_epipolarLinearTrendScaleEnabled = false; // see setEpipolarLinearTrendScaleEnabled() (item 50)
 
     // Sliding window of recent independently-measured (trackFrame-only,
     // i.e. real PnP-derived, never recoverViaEpipolar's own rescaled
@@ -1596,6 +1656,15 @@ private:
     // or processNext()).
     cv::Mat m_lastDisplayBase;
     int m_lastDisplayFrameCount = 0;
+
+    // Current frame's full-resolution grayscale image (pre-detectionScale
+    // resize, matching the pixel coordinates trackFrame()'s keypoints/PnP
+    // already use) -- set once per frame in processNext(), read by
+    // tryAsiftFallbackMatch() (see setAsiftFallbackEnabled()) since the
+    // regular kps/descriptors-only call chain (trackFrame/insertKeyframe/
+    // tryLoopClosure) never threads the raw image through. Empty until the
+    // first frame is processed.
+    cv::Mat m_currentFrameGray;
 
     // Sparse map: 3D points (world frame) with matching SIFT descriptors.
     // Persists for the whole run -- never cleared just because tracking
@@ -1796,6 +1865,26 @@ private:
     };
     std::vector<Keyframe> m_keyframeHistory;
 
+    // See setAsiftFallbackEnabled(). Only called from tryLoopClosure() when
+    // the plain-SIFT PnP re-measurement match already failed
+    // (matchDescriptors(oldKf.localMapDescriptors, newKf.descriptors, ...)
+    // < kLoopMinPnpInliers). Re-reads oldKf's own raw frame from disk (via
+    // VideoSource::readFrameAt(), keyed by oldKf.frameIndex -- the live
+    // kps/descriptors-only call chain never threads the raw image through)
+    // and re-extracts BOTH images with cv::AffineFeature at escalating
+    // maxTilt (2/4/8/16), stopping at the first tilt whose RootSIFT
+    // ratio-test match count clears kLoopMinPnpInliers. Each surviving
+    // ASIFT match in oldKf's re-extracted image is cross-referenced against
+    // oldKf.localMapImagePoints (the ORIGINAL SIFT keypoints that actually
+    // have a triangulated 3D point) within a small pixel radius -- an ASIFT
+    // keypoint with no existing localMapPoints neighbor close enough has no
+    // known depth and is dropped, it cannot contribute a PnP correspondence.
+    // Returns true and fills objectPoints/imagePoints/landmarkIds (parallel,
+    // ready for solvePnPRansac) only if enough such correspondences survive.
+    bool tryAsiftFallbackMatch(const Keyframe &oldKf, std::vector<cv::Point3f> &objectPoints,
+                                std::vector<cv::Point2f> &imagePoints,
+                                std::vector<long long> &landmarkIds) const;
+
     // Every sequential/loop-closure relative-pose measurement captured so
     // far this run, at observation time -- purely for
     // pose_graph::optimizePoseGraph() (see keyframePoses()/
@@ -1818,6 +1907,12 @@ private:
     // just falls through to the original raw-match-count loop search.
     std::unique_ptr<vlad::VladVocabulary> m_vladVocabulary;
     bool m_vladLoopClosureEnabled = false;
+    bool m_vladTopKEnabled = false; // see setVladTopKEnabled() (item 48)
+    int m_vladTopK = 3;
+    bool m_asiftFallbackEnabled = false; // see setAsiftFallbackEnabled() (item 49)
+    std::unordered_map<int, size_t> m_asiftFallbackLastTriedKeyframe; // bestIdx -> newKeyframeIndex
+                                                                       // last tried against it -- see
+                                                                       // tryLoopClosure()'s cooldown
 
     // See loadSiftVocabulary()/setSiftDbowLoopClosureEnabled(). Null until
     // loadSiftVocabulary() succeeds -- every call site checks this (and

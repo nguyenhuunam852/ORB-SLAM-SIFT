@@ -5516,6 +5516,93 @@ bool SlamWorker::loopHasSpatialConsensus(const std::vector<int> &qualifying, int
     return false;
 }
 
+bool SlamWorker::tryAsiftFallbackMatch(const Keyframe &oldKf, std::vector<cv::Point3f> &objectPoints,
+                                        std::vector<cv::Point2f> &imagePoints,
+                                        std::vector<long long> &landmarkIds) const
+{
+    objectPoints.clear();
+    imagePoints.clear();
+    landmarkIds.clear();
+    if (m_currentFrameGray.empty() || m_lastOpenedVideoPath.isEmpty())
+        return false;
+
+    cv::Mat oldFrame;
+    if (!VideoSource::readFrameAt(m_lastOpenedVideoPath.toStdString(), oldKf.frameIndex - 1, oldFrame))
+        return false;
+    cv::Mat oldGray;
+    if (oldFrame.channels() == 1)
+        oldGray = oldFrame;
+    else
+        cv::cvtColor(oldFrame, oldGray, cv::COLOR_BGR2GRAY);
+
+    // maxTilt=16 measured impractically slow in production (huge affine-
+    // simulated keypoint counts make brute-force matching itself the
+    // bottleneck, not just extraction -- a single candidate's tilt=16 step
+    // can take minutes), so the ladder is capped at 8 here; the standalone
+    // seq07 probe already confirmed tilt=8 alone clears the threshold on
+    // the pairs that matter.
+    static const std::vector<int> kTiltLadder = {2, 4, 8};
+    constexpr float kNeighborPixelRadius = 8.0f; // max distance to inherit an existing 3D point
+
+    for (int tilt : kTiltLadder) {
+        auto asift = cv::AffineFeature::create(cv::SIFT::create(2000), tilt);
+        std::vector<cv::KeyPoint> kpOld, kpNew;
+        cv::Mat descOld, descNew;
+        asift->detectAndCompute(oldGray, cv::noArray(), kpOld, descOld);
+        asift->detectAndCompute(m_currentFrameGray, cv::noArray(), kpNew, descNew);
+        if (descOld.empty() || descNew.empty())
+            continue;
+        descOld = feature_detector::toRootSift(descOld);
+        descNew = feature_detector::toRootSift(descNew);
+
+        std::vector<cv::DMatch> asiftMatches;
+        if (!matchDescriptors(descOld, descNew, asiftMatches, 0.75f))
+            continue;
+        if (static_cast<int>(asiftMatches.size()) < kLoopMinPnpInliers)
+            continue;
+
+        std::vector<cv::Point3f> candidateObj;
+        std::vector<cv::Point2f> candidateImg;
+        std::vector<long long> candidateIds;
+        candidateObj.reserve(asiftMatches.size());
+        candidateImg.reserve(asiftMatches.size());
+        candidateIds.reserve(asiftMatches.size());
+        for (const auto &m : asiftMatches) {
+            const cv::Point2f &oldPt = kpOld[static_cast<size_t>(m.queryIdx)].pt;
+            int nearest = -1;
+            float nearestDistSq = kNeighborPixelRadius * kNeighborPixelRadius;
+            for (size_t i = 0; i < oldKf.localMapImagePoints.size(); ++i) {
+                const float dx = oldKf.localMapImagePoints[i].x - oldPt.x;
+                const float dy = oldKf.localMapImagePoints[i].y - oldPt.y;
+                const float distSq = dx * dx + dy * dy;
+                if (distSq < nearestDistSq) {
+                    nearestDistSq = distSq;
+                    nearest = static_cast<int>(i);
+                }
+            }
+            if (nearest < 0)
+                continue; // no known 3D point close enough to this ASIFT keypoint -- can't PnP with it
+            candidateObj.push_back(oldKf.localMapPoints[static_cast<size_t>(nearest)]);
+            candidateImg.push_back(kpNew[static_cast<size_t>(m.trainIdx)].pt);
+            candidateIds.push_back(oldKf.localMapPointIds[static_cast<size_t>(nearest)]);
+        }
+
+        if (static_cast<int>(candidateObj.size()) >= kLoopMinPnpInliers) {
+            std::fprintf(stderr,
+                         "[loop][asift-fallback] tilt=%d asiftMatches=%zu 3d-anchored=%zu -- clears threshold\n",
+                         tilt, asiftMatches.size(), candidateObj.size());
+            objectPoints = std::move(candidateObj);
+            imagePoints = std::move(candidateImg);
+            landmarkIds = std::move(candidateIds);
+            return true;
+        }
+        std::fprintf(stderr,
+                     "[loop][asift-fallback] tilt=%d asiftMatches=%zu 3d-anchored=%zu -- still below %d\n",
+                     tilt, asiftMatches.size(), candidateObj.size(), kLoopMinPnpInliers);
+    }
+    return false;
+}
+
 void SlamWorker::tryLoopClosure(size_t newKeyframeIndex)
 {
     if (newKeyframeIndex < static_cast<size_t>(kLoopExclusionWindow))
@@ -5578,12 +5665,17 @@ void SlamWorker::tryLoopClosure(size_t newKeyframeIndex)
     else if (m_vladLoopClosureEnabled && m_vladVocabulary && !newKf.vladVector.empty()) {
         usedVlad = true;
         std::vector<int> qualifying;
+        std::vector<std::pair<float, int>> scored; // item 48: every candidate above
+                                                     // threshold, not just the single best --
+                                                     // see setVladTopKEnabled()'s doc comment.
         for (size_t i = 0; i <= searchLimit; ++i) {
             if (m_keyframeHistory[i].culled || m_keyframeHistory[i].vladVector.empty())
                 continue;
             const float score = m_vladVocabulary->score(m_keyframeHistory[i].vladVector, newKf.vladVector);
-            if (score >= kVladMinScore)
+            if (score >= kVladMinScore) {
                 qualifying.push_back(static_cast<int>(i));
+                scored.emplace_back(score, static_cast<int>(i));
+            }
             if (score > bestVladScore) {
                 bestVladScore = score;
                 bestIdx = static_cast<int>(i);
@@ -5595,6 +5687,78 @@ void SlamWorker::tryLoopClosure(size_t newKeyframeIndex)
             return;
         std::fprintf(stderr, "[loop][vlad] kf#%d candidate=kf#%d score=%.4f\n",
                      static_cast<int>(newKeyframeIndex), bestIdx, bestVladScore);
+
+        // item 48 (setVladTopKEnabled()): VLAD's discriminability is weak enough
+        // that the geometrically-correct candidate is often NOT the single
+        // highest-scoring one for many frames after it first becomes a
+        // qualifying candidate (measured directly: on one held-out sequence the
+        // true candidate trailed competing same-score-range candidates for
+        // ~500 frames before finally topping the ranking). Everything below
+        // this point (PnP re-measurement + inlier gate) only tries bestIdx --
+        // if that fails purely because bestIdx is the WRONG (if plausible)
+        // candidate, the true one -- possibly #2 or #3 by score, already sitting
+        // in `scored` -- never gets a chance. When enabled, try the top-K
+        // candidates by score through that same PnP gate, in descending score
+        // order, keeping the first one that passes; falls through to the
+        // original bestIdx-only behavior when disabled (default), so this is
+        // strictly opt-in.
+        if (m_vladTopKEnabled && scored.size() > 1) {
+            std::sort(scored.begin(), scored.end(),
+                       [](const auto &a, const auto &b) { return a.first > b.first; });
+            const int k = std::min(m_vladTopK, static_cast<int>(scored.size()));
+            for (int rank = 0; rank < k; ++rank) {
+                const int candIdx = scored[static_cast<size_t>(rank)].second;
+                if (candIdx == bestIdx)
+                    continue; // already the one bestIdx points at below
+                const Keyframe &cand = m_keyframeHistory[candIdx];
+                if (cand.localMapPoints.empty())
+                    continue;
+                std::vector<cv::DMatch> probeMatches;
+                const bool haveMatches = matchDescriptors(cand.localMapDescriptors, newKf.descriptors, probeMatches);
+                if (!haveMatches || static_cast<int>(probeMatches.size()) < kLoopMinPnpInliers) {
+                    std::fprintf(stderr,
+                                  "[loop][vlad-topk-diag] kf#%d(frame=%d) probe kf#%d(frame=%d) (score=%.4f, rank %d): "
+                                  "matches=%zu < min=%d -- SKIP\n",
+                                  static_cast<int>(newKeyframeIndex), newKf.frameIndex, candIdx, cand.frameIndex,
+                                  scored[static_cast<size_t>(rank)].first,
+                                  rank, probeMatches.size(), kLoopMinPnpInliers);
+                    continue;
+                }
+                std::vector<cv::Point3f> probeObj;
+                std::vector<cv::Point2f> probeImg;
+                probeObj.reserve(probeMatches.size());
+                probeImg.reserve(probeMatches.size());
+                for (const auto &m : probeMatches) {
+                    probeObj.push_back(cand.localMapPoints[m.queryIdx]);
+                    probeImg.push_back(newKf.keypoints[m.trainIdx].pt);
+                }
+                const cv::Mat probeK = m_intrinsics.toMat();
+                cv::Mat probeRvec, probeT;
+                std::vector<int> probeInliers;
+                bool probeOk = false;
+                try {
+                    probeOk = cv::solvePnPRansac(probeObj, probeImg, probeK, cv::Mat(), probeRvec, probeT, false,
+                                                   200, 8.0f, 0.99, probeInliers, cv::SOLVEPNP_P3P);
+                } catch (const cv::Exception &) {
+                    probeOk = false;
+                }
+                std::fprintf(stderr,
+                              "[loop][vlad-topk-diag] kf#%d(frame=%d) probe kf#%d(frame=%d) (score=%.4f, rank %d): matches=%zu "
+                              "pnpOk=%d inliers=%zu (need>=%d)\n",
+                              static_cast<int>(newKeyframeIndex), newKf.frameIndex, candIdx, cand.frameIndex,
+                              scored[static_cast<size_t>(rank)].first,
+                              rank, probeMatches.size(), probeOk, probeInliers.size(), kLoopMinPnpInliers);
+                if (probeOk && static_cast<int>(probeInliers.size()) >= kLoopMinPnpInliers) {
+                    std::fprintf(stderr,
+                                  "[loop][vlad-topk] kf#%d switching candidate kf#%d (score=%.4f, rank %d) -> "
+                                  "kf#%d (score=%.4f, rank %d) -- PnP inliers=%zu\n",
+                                  static_cast<int>(newKeyframeIndex), bestIdx, bestVladScore, 0, candIdx,
+                                  scored[static_cast<size_t>(rank)].first, rank, probeInliers.size());
+                    bestIdx = candIdx;
+                    break;
+                }
+            }
+        }
     }
     // DBoW2 place-recognition scoring (see setDbowLoopClosureEnabled()) when
     // available, replacing just this candidate-selection step -- everything
@@ -5654,17 +5818,40 @@ void SlamWorker::tryLoopClosure(size_t newKeyframeIndex)
     // keyframe's own locally-triangulated 3D points -- a measurement
     // independent of everything accumulated along the path in between.
     std::vector<cv::DMatch> pnpMatches;
-    if (!matchDescriptors(oldKf.localMapDescriptors, newKf.descriptors, pnpMatches) ||
-        static_cast<int>(pnpMatches.size()) < kLoopMinPnpInliers)
-        return;
+    const bool plainMatchOk = matchDescriptors(oldKf.localMapDescriptors, newKf.descriptors, pnpMatches) &&
+                               static_cast<int>(pnpMatches.size()) >= kLoopMinPnpInliers;
 
     std::vector<cv::Point3f> objectPoints;
     std::vector<cv::Point2f> imagePoints;
-    objectPoints.reserve(pnpMatches.size());
-    imagePoints.reserve(pnpMatches.size());
-    for (const auto &m : pnpMatches) {
-        objectPoints.push_back(oldKf.localMapPoints[m.queryIdx]);
-        imagePoints.push_back(newKf.keypoints[m.trainIdx].pt);
+    std::vector<long long> oldLandmarkIds;
+    if (plainMatchOk) {
+        objectPoints.reserve(pnpMatches.size());
+        imagePoints.reserve(pnpMatches.size());
+        oldLandmarkIds.reserve(pnpMatches.size());
+        for (const auto &m : pnpMatches) {
+            objectPoints.push_back(oldKf.localMapPoints[m.queryIdx]);
+            imagePoints.push_back(newKf.keypoints[m.trainIdx].pt);
+            oldLandmarkIds.push_back(oldKf.localMapPointIds[static_cast<size_t>(m.queryIdx)]);
+        }
+    } else if (m_asiftFallbackEnabled) {
+        // Cooldown: the same bestIdx candidate is often re-picked for many
+        // consecutive new-keyframe insertions in a row (measured: ~17
+        // keyframes / ~140 frames straight on one seq07 revisit) while the
+        // geometry hasn't changed enough for the outcome to differ --
+        // without this, the (expensive, disk-read + 4-tilt-escalation)
+        // fallback re-pays that full cost on every single one of those
+        // insertions. Only retry a given bestIdx once every
+        // kAsiftFallbackCooldownKeyframes new keyframes.
+        constexpr size_t kAsiftFallbackCooldownKeyframes = 5;
+        const auto lastTriedIt = m_asiftFallbackLastTriedKeyframe.find(bestIdx);
+        const bool onCooldown = lastTriedIt != m_asiftFallbackLastTriedKeyframe.end() &&
+                                 newKeyframeIndex - lastTriedIt->second < kAsiftFallbackCooldownKeyframes;
+        if (onCooldown || !tryAsiftFallbackMatch(oldKf, objectPoints, imagePoints, oldLandmarkIds)) {
+            m_asiftFallbackLastTriedKeyframe[bestIdx] = newKeyframeIndex;
+            return;
+        }
+    } else {
+        return;
     }
 
     const cv::Mat K = m_intrinsics.toMat();
@@ -5693,9 +5880,9 @@ void SlamWorker::tryLoopClosure(size_t newKeyframeIndex)
     std::unordered_set<long long> loopVerifiedIds;
     loopVerifiedIds.reserve(inliers.size());
     for (int idx : inliers) {
-        const long long id = oldKf.localMapPointIds[static_cast<size_t>(pnpMatches[idx].queryIdx)];
+        const long long id = oldLandmarkIds[static_cast<size_t>(idx)];
         m_landmarkObservations[id].emplace_back(static_cast<int>(newKeyframeIndex),
-                                                  newKf.keypoints[pnpMatches[idx].trainIdx].pt);
+                                                  imagePoints[static_cast<size_t>(idx)]);
         loopVerifiedIds.insert(id);
     }
 
@@ -6212,6 +6399,20 @@ bool SlamWorker::recoverViaEpipolar(const std::vector<cv::KeyPoint> &kps, const 
         // exists to bound how far a *guess* can run away over many stale
         // frames, which doesn't apply to an actual measurement.
         trel = trel * oxtsDist;
+    } else if (m_epipolarLinearTrendScaleEnabled && m_recentStepDistances.size() >= 2) {
+        // Item 50 alternative: extrapolate the two-point linear trend --
+        // see setEpipolarLinearTrendScaleEnabled()'s doc comment.
+        const double d1 = m_recentStepDistances[m_recentStepDistances.size() - 2];
+        const double d2 = m_recentStepDistances.last();
+        const double slope = d2 - d1;
+        double totalDist = 0.0;
+        for (int i = 1; i <= framesElapsed; ++i)
+            totalDist += std::max(0.0, d2 + slope * i);
+        trel = trel * totalDist;
+    } else if (m_epipolarLastStepScaleEnabled && !m_recentStepDistances.isEmpty()) {
+        // Item 50: the single most-recently-measured real step, no
+        // smoothing -- see setEpipolarLastStepScaleEnabled()'s doc comment.
+        trel = trel * (m_recentStepDistances.last() * framesElapsed);
     } else if (m_avgStepScale > 0.0) {
         trel = trel * (m_avgStepScale * framesElapsed);
     }
@@ -6609,6 +6810,7 @@ void SlamWorker::processNext()
 
     cv::Mat gray;
     cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+    m_currentFrameGray = gray; // see tryAsiftFallbackMatch()'s doc comment
 
     cv::Mat detectGray;
     cv::resize(gray, detectGray, cv::Size(), m_detectionScale, m_detectionScale, cv::INTER_AREA);
